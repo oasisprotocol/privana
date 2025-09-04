@@ -8,7 +8,7 @@ from web3.middleware import ExtraDataToPOAMiddleware
 logger = logging.getLogger(__name__)
 
 
-class BlockchainService:
+class Blockchain:
     """Service for blockchain interactions."""
     
     def __init__(self, rpc_url: str = "https://mainnet.base.org"):
@@ -55,17 +55,17 @@ class BlockchainService:
         return Web3.to_checksum_address(address)
 
 
-blockchain_service: Optional[BlockchainService] = None
+blockchain: Optional[Blockchain] = None
 
 
-def get_blockchain_service() -> BlockchainService:
+def get_blockchain() -> Blockchain:
     """
-    Get or create blockchain service instance.
+    Get or create blockchain instance.
     
     Returns:
-        BlockchainService instance
+        Blockchain instance
     """
-    global blockchain_service
-    if blockchain_service is None:
-        blockchain_service = BlockchainService()
-    return blockchain_service
+    global blockchain
+    if blockchain is None:
+        blockchain = Blockchain()
+    return blockchain
