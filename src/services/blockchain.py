@@ -4,6 +4,8 @@ import logging
 from typing import Optional
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
+from .erc20 import ERC20Token
+from src.constants.contracts import BASE_MAINNET_RPC, CONTRACTS
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +13,7 @@ logger = logging.getLogger(__name__)
 class Blockchain:
     """Service for blockchain interactions."""
     
-    def __init__(self, rpc_url: str = "https://mainnet.base.org"):
+    def __init__(self, rpc_url: str = BASE_MAINNET_RPC):
         """
         Initialize blockchain service.
         
@@ -27,6 +29,9 @@ class Blockchain:
         logger.info(f"Connected to Base mainnet at {rpc_url}")
         logger.info(f"Chain ID: {self.w3.eth.chain_id}")
         logger.info(f"Latest block: {self.w3.eth.block_number}")
+        
+        self.usdc = ERC20Token(self.w3, CONTRACTS["USDC"])
+        logger.info(f"USDC contract initialized at {CONTRACTS['USDC']}")
     
     def is_valid_address(self, address: str) -> bool:
         """
@@ -53,6 +58,18 @@ class Blockchain:
         if not self.is_valid_address(address):
             return None
         return Web3.to_checksum_address(address)
+    
+    def get_usdc_balance(self, address: str) -> str:
+        """
+        Get USDC balance for address.
+        
+        Args:
+            address: User wallet address
+            
+        Returns:
+            USDC balance as formatted string
+        """
+        return self.usdc.get_balance(address)
 
 
 blockchain: Optional[Blockchain] = None

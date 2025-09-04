@@ -3,6 +3,7 @@
 import logging
 from fastapi import APIRouter, HTTPException, Path
 from pydantic import BaseModel
+from src.services.blockchain import get_blockchain
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,27 @@ async def get_balance(user_address: str = Path(..., description="User's wallet a
     """
     logger.info(f"Getting balance for user: {user_address}")
     
-    return {
-        "userAddress": user_address,
-        "balance": "0",
-        "message": "Balance retrieved successfully"
-    }
+    try:
+        blockchain = get_blockchain()
+        
+        if not blockchain.is_valid_address(user_address):
+            raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+        
+        checksum_address = blockchain.get_checksum_address(user_address)
+        balance = blockchain.get_usdc_balance(checksum_address)
+        
+        return {
+            "userAddress": checksum_address,
+            "balance": balance,
+            "token": "USDC",
+            "chain": "Base",
+            "message": "Balance retrieved successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving balance for {user_address}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve balance")
 
 
 @router.post("/authorize")
