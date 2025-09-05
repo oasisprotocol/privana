@@ -1,0 +1,11 @@
+services:
+  accounting-module:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    ports:
+      - "8000:8000"
+    annotations:
+      net.oasis.proxy.ports.8000.mode: terminate-tls
+    restart: always
