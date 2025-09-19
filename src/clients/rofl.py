@@ -1,13 +1,11 @@
-"""
-ROFL client for key management and transaction submission.
+"""ROFL client helpers for key management and transaction submission."""
 
-This module provides functionality for interacting with the ROFL (Remote Oracle Function Layer)
-app daemon to manage cryptographic keys and handle transaction signing.
-"""
+import logging
+from typing import Any, Dict
 
 import httpx
-import logging
 from eth_account import Account
+from web3.types import TxParams
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +90,67 @@ class RoflAppdClient:
         except Exception as e:
             logger.error(f"Error generating keypair: {e}")
             raise
+
+    def submit_tx(self, tx: TxParams, encrypt: bool = False) -> str:
+        """Submit a transaction to the ROFL daemon for signing and relay."""
+
+        if "to" not in tx or "data" not in tx:
+            raise ValueError("Transaction must include 'to' and 'data' fields")
+
+        def _as_int(value: Any, default: int = 0) -> int:
+            if value is None:
+                return default
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value, 0)
+                except ValueError as exc:  # pragma: no cover - defensive branch
+                    raise ValueError(f"Expected numeric value, received {value}") from exc
+            if isinstance(value, bytes):
+                return int.from_bytes(value, byteorder="big")
+            return int(value)
+
+        def _strip_0x(value: Any) -> str:
+            if isinstance(value, bytes):
+                value = value.hex()
+            value_str = str(value)
+            return value_str[2:] if value_str.startswith("0x") else value_str
+
+        gas_limit = tx.get("gas") or tx.get("gasLimit") or tx.get("gas_limit")
+
+        payload: Dict[str, Any] = {
+            "tx": {
+                "kind": "eth",
+                "data": {
+                    "gas_limit": _as_int(gas_limit),
+                    "to": _strip_0x(tx["to"]),
+                    "value": _as_int(tx.get("value")),
+                    "data": _strip_0x(tx["data"]),
+                },
+            },
+            "encrypt": encrypt,
+        }
+
+        logger.info(
+            "Submitting transaction via ROFL to %s with gas %s",
+            tx["to"],
+            tx.get("gas"),
+        )
+
+        response = self._client.post(
+            "http://localhost/rofl/v1/tx/sign-submit", json=payload, timeout=None
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        submission_id = result.get("data")
+
+        if not submission_id:
+            raise ValueError(f"Unexpected ROFL response payload: {result}")
+
+        logger.info("ROFL submission id: %s", submission_id)
+        return submission_id
 
 def get_keypair(key_id: str = ACCOUNTING_SERVICE_KEY):
     """Get a keypair using the RoflAppdClient.
