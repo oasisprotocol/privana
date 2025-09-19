@@ -11,7 +11,10 @@ from src.config import load_settings
 
 logger = logging.getLogger(__name__)
 
+settings = load_settings()
+
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger().setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
 
 
 @asynccontextmanager
@@ -29,9 +32,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Accounting Module API",
-    description="Accounting service module for blockchain applications",
+    description="Accounting service module for ROFL apps",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -47,12 +50,11 @@ app.include_router(router)
 
 if __name__ == "__main__":
     import uvicorn
-    
-    settings = load_settings()
+
     uvicorn.run(
         "src.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=settings.environment.lower() == "development",
+        log_level=settings.log_level.lower(),
     )

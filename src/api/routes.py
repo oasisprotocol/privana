@@ -1,150 +1,166 @@
-"""API routes for Accounting Module service."""
+"""FastAPI routes exposing the Accounting module flows."""
 
 import logging
-from fastapi import APIRouter, HTTPException, Path
-from pydantic import BaseModel
-from src.services.blockchain import get_blockchain
+from typing import Dict
+
+from fastapi import APIRouter, HTTPException
+
+from src.models.accounting import (
+    DepositQuoteRequest,
+    DepositQuoteResponse,
+    IncludeDepositRequest,
+    IncludeDepositResponse,
+    LockFundsRequest,
+    TransactionSubmissionResponse,
+    TransferFundsRequest,
+    TransferLockedFundsRequest,
+    UnlockFundsRequest,
+    WithdrawalRequest,
+)
+from src.services.accounting_contract import (
+    SubmissionResult,
+    get_accounting_contract_service,
+)
+
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/v1/accounting", tags=["Accounting"])
+
+_service = get_accounting_contract_service()
 
 
-class AuthorizationRequest(BaseModel):
-    """Authorization request model."""
-    userAddress: str
-    amount: str
-    expiry: int
-    appId: str
-    signature: str
+def _wrap_submission(result: SubmissionResult) -> TransactionSubmissionResponse:
+    return TransactionSubmissionResponse(
+        submission_id=result.submission_id,
+        status=result.status,
+        detail=result.detail,
+    )
 
 
-class DebitRequest(BaseModel):
-    """Debit request model."""
-    userAddress: str
-    amount: str
-    authorizationId: str
+@router.post("/quotes/deposit", response_model=DepositQuoteResponse)
+async def create_deposit_quote(payload: DepositQuoteRequest) -> DepositQuoteResponse:
+    """Return deposit destination details for a user/token pair."""
 
-
-class CreditRequest(BaseModel):
-    """Credit request model."""
-    userAddress: str
-    amount: str
-    reason: str
-
-
-@router.get("/balance/{user_address}")
-async def get_balance(user_address: str = Path(..., description="User's wallet address")):
-    """
-    Get user balance.
-    
-    Args:
-        user_address: User's wallet address
-        
-    Returns:
-        User balance information
-    """
-    logger.info(f"Getting balance for user: {user_address}")
-    
     try:
-        blockchain = get_blockchain()
-        
-        if not blockchain.is_valid_address(user_address):
-            raise HTTPException(status_code=400, detail="Invalid Ethereum address")
-        
-        checksum_address = blockchain.get_checksum_address(user_address)
-        balance = blockchain.get_usdc_balance(checksum_address)
-        
-        return {
-            "userAddress": checksum_address,
-            "balance": balance,
-            "token": "USDC",
-            "chain": "Base",
-            "message": "Balance retrieved successfully"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving balance for {user_address}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve balance")
+        quote: Dict = _service.deposit_quote(payload.user_address, payload.token_id)
+        return DepositQuoteResponse(**quote)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/authorize")
-async def request_authorization(request: AuthorizationRequest):
-    """
-    Request authorization from user.
-    
-    Args:
-        request: Authorization request containing user address, amount, expiry, appId, and signature
-        
-    Returns:
-        Authorization confirmation
-    """
-    logger.info(f"Processing authorization request for user: {request.userAddress}")
-    
+@router.post("/deposits/native", response_model=IncludeDepositResponse)
+async def include_native_deposit(payload: IncludeDepositRequest) -> IncludeDepositResponse:
+    """Submit a native token deposit inclusion transaction."""
+
+    try:
+        result = _service.include_native_deposit(payload.dict())
+        return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.exception("Failed to submit native deposit inclusion")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/deposits/erc20", response_model=IncludeDepositResponse)
+async def include_erc20_deposit(payload: IncludeDepositRequest) -> IncludeDepositResponse:
+    """Submit an ERC20 deposit inclusion transaction."""
+
+    try:
+        result = _service.include_erc20_deposit(payload.dict())
+        return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to submit ERC20 deposit inclusion")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/lock", response_model=TransactionSubmissionResponse)
+async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse:
+    """Lock user funds for a service with a signed authorization."""
+
+    try:
+        submission = _service.lock_funds(payload.dict())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to lock funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/transfer", response_model=TransactionSubmissionResponse)
+async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmissionResponse:
+    """Transfer funds between accounting balances using a user signature."""
+
+    try:
+        submission = _service.transfer_funds(payload.dict())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to transfer funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/transfer-locked", response_model=TransactionSubmissionResponse)
+async def transfer_locked_funds(payload: TransferLockedFundsRequest) -> TransactionSubmissionResponse:
+    """Transfer locked funds based on a casino service signature."""
+
+    try:
+        submission = _service.transfer_locked_funds(payload.dict())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to transfer locked funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/unlock", response_model=TransactionSubmissionResponse)
+async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResponse:
+    """Unlock funds when lock expiry has passed."""
+
+    try:
+        submission = _service.unlock_funds(payload.dict())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to unlock funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/withdrawals", response_model=TransactionSubmissionResponse)
+async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissionResponse:
+    """Commit a withdrawal request by validating the user's signature."""
+
+    try:
+        submission = _service.withdraw(payload.dict())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to submit withdrawal request")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get("/balances/{user_address}/{token_id}")
+async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
+    """Return a mocked balance view for clients during prototyping."""
+
+    checksum_user = user_address
+    try:
+        checksum_user = _service.w3.to_checksum_address(user_address)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user address") from None
+
     return {
-        "userAddress": request.userAddress,
-        "amount": request.amount,
-        "expiry": request.expiry,
-        "appId": request.appId,
-        "authorizationId": "auth_placeholder_id",
-        "status": "authorized",
-        "message": "Authorization successful"
+        "user_address": checksum_user,
+        "token_id": token_id.lower(),
+        "balance": "0", # TODO: Implement balance retrieval
+        "token_symbol": _service.default_token_symbol,
+        "chain_id": str(_service.chain_id),
     }
-
-
-@router.post("/debit")
-async def execute_debit(request: DebitRequest):
-    """
-    Execute debit transaction.
-    
-    Args:
-        request: Debit request containing user address, amount, and authorization ID
-        
-    Returns:
-        Debit transaction result
-    """
-    logger.info(f"Processing debit for user: {request.userAddress}, amount: {request.amount}")
-    
-    return {
-        "userAddress": request.userAddress,
-        "amount": request.amount,
-        "authorizationId": request.authorizationId,
-        "transactionId": "tx_placeholder_id",
-        "status": "completed",
-        "message": "Debit executed successfully"
-    }
-
-
-@router.post("/credit")
-async def execute_credit(request: CreditRequest):
-    """
-    Execute credit transaction.
-    
-    Args:
-        request: Credit request containing user address, amount, and reason
-        
-    Returns:
-        Credit transaction result
-    """
-    logger.info(f"Processing credit for user: {request.userAddress}, amount: {request.amount}")
-    
-    return {
-        "userAddress": request.userAddress,
-        "amount": request.amount,
-        "reason": request.reason,
-        "transactionId": "tx_placeholder_id",
-        "status": "completed",
-        "message": "Credit executed successfully"
-    }
-
-
-@router.get("/health")
-async def health_check():
-    """
-    Health check endpoint.
-    
-    Returns:
-        Service health status
-    """
-    return {"status": "healthy", "service": "accounting-module"}
