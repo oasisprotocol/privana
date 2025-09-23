@@ -72,6 +72,11 @@ class AccountingContractService:
         self.rofl_client = RoflAppdClient()
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, Web3] = {}
+        self.default_token_symbol = "ETH"
+        self.chain_names = {
+            8453: "Base",
+            84532: "Base Sepolia"
+        }
 
     # ------------------------------------------------------------------
     # Helper utilities
@@ -216,23 +221,48 @@ class AccountingContractService:
             is_native=is_native,
         )
 
-    def deposit_quote(self, user_address: str, token_id: str) -> Dict[str, str | int]:
-        """Generate a deposit quote for UI usage."""
+    def deposit_quote(self, user_address: str, token_id: str, amount: int) -> Dict[str, Any]:
+        """Generate a deposit quote with transaction details for UI usage."""
 
         checksum_user = self._require_address(user_address, "user_address")
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
         token_norm = token_hex.hex()
         deposit_address = self._get_deposit_address()
-        instructions = (
-            "Send the desired amount to the deposit address on the source chain."
-            "This address is controlled within the ROFL enclave."
-        )
+
+        # TODO: Determine chain for the deposit based on the token_id
+        chain_id = 8453
+
+        is_native = token_norm == "0x" + "0" * 64
+
+        transaction_data = {
+            "to": deposit_address,
+            "chain_id": chain_id
+        }
+
+        if is_native:
+            transaction_data["value"] = hex(amount)
+            transaction_data["data"] = "0x"
+            instructions = (
+                "Send ETH to the deposit address on Base chain. "
+                "Use the provided transaction data to construct your transaction."
+            )
+        else:
+            transaction_data["value"] = "0x0"
+            function_selector = "a9059cbb"
+            padded_address = deposit_address[2:].lower().rjust(64, '0')
+            padded_amount = hex(amount)[2:].rjust(64, '0')
+            transaction_data["data"] = "0x" + function_selector + padded_address + padded_amount
+            instructions = (
+                "Call the transfer function on the ERC20 token contract with the deposit address. "
+                "Use the provided transaction data to construct your transaction."
+            )
 
         return {
             "user_address": checksum_user,
             "token_id": token_norm,
+            "amount": amount,
             "deposit_address": deposit_address,
-            "chain_id": self.chain_id,
+            "transaction": transaction_data,
             "instructions": instructions,
         }
 
@@ -336,6 +366,43 @@ class AccountingContractService:
             lock_index,
         )
         return self._submit(fn._encode_transaction_data())
+
+    def include_deposit(self, payload: Dict) -> SubmissionResult:
+        """Unified method for including both native and ERC20 deposits."""
+        token_id = payload.get("token_id", "")
+
+        try:
+            token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+            is_native = token_hex.hex() == "0x" + "0" * 64
+        except (ValueError, Exception):
+            is_native = False
+
+        if is_native:
+            return self.include_native_deposit(payload)
+        else:
+            return self.include_erc20_deposit(payload)
+
+    def get_locked_funds(
+        self, user_address: str, service_address: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get locked funds for a user, optionally filtered by service address.
+
+        Note: This is a mock implementation. In production, this would query
+        the actual contract state.
+        """
+        checksum_user = self._require_address(user_address, "user_address")
+
+        # TODO: Get locked funds from the contract
+        locks = []
+
+        response = {
+            "user_address": checksum_user,
+            "service_address": service_address,
+            "locks": locks,
+            "total_locked": sum(lock.get("amount", 0) for lock in locks)
+        }
+
+        return response
 
     def withdraw(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")

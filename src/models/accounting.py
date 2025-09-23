@@ -23,10 +23,22 @@ class DepositQuoteRequest(BaseModel):
     token_id: str = Field(
         ..., description="Bytes32 token identifier (hex string)", min_length=4
     )
+    amount: int = Field(
+        ..., description="Amount to deposit in token's base units (e.g. wei for ETH)", gt=0
+    )
 
     @field_validator("user_address", "token_id")
     def _lowercase(cls, value: str) -> str:  # noqa: D401 - simple normaliser
         return value.lower()
+
+
+class TransactionData(BaseModel):
+    """Transaction data for executing a deposit."""
+
+    to: str = Field(..., description="Destination address for the transaction")
+    value: str = Field(..., description="Value to send in wei (as hex string)")
+    data: str = Field(..., description="Transaction data (hex string)")
+    chain_id: int = Field(..., description="Chain ID for the transaction")
 
 
 class DepositQuoteResponse(BaseModel):
@@ -34,10 +46,9 @@ class DepositQuoteResponse(BaseModel):
 
     user_address: str
     token_id: str
+    amount: int
     deposit_address: str
-    chain_id: int
-    chain_name: str
-    token_symbol: str
+    transaction: TransactionData
     instructions: str
 
 
@@ -149,3 +160,24 @@ class TransactionSubmissionResponse(BaseModel):
     submission_id: str
     status: str
     detail: Optional[str] = None
+
+
+class LockInfo(BaseModel):
+    """Information about a single fund lock."""
+
+    lock_index: int
+    user_address: str
+    service_address: str
+    token_id: str
+    amount: int
+    expiry: int
+    is_expired: bool
+
+
+class LockedFundsResponse(BaseModel):
+    """Response containing user's locked funds information."""
+
+    user_address: str
+    service_address: Optional[str] = Field(None, description="Filter by service address if provided")
+    locks: list[LockInfo]
+    total_locked: int

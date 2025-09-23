@@ -6,22 +6,26 @@ Requests and responses are JSON. Hex strings must include the `0x` prefix. Signa
 
 ## Endpoints
 
-### POST `/quotes/deposit`
-Generate deposit instructions for a user/token pair.
+### POST `/quote/deposit`
+Generate deposit instructions and transaction data for a user/token/amount combination.
 - **Request body**
   - `user_address` (string, required) – EVM address of the user.
   - `token_id` (string, required) – Bytes32 token identifier (hex).
+  - `amount` (integer, required) – Amount to deposit in base units (e.g., wei for ETH).
 - **Response body**
   - `user_address` (string) – Checksummed address.
   - `token_id` (string) – Normalised bytes32 token identifier.
-  - `deposit_address` (string) – Sapphire-controlled destination address.
-  - `chain_id` (integer) – Deposit chain ID.
-  - `chain_name` (string) – Human-readable chain name.
-  - `token_symbol` (string) – Token ticker.
+  - `amount` (integer) – Amount to deposit.
+  - `deposit_address` (string) – ROFL-controlled destination address.
+  - `transaction` (object) – Transaction data to execute:
+    - `to` (string) – Destination address.
+    - `value` (string) – Value in wei (hex).
+    - `data` (string) – Transaction data (hex).
+    - `chain_id` (integer) – Chain ID for the transaction.
   - `instructions` (string) – Deposit guidance for clients.
 
-### POST `/deposits/native`
-Submit a native-token deposit inclusion transaction.
+### POST `/deposits`
+Submit a deposit inclusion transaction (automatically detects native/ERC20 based on token_id).
 - **Request body**
   - `user_address` (string, required) – Depositor address.
   - `token_id` (string, required) – Bytes32 token identifier (hex).
@@ -33,13 +37,8 @@ Submit a native-token deposit inclusion transaction.
   - `submission_id` (string) – ROFL submission identifier.
   - `status` (string) – Submission status, e.g. `submitted`.
 
-### POST `/deposits/erc20`
-Submit an ERC-20 deposit inclusion transaction (same payload as native).
-- **Request body** – identical to `/deposits/native`.
-- **Response body** – identical to `/deposits/native`.
-
 ### POST `/funds/lock`
-Lock user funds for a service using the user’s EIP-712 signature.
+Lock user funds for a service using the user's EIP-712 signature.
 - **Request body**
   - `user_address` (string, required).
   - `service_address` (string, required).
@@ -52,8 +51,25 @@ Lock user funds for a service using the user’s EIP-712 signature.
   - `status` (string).
   - `detail` (string, optional).
 
+### GET `/funds/locked/{user_address}`
+Get locked funds for a user, optionally filtered by service address.
+- **Query parameters**
+  - `service_address` (string, optional) – Filter locks by service address.
+- **Response body**
+  - `user_address` (string) – Checksummed user address.
+  - `service_address` (string, optional) – Service address filter if provided.
+  - `locks` (array) – List of lock information:
+    - `lock_index` (integer) – Index of the lock.
+    - `user_address` (string) – Owner of the lock.
+    - `service_address` (string) – Service that locked the funds.
+    - `token_id` (string) – Token identifier.
+    - `amount` (integer) – Locked amount.
+    - `expiry` (integer) – Unix timestamp when lock expires.
+    - `is_expired` (boolean) – Whether the lock has expired.
+  - `total_locked` (integer) – Total amount locked across all locks.
+
 ### POST `/funds/transfer`
-Transfer balances between users with the originator’s EIP-712 signature.
+Transfer balances between users with the originator's EIP-712 signature.
 - **Request body**
   - `user_address` (string, required).
   - `to_address` (string, required).
@@ -64,7 +80,7 @@ Transfer balances between users with the originator’s EIP-712 signature.
 - **Response body** – same structure as `/funds/lock`.
 
 ### POST `/funds/transfer-locked`
-Consume or release locked funds using the service’s EIP-712 signature.
+Consume or release locked funds using the service's EIP-712 signature.
 - **Request body**
   - `user_address` (string, required) – Owner of the lock.
   - `lock_index` (integer, required).
@@ -80,8 +96,8 @@ Unlock an expired lock without a signature.
   - `lock_index` (integer, required).
 - **Response body** – same structure as `/funds/lock`.
 
-### POST `/withdrawals`
-Initiate a withdrawal based on the user’s EIP-712 signature. The service verifies the signature, generates the withdrawal transaction via the contract, and relays it to the chain RPC mapped to the token.
+### POST `/withdraw`
+Initiate a withdrawal based on the user's EIP-712 signature. The service verifies the signature, generates the withdrawal transaction via the contract, and relays it to the chain RPC mapped to the token.
 - **Request body**
   - `user_address` (string, required).
   - `token_id` (string, required).
@@ -98,5 +114,5 @@ Prototype endpoint that returns placeholder balance data.
   - `user_address` (string) – Checksummed address.
   - `token_id` (string).
   - `balance` (string) – Currently always `"0"`.
-  - `token_symbol` (string) – Stubbed symbol value.
+  - `token_symbol` (string) – Token symbol.
   - `chain_id` (string) – Default Sapphire chain ID.
