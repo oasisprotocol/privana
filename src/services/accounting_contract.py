@@ -382,6 +382,15 @@ class AccountingContractService:
         else:
             return self.include_erc20_deposit(payload)
 
+    def get_balance(self, user_address: str, token_id: str) -> int:
+        """Get user balance for a specific token from the contract."""
+        checksum_user = self._require_address(user_address, "user_address")
+        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+
+        contract_reader = self._get_reader_contract()
+        balance = contract_reader.functions.balances(checksum_user, bytes(token_hex)).call()
+        return balance
+
     def get_locked_funds(
         self, user_address: str, service_address: Optional[str] = None
     ) -> Dict[str, Any]:

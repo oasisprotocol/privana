@@ -157,18 +157,21 @@ async def get_locked_funds(
 
 @router.get("/balances/{user_address}/{token_id}")
 async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
-    """Return a mocked balance view for clients during prototyping."""
+    """Get the user's balance for a specific token from the contract."""
 
-    checksum_user = user_address
     try:
+        balance = _service.get_balance(user_address, token_id)
         checksum_user = _service.w3.to_checksum_address(user_address)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid user address") from None
 
-    return {
-        "user_address": checksum_user,
-        "token_id": token_id.lower(),
-        "balance": "0", # TODO: Implement balance retrieval
-        "token_symbol": _service.default_token_symbol,
-        "chain_id": str(_service.chain_id),
-    }
+        return {
+            "user_address": checksum_user,
+            "token_id": token_id.lower(),
+            "balance": str(balance),
+            "token_symbol": _service.default_token_symbol,
+            "chain_id": str(_service.chain_id),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get balance")
+        raise HTTPException(status_code=500, detail="Failed to retrieve balance") from exc

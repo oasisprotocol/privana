@@ -109,10 +109,10 @@ Initiate a withdrawal based on the user's EIP-712 signature. The service verifie
   - `detail` (string, optional) – Metadata such as `chain_id` and `token_address`.
 
 ### GET `/balances/{user_address}/{token_id}`
-Prototype endpoint that returns placeholder balance data.
+Get the user's balance for a specific token from the contract.
 - **Response body**
   - `user_address` (string) – Checksummed address.
-  - `token_id` (string).
-  - `balance` (string) – Currently always `"0"`.
+  - `token_id` (string) – Token identifier.
+  - `balance` (string) – User's balance in base units (wei for ETH).
   - `token_symbol` (string) – Token symbol.
   - `chain_id` (string) – Default Sapphire chain ID.
