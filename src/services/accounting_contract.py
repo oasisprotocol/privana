@@ -394,21 +394,36 @@ class AccountingContractService:
     def get_locked_funds(
         self, user_address: str, service_address: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Get locked funds for a user, optionally filtered by service address.
-
-        Note: This is a mock implementation. In production, this would query
-        the actual contract state.
-        """
+        """Get locked funds for a user, optionally filtered by service address."""
         checksum_user = self._require_address(user_address, "user_address")
 
-        # TODO: Get locked funds from the contract
+        contract_reader = self._get_reader_contract()
+
+        fund_locks = contract_reader.functions.getUserLocks(checksum_user).call()
+
         locks = []
+        for i, lock in enumerate(fund_locks):
+            # FundLock struct: (serviceId, tokenId, amount, expiry)
+            lock_info = {
+                "lock_index": i,
+                "user_address": checksum_user,
+                "service_address": lock[0],
+                "token_id": "0x" + lock[1].hex(),
+                "amount": lock[2],
+                "expiry": lock[3],
+                "is_expired": lock[3] < self.w3.eth.get_block('latest')['timestamp'] if self.reader_w3 else False
+            }
+
+            if service_address is None or lock[0].lower() == service_address.lower():
+                locks.append(lock_info)
+
+        total_locked = sum(lock["amount"] for lock in locks)
 
         response = {
             "user_address": checksum_user,
             "service_address": service_address,
             "locks": locks,
-            "total_locked": sum(lock.get("amount", 0) for lock in locks)
+            "total_locked": total_locked
         }
 
         return response

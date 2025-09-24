@@ -371,4 +371,25 @@ ACCOUNTING_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "user", "type": "address"},
+        ],
+        "name": "getUserLocks",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "serviceId", "type": "address"},
+                    {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
+                    {"internalType": "uint256", "name": "amount", "type": "uint256"},
+                    {"internalType": "uint256", "name": "expiry", "type": "uint256"},
+                ],
+                "internalType": "struct FundLock[]",
+                "name": "",
+                "type": "tuple[]",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
