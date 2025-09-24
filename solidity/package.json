@@ -13,7 +13,8 @@
     "format:prettier": "prettier --write --plugin=prettier-plugin-solidity '*.json' '**/*.ts' '**/*.sol'",
     "format": "npm-run-all format:**",
     "build": "hardhat compile",
-    "test": "hardhat test --network sapphire-localnet"
+    "test": "hardhat test",
+    "coverage": "hardhat coverage"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^2.0.0",
@@ -43,5 +44,9 @@
     "ts-node": "^10.9.1",
     "typechain": "^8.3.2",
     "typescript": "^4.8.4"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "solidity-rlp": "^2.0.8"
   }
 }

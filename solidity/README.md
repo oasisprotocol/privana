@@ -31,3 +31,12 @@ Then, let tests use the Localnet network:
 ```shell
 npm run test --network sapphire-localnet
 ```
+
+## Registering and deploying
+
+```shell
+npx hardhat deploy --network sapphire-localnet
+npx hardhat addEVMNativeToken --network sapphire-localnet --chainid 1234 --address <deployed accounting address>
+```
+
+npx hardhat addEVMNativeToken --network sapphire-localnet --chainid 1234 --address 0x5FbDB2315678afecb367f032d93F642f64180aa3
