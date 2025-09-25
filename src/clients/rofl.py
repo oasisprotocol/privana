@@ -47,7 +47,7 @@ class RoflAppdClient:
         transport = httpx.HTTPTransport(uds=RoflAppdClient.ROFL_SOCKET_PATH)
         return httpx.Client(transport=transport)
     
-    def get_keypair(self, key_id: str):
+    def get_keypair(self, key_id: str = ACCOUNTING_SERVICE_KEY):
         """Generate a secp256k1 keypair using ROFL's key management.
         
         Args:

@@ -75,7 +75,6 @@ Transfer balances between users with the originator's EIP-712 signature.
   - `to_address` (string, required).
   - `token_id` (string, required).
   - `amount` (integer, required).
-  - `expiry` (integer, required).
   - `signature` (string, required) – User EIP-712 `Transfer` signature.
 - **Response body** – same structure as `/funds/lock`.
 

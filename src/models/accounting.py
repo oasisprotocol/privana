@@ -112,7 +112,6 @@ class TransferFundsRequest(BaseModel):
     to_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
-    expiry: int = Field(..., gt=0)
     signature: str
 
     @field_validator("token_id", "signature")
