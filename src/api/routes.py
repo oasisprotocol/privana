@@ -1,7 +1,7 @@
 """FastAPI routes exposing the Accounting module flows."""
 
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -11,6 +11,7 @@ from src.models.accounting import (
     IncludeDepositRequest,
     IncludeDepositResponse,
     LockFundsRequest,
+    LockedFundsResponse,
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
@@ -38,42 +39,32 @@ def _wrap_submission(result: SubmissionResult) -> TransactionSubmissionResponse:
     )
 
 
-@router.post("/quotes/deposit", response_model=DepositQuoteResponse)
+@router.post("/quote/deposit", response_model=DepositQuoteResponse)
 async def create_deposit_quote(payload: DepositQuoteRequest) -> DepositQuoteResponse:
-    """Return deposit destination details for a user/token pair."""
+    """Return deposit destination details and transaction data for a user/token/amount."""
 
     try:
-        quote: Dict = _service.deposit_quote(payload.user_address, payload.token_id)
+        quote: Dict = _service.deposit_quote(
+            payload.user_address,
+            payload.token_id,
+            payload.amount
+        )
         return DepositQuoteResponse(**quote)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/deposits/native", response_model=IncludeDepositResponse)
-async def include_native_deposit(payload: IncludeDepositRequest) -> IncludeDepositResponse:
-    """Submit a native token deposit inclusion transaction."""
+@router.post("/deposits", response_model=IncludeDepositResponse)
+async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositResponse:
+    """Submit a deposit inclusion transaction (automatically detects native/ERC20)."""
 
     try:
-        result = _service.include_native_deposit(payload.dict())
+        result = _service.include_deposit(payload.dict())
         return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - network errors
-        logger.exception("Failed to submit native deposit inclusion")
-        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
-
-
-@router.post("/deposits/erc20", response_model=IncludeDepositResponse)
-async def include_erc20_deposit(payload: IncludeDepositRequest) -> IncludeDepositResponse:
-    """Submit an ERC20 deposit inclusion transaction."""
-
-    try:
-        result = _service.include_erc20_deposit(payload.dict())
-        return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover
-        logger.exception("Failed to submit ERC20 deposit inclusion")
+        logger.exception("Failed to submit deposit inclusion")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
@@ -133,7 +124,7 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
-@router.post("/withdrawals", response_model=TransactionSubmissionResponse)
+@router.post("/withdraw", response_model=TransactionSubmissionResponse)
 async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissionResponse:
     """Commit a withdrawal request by validating the user's signature."""
 
@@ -147,20 +138,40 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
+@router.get("/funds/locked/{user_address}", response_model=LockedFundsResponse)
+async def get_locked_funds(
+    user_address: str,
+    service_address: Optional[str] = None
+) -> LockedFundsResponse:
+    """Get locked funds for a user, optionally filtered by service address."""
+
+    try:
+        result = _service.get_locked_funds(user_address, service_address)
+        return LockedFundsResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get locked funds")
+        raise HTTPException(status_code=500, detail="Failed to retrieve locked funds") from exc
+
+
 @router.get("/balances/{user_address}/{token_id}")
 async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
-    """Return a mocked balance view for clients during prototyping."""
+    """Get the user's balance for a specific token from the contract."""
 
-    checksum_user = user_address
     try:
+        balance = _service.get_balance(user_address, token_id)
         checksum_user = _service.w3.to_checksum_address(user_address)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid user address") from None
 
-    return {
-        "user_address": checksum_user,
-        "token_id": token_id.lower(),
-        "balance": "0", # TODO: Implement balance retrieval
-        "token_symbol": _service.default_token_symbol,
-        "chain_id": str(_service.chain_id),
-    }
+        return {
+            "user_address": checksum_user,
+            "token_id": token_id.lower(),
+            "balance": str(balance),
+            "token_symbol": _service.default_token_symbol,
+            "chain_id": str(_service.chain_id),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get balance")
+        raise HTTPException(status_code=500, detail="Failed to retrieve balance") from exc
