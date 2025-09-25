@@ -22,6 +22,7 @@ ACCOUNTING_ABI = [
         "name": "StringTooLong",
         "type": "error",
     },
+    {"inputs": [], "name": "UsedSignature", "type": "error"},
     {"inputs": [], "name": "recoverV_Error", "type": "error"},
     {
         "anonymous": False,
@@ -60,20 +61,20 @@ ACCOUNTING_ABI = [
         "type": "function",
     },
     {
-        "inputs": [],
-        "name": "deriveEVMKeypair",
+        "inputs": [{"internalType": "bytes", "name": "data", "type": "bytes"}],
+        "name": "decodeEVMErc20TokenData",
         "outputs": [
-            {
-                "components": [
-                    {"internalType": "address", "name": "addr", "type": "address"},
-                    {"internalType": "bytes32", "name": "secret", "type": "bytes32"},
-                ],
-                "internalType": "struct EVMKeypair",
-                "name": "kp",
-                "type": "tuple",
-            }
+            {"internalType": "uint256", "name": "chainId", "type": "uint256"},
+            {"internalType": "address", "name": "tokenAddress", "type": "address"},
         ],
-        "stateMutability": "nonpayable",
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "bytes", "name": "data", "type": "bytes"}],
+        "name": "decodeEVMNativeTokenData",
+        "outputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+        "stateMutability": "pure",
         "type": "function",
     },
     {
@@ -89,6 +90,23 @@ ACCOUNTING_ABI = [
             {"internalType": "uint256[]", "name": "extensions", "type": "uint256[]"},
         ],
         "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "chainId", "type": "uint256"},
+            {"internalType": "address", "name": "tokenAddress", "type": "address"},
+        ],
+        "name": "encodeEVMErc20TokenData",
+        "outputs": [{"internalType": "bytes", "name": "data", "type": "bytes"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+        "name": "encodeEVMNativeTokenData",
+        "outputs": [{"internalType": "bytes", "name": "data", "type": "bytes"}],
+        "stateMutability": "pure",
         "type": "function",
     },
     {
@@ -116,14 +134,13 @@ ACCOUNTING_ABI = [
         "inputs": [],
         "name": "getEVMDepositAddress",
         "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "stateMutability": "nonpayable",
+        "stateMutability": "view",
         "type": "function",
     },
     {
         "inputs": [
             {
                 "components": [
-                    {"internalType": "string", "name": "ticker", "type": "string"},
                     {
                         "internalType": "enum TokenType",
                         "name": "tokenType",
@@ -138,7 +155,59 @@ ACCOUNTING_ABI = [
         ],
         "name": "getTokenId",
         "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
-        "stateMutability": "pure",
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
+        "name": "getUserLocks",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "serviceId", "type": "address"},
+                    {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
+                    {"internalType": "uint256", "name": "amount", "type": "uint256"},
+                    {"internalType": "uint256", "name": "expiry", "type": "uint256"},
+                ],
+                "internalType": "struct FundLock[]",
+                "name": "",
+                "type": "tuple[]",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "userAddress", "type": "address"},
+            {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
+            {"internalType": "bytes", "name": "evmTransactionData", "type": "bytes"},
+            {
+                "components": [
+                    {
+                        "internalType": "bytes",
+                        "name": "rlpBlockHeader",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "bytes",
+                        "name": "transactionIndexRlp",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "bytes",
+                        "name": "transactionProofStack",
+                        "type": "bytes",
+                    },
+                ],
+                "internalType": "struct TransactionProof",
+                "name": "txProof",
+                "type": "tuple",
+            },
+        ],
+        "name": "includeEVMDeposit",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function",
     },
     {
@@ -229,10 +298,30 @@ ACCOUNTING_ABI = [
         "type": "function",
     },
     {
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "enum TokenType",
+                        "name": "tokenType",
+                        "type": "uint8",
+                    },
+                    {"internalType": "bytes", "name": "data", "type": "bytes"},
+                ],
+                "internalType": "struct TokenInfo",
+                "name": "info",
+                "type": "tuple",
+            }
+        ],
+        "name": "setTokenInfo",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
         "inputs": [{"internalType": "bytes32", "name": "tokenId", "type": "bytes32"}],
         "name": "tokens",
         "outputs": [
-            {"internalType": "string", "name": "ticker", "type": "string"},
             {"internalType": "enum TokenType", "name": "tokenType", "type": "uint8"},
             {"internalType": "bytes", "name": "data", "type": "bytes"},
         ],
@@ -245,7 +334,6 @@ ACCOUNTING_ABI = [
             {"internalType": "address", "name": "toAddress", "type": "address"},
             {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"internalType": "uint256", "name": "expiry", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
         "name": "transferFunds",
@@ -256,8 +344,8 @@ ACCOUNTING_ABI = [
     {
         "inputs": [
             {"internalType": "address", "name": "userAddress", "type": "address"},
-            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
             {"internalType": "address", "name": "toAddress", "type": "address"},
+            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
@@ -272,29 +360,6 @@ ACCOUNTING_ABI = [
             {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
         ],
         "name": "unlockFunds",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
-            {
-                "components": [
-                    {"internalType": "string", "name": "ticker", "type": "string"},
-                    {
-                        "internalType": "enum TokenType",
-                        "name": "tokenType",
-                        "type": "uint8",
-                    },
-                    {"internalType": "bytes", "name": "data", "type": "bytes"},
-                ],
-                "internalType": "struct TokenInfo",
-                "name": "newTokenInfo",
-                "type": "tuple",
-            },
-        ],
-        "name": "updateTokenInfo",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
@@ -322,10 +387,11 @@ ACCOUNTING_ABI = [
     },
     {
         "inputs": [
-            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
-            {"internalType": "address", "name": "toAddress", "type": "address"},
-            {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "address", "name": "serviceAddress", "type": "address"},
+            {"internalType": "address", "name": "userAddress", "type": "address"},
+            {"internalType": "address", "name": "toAddress", "type": "address"},
+            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
+            {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
         "name": "verifyTransferLockedSignature",
@@ -339,7 +405,6 @@ ACCOUNTING_ABI = [
             {"internalType": "address", "name": "toAddress", "type": "address"},
             {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"internalType": "uint256", "name": "expiry", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
         "name": "verifyTransferSignature",
@@ -369,27 +434,6 @@ ACCOUNTING_ABI = [
         "name": "withdrawFunds",
         "outputs": [{"internalType": "bytes", "name": "signedTx", "type": "bytes"}],
         "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"internalType": "address", "name": "user", "type": "address"},
-        ],
-        "name": "getUserLocks",
-        "outputs": [
-            {
-                "components": [
-                    {"internalType": "address", "name": "serviceId", "type": "address"},
-                    {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
-                    {"internalType": "uint256", "name": "amount", "type": "uint256"},
-                    {"internalType": "uint256", "name": "expiry", "type": "uint256"},
-                ],
-                "internalType": "struct FundLock[]",
-                "name": "",
-                "type": "tuple[]",
-            }
-        ],
-        "stateMutability": "view",
         "type": "function",
     },
 ]

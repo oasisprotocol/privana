@@ -151,9 +151,9 @@ class AccountingContractService:
         )
 
     def _get_deposit_address(self) -> str:
-        """Fetch or derive the ROFL-managed address for deposits."""
-        _, public_address = self.rofl_client.get_keypair()
-        return public_address
+        """Fetch the deposit address from the contract."""
+        contract_reader = self._get_reader_contract()
+        return contract_reader.functions.getEVMDepositAddress().call()
 
     def _get_reader_contract(self) -> Contract:
         if self.contract_reader is None:
@@ -195,25 +195,19 @@ class AccountingContractService:
 
     def _get_token_context(self, token: HexBytes) -> TokenContext:
         contract = self._get_reader_contract()
-        chain_hash, token_address_bytes, _ = contract.functions.tokens(bytes(token)).call()
-        chain_type, chain_identifier = contract.functions.chains(chain_hash).call()
+        token_type, token_data = contract.functions.tokens(bytes(token)).call()
 
-        if chain_type != 0:
-            raise ValueError("Unsupported chain type for withdrawal generation")
-
-        identifier_bytes = bytes(chain_identifier)
-        if len(identifier_bytes) == 0:
-            raise ValueError("Missing chain identifier for withdrawal generation")
-
-        chain_id = int.from_bytes(identifier_bytes, byteorder="big")
-
-        address_bytes = bytes(token_address_bytes)
-        is_native = len(address_bytes) == 0 or int.from_bytes(address_bytes, "big") == 0
-        token_address: Optional[ChecksumAddress] = None
-        if not is_native:
-            if len(address_bytes) != 20:
-                raise ValueError("Token address must be 20 bytes for ERC20 withdrawals")
-            token_address = _to_checksum("0x" + address_bytes.hex())
+        if token_type == 0:
+            chain_id = int.from_bytes(token_data[:32], byteorder="big")
+            token_address = None
+            is_native = True
+        elif token_type == 1:
+            chain_id = int.from_bytes(token_data[:32], byteorder="big")
+            token_address_bytes = token_data[32:52]
+            token_address = _to_checksum("0x" + token_address_bytes.hex())
+            is_native = False
+        else:
+            raise ValueError(f"Unsupported token type: {token_type}")
 
         return TokenContext(
             chain_id=chain_id,
@@ -324,7 +318,6 @@ class AccountingContractService:
         to_addr = self._require_address(payload["to_address"], "to_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
-        expiry = self._require_positive(payload["expiry"], "expiry")
         signature = self._require_hex(payload["signature"], "signature")
 
         fn = self.contract.functions.transferFunds(
@@ -332,7 +325,6 @@ class AccountingContractService:
             to_addr,
             token,
             amount,
-            expiry,
             signature,
         )
         return self._submit(fn._encode_transaction_data())
@@ -348,8 +340,8 @@ class AccountingContractService:
 
         fn = self.contract.functions.transferLockedFunds(
             user,
-            lock_index,
             to_addr,
+            lock_index,
             amount,
             signature,
         )
@@ -368,19 +360,21 @@ class AccountingContractService:
         return self._submit(fn._encode_transaction_data())
 
     def include_deposit(self, payload: Dict) -> SubmissionResult:
-        """Unified method for including both native and ERC20 deposits."""
-        token_id = payload.get("token_id", "")
+        """Unified method for including deposits using includeEVMDeposit."""
+        user = self._require_address(payload["user_address"], "user_address")
+        token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
+        tx_data = self._require_hex(
+            payload["evm_transaction_data"], "evm_transaction_data"
+        )
+        proof = self._build_tx_proof(payload)
 
-        try:
-            token_hex = self._require_hex(token_id, "token_id", expected_len=32)
-            is_native = token_hex.hex() == "0x" + "0" * 64
-        except (ValueError, Exception):
-            is_native = False
-
-        if is_native:
-            return self.include_native_deposit(payload)
-        else:
-            return self.include_erc20_deposit(payload)
+        fn = self.contract.functions.includeEVMDeposit(
+            user,
+            token,
+            tx_data,
+            proof,
+        )
+        return self._submit(fn._encode_transaction_data())
 
     def get_balance(self, user_address: str, token_id: str) -> int:
         """Get user balance for a specific token from the contract."""
@@ -434,41 +428,22 @@ class AccountingContractService:
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
 
-        contract_reader = self._get_reader_contract()
+        fn = self.contract.functions.withdrawFunds(
+            user,
+            token,
+            amount,
+            signature,
+        )
 
-        try:
-            contract_reader.functions.verifyWithdrawSignature(
-                user,
-                bytes(token),
-                amount,
-                bytes(signature),
-            ).call()
-        except Exception as exc:  # pragma: no cover - network path
-            raise ValueError("Invalid or previously used withdrawal signature") from exc
+        submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
 
         context = self._get_token_context(token)
-
-        if context.is_native:
-            raw_tx = contract_reader.functions.generateEVMNativeWithdrawal(
-                context.chain_id,
-                user,
-                amount,
-            ).call()
-        else:
-            raw_tx = contract_reader.functions.generateEVMErc20Withdrawal(
-                context.chain_id,
-                user,
-                amount,
-            ).call()
-
-        tx_hash = self._send_raw_transaction(context.chain_id, raw_tx)
-
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:
             detail_parts.append(f"token_address={context.token_address}")
         detail = "; ".join(detail_parts)
 
-        return SubmissionResult(submission_id=tx_hash, status="sent", detail=detail)
+        return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
 
 
 _service_instance: Optional[AccountingContractService] = None
