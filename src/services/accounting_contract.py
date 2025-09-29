@@ -398,6 +398,11 @@ class AccountingContractService:
 
         fund_locks = contract_reader.functions.getUserLocks(checksum_user).call()
 
+        latest_timestamp = None
+        if self.reader_w3:
+            latest_block = self.reader_w3.eth.get_block("latest")
+            latest_timestamp = latest_block.get("timestamp")
+
         locks = []
         for i, lock in enumerate(fund_locks):
             # FundLock struct: (serviceId, tokenId, amount, expiry)
@@ -408,7 +413,7 @@ class AccountingContractService:
                 "token_id": "0x" + lock[1].hex(),
                 "amount": lock[2],
                 "expiry": lock[3],
-                "is_expired": lock[3] < self.w3.eth.get_block('latest')['timestamp'] if self.reader_w3 else False
+                "is_expired": bool(latest_timestamp is not None and lock[3] < latest_timestamp),
             }
 
             if service_address is None or lock[0].lower() == service_address.lower():
