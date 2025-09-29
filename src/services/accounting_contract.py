@@ -223,31 +223,34 @@ class AccountingContractService:
         token_norm = token_hex.hex()
         deposit_address = self._get_deposit_address()
 
-        # TODO: Determine chain for the deposit based on the token_id
-        chain_id = 8453
-
-        is_native = token_norm == "0x" + "0" * 64
+        context = self._get_token_context(token_hex)
 
         transaction_data = {
-            "to": deposit_address,
-            "chain_id": chain_id
+            "chain_id": context.chain_id,
         }
 
-        if is_native:
+        if context.is_native:
+            transaction_data["to"] = deposit_address
             transaction_data["value"] = hex(amount)
             transaction_data["data"] = "0x"
             instructions = (
-                "Send ETH to the deposit address on Base chain. "
+                "Send native tokens to the ROFL deposit address on the source chain. "
                 "Use the provided transaction data to construct your transaction."
             )
         else:
+            if context.token_address is None:
+                raise ValueError("Token metadata is missing the ERC20 contract address")
+
+            transaction_data["to"] = context.token_address
             transaction_data["value"] = "0x0"
             function_selector = "a9059cbb"
-            padded_address = deposit_address[2:].lower().rjust(64, '0')
-            padded_amount = hex(amount)[2:].rjust(64, '0')
-            transaction_data["data"] = "0x" + function_selector + padded_address + padded_amount
+            padded_address = deposit_address[2:].lower().rjust(64, "0")
+            padded_amount = hex(amount)[2:].rjust(64, "0")
+            transaction_data["data"] = (
+                "0x" + function_selector + padded_address + padded_amount
+            )
             instructions = (
-                "Call the transfer function on the ERC20 token contract with the deposit address. "
+                "Call the token contract's transfer function sending funds to the ROFL deposit address. "
                 "Use the provided transaction data to construct your transaction."
             )
 
