@@ -1,0 +1,3 @@
+[submodule "solidity/lib/hashi"]
+	path = solidity/lib/hashi
+	url = https://github.com/gnosis/hashi.git
