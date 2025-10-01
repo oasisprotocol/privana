@@ -7,7 +7,7 @@ from typing import Dict, Optional, Set
 from web3 import Web3
 from web3.types import BlockData
 
-from src.config import load_settings
+from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import AccountingContractService
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class DepositListener:
         block_number: int,
     ):
         try:
-            chain_name = self.accounting_service.chain_names.get(chain_id, f"Chain {chain_id}")
+            chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
             logger.info(
                 f"Processing deposit on {chain_name}: "
                 f"tx={tx_hash}, from={from_address}, value={value} wei, block={block_number}"
@@ -93,7 +93,7 @@ class DepositListener:
             logger.error(f"Failed to process deposit {tx_hash} on chain {chain_id}: {str(e)}")
 
     async def _monitor_chain(self, chain_id: int):
-        chain_name = self.accounting_service.chain_names.get(chain_id, f"Chain {chain_id}")
+        chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
         logger.info(f"Starting deposit monitoring for {chain_name} (chain_id={chain_id})")
 
         web3 = self._get_chain_web3(chain_id)

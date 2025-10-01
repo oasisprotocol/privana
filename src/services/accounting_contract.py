@@ -12,7 +12,7 @@ from web3.contract import Contract
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflAppdClient
-from src.config import load_settings
+from src.config import CHAIN_NAMES, load_settings
 from src.models.types import Settings
 
 
@@ -73,10 +73,7 @@ class AccountingContractService:
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, Web3] = {}
         self.default_token_symbol = "ETH"
-        self.chain_names = {
-            8453: "Base",
-            84532: "Base Sepolia"
-        }
+        self.chain_names = CHAIN_NAMES
 
     # ------------------------------------------------------------------
     # Helper utilities

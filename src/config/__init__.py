@@ -16,8 +16,13 @@ _settings: Optional[Settings] = None
 _defaults = Settings()
 
 DEFAULT_CHAIN_RPC_URLS: Dict[int, str] = {
-    8453: "https://mainnet.base.org",
+    # 8453: "https://mainnet.base.org",
     84532: "https://sepolia.base.org",
+}
+
+CHAIN_NAMES: Dict[int, str] = {
+    # 8453: "Base",
+    84532: "Base Sepolia",
 }
 
 
@@ -59,4 +64,4 @@ def load_settings(refresh: bool = False) -> Settings:
     return _settings
 
 
-__all__ = ["load_settings"]
+__all__ = ["load_settings", "CHAIN_NAMES"]
