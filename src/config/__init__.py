@@ -52,6 +52,9 @@ def load_settings(refresh: bool = False) -> Settings:
                 "ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit
             ),
             chain_rpc_urls=dict(DEFAULT_CHAIN_RPC_URLS),
+            deposit_poll_interval=_get_int(
+                "DEPOSIT_POLL_INTERVAL", _defaults.deposit_poll_interval
+            ),
         )
     return _settings
 
