@@ -16,39 +16,37 @@ artifacts:
     runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.0/rofl-containers#08eb5bbe5df26af276d9a72e9fd7353b3a90b7d27e1cf33e276a82dfd551eec6
     compose: compose.yaml
 deployments:
-  testnet:
-    app_id: rofl1qp6ckw2clcggr7q8x05ly06yuj76plp79skeqh36
+  default:
+    app_id: rofl1qrp55hemyhu2g2n6k3jyquu4x92ttmzz0vpad9q6
     network: testnet
     paratime: sapphire
     admin: wt3_admin
-    oci_repository: rofl.sh/a09c7821-fc59-40fc-bdd6-cb04de601ca9:1759327665
+    oci_repository: rofl.sh/68df4ebc-ce58-406f-93b5-7724329ccf91:1759416126
     trust_root:
-      height: 28668832
-      hash: a4dce1da81cb410ad573dfc547d46c3f51f76b1d8dfdc178213aed4426669380
+      height: 28684478
+      hash: a588feea65923f80caf1a3c92a51fee24dc9fa20c4e96f87999a600a5eb4f337
     policy:
       quotes:
         pcs:
           tcb_validity_period: 30
           min_tcb_evaluation_data_number: 18
           tdx: {}
-      enclaves: []
+      enclaves:
+        - id: 1cXbzUM1BeBOP6SwRSDG4r5TJlToDS8eK2i5YoD6ap4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: zWXHqwEPa/202Iigbx+gAjkSrmCfCgkdiSur6KI392QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggx8eR+coc9uWVC4CU4weQ2KRLzyv2L/m76CriMCLW32VkbmFtZVgrZ682YatzRA5vweqFs6qSRRQLnO8xC19ktq52fIAxMgIw8Cze/dCAZGEhRGVub25jZU/kZrk4qNclOl4h3iv9yYtldmFsdWVYOhoZwVcSPdYc73/fm2ST0sZ37dRij4RqASZlYdl2TlP9TTq8TwHIfVXcD8fpRbrckE/x4k1VcAqUo6w=
+        value: pGJwa1ggz+jyLQ3XbCKuMLiq99YiiaYG1ierbIhDTRCEbJa2IyVkbmFtZVgrhI/RxM7sFGT4cqeD/Hlx3tzptVGFOITbHmXWlmIso5w2gV45cMZj/W8hPmVub25jZU/hqec1Wy3AHVY1uavVK7xldmFsdWVYOkIcWXLr0cY5fhMhwcqsT/u3zYgQULVTqnUKSNDM2O92PCIs0eAG86YCjJPZ4t4ySuLY/nb4EzYCb7U=
       - name: SAPPHIRE_CHAIN_ID
-        value: pGJwa1ggv8Cu9BX/rZTjffQtt4SRCGtyEYuDcDgrp1jKqcBfcClkbmFtZVgh6ktb9qCGtpOjnj49/1Eup+peYGNFHLI5kdPjuEufP5iIZW5vbmNlT+JThbsqHgdHPgboux3wdmV2YWx1ZVU2twSyELvym2D2dFGOpg4pxW0G5sk=
+        value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL
-        value: pGJwa1ggp4DHl1qUX6zzbvuLxwK/bmFKEVnqR8tl8XswDDXlIE1kbmFtZVggOOBEZJFBaE4TyS02MN11dCFzHGvqlWGuGJMSdXzZxD9lbm9uY2VPkGksH+S5TuG6jwe2nGB+ZXZhbHVlWDE1iZo5lq414mdLLVbCJ9YJKNlSE1qfo63h6LPVmccycBZ7gsXgiGyZppNO2CHdy1fv
-      - name: ACCOUNTING_GAS_LIMIT
-        value: pGJwa1ggQtfiK7DBrAmPWDUVZfMraj95KvflBmv9ohV8DyPhMzZkbmFtZVgkMZTdjoH+SmgRNcpEkGuRkeRpuvn4yyCRY0aX3KeoscLyjx2IZW5vbmNlTyF/i6RhCBCA3TBOrvCyzGV2YWx1ZVZjV8o0mNMUCeFAaY08XhJsTWS2F+V0
-      - name: DEPOSIT_POLL_INTERVAL
-        value: pGJwa1gg19EPb2myy9qJkbmpdQSSON5GnKVHEGBL0dSUZ/2s/1BkbmFtZVgl3AiXbCY2MrFZWTZ1TP3p+6xyfXG563YAiMfxkzdiHn4SBHhcT2Vub25jZU9xoY2dl2NC3fxSEm7fPu1ldmFsdWVSkPzI2CbcFnfyY8cPUIJlfnMc
+        value: pGJwa1ggHCCMlvc+DNO0ZMnvObabgnN7F6R5bR51qOMA5TA3g2BkbmFtZVggzZEFP55yKak+XU9/bbwplQQr6/ObqWEdSG6uXSuA4d1lbm9uY2VPlC9Z3W6lBA+JwGnSr2x9ZXZhbHVlWDErklv3csBuRaZ8PQzzzMzpIWgfVEjIWdN721xPHadDrQhzDOWd40t1q++ie0HR29fm
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: "0000000000000304"
+        id: "0000000000000307"
