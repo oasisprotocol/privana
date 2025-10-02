@@ -12,7 +12,7 @@ from web3.contract import Contract
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflAppdClient
-from src.config import load_settings
+from src.config import CHAIN_NAMES, load_settings
 from src.models.types import Settings
 
 
@@ -73,10 +73,7 @@ class AccountingContractService:
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, Web3] = {}
         self.default_token_symbol = "ETH"
-        self.chain_names = {
-            8453: "Base",
-            84532: "Base Sepolia"
-        }
+        self.chain_names = CHAIN_NAMES
 
     # ------------------------------------------------------------------
     # Helper utilities
@@ -223,31 +220,34 @@ class AccountingContractService:
         token_norm = token_hex.hex()
         deposit_address = self._get_deposit_address()
 
-        # TODO: Determine chain for the deposit based on the token_id
-        chain_id = 8453
-
-        is_native = token_norm == "0x" + "0" * 64
+        context = self._get_token_context(token_hex)
 
         transaction_data = {
-            "to": deposit_address,
-            "chain_id": chain_id
+            "chain_id": context.chain_id,
         }
 
-        if is_native:
+        if context.is_native:
+            transaction_data["to"] = deposit_address
             transaction_data["value"] = hex(amount)
             transaction_data["data"] = "0x"
             instructions = (
-                "Send ETH to the deposit address on Base chain. "
+                "Send native tokens to the ROFL deposit address on the source chain. "
                 "Use the provided transaction data to construct your transaction."
             )
         else:
+            if context.token_address is None:
+                raise ValueError("Token metadata is missing the ERC20 contract address")
+
+            transaction_data["to"] = context.token_address
             transaction_data["value"] = "0x0"
             function_selector = "a9059cbb"
-            padded_address = deposit_address[2:].lower().rjust(64, '0')
-            padded_amount = hex(amount)[2:].rjust(64, '0')
-            transaction_data["data"] = "0x" + function_selector + padded_address + padded_amount
+            padded_address = deposit_address[2:].lower().rjust(64, "0")
+            padded_amount = hex(amount)[2:].rjust(64, "0")
+            transaction_data["data"] = (
+                "0x" + function_selector + padded_address + padded_amount
+            )
             instructions = (
-                "Call the transfer function on the ERC20 token contract with the deposit address. "
+                "Call the token contract's transfer function sending funds to the ROFL deposit address. "
                 "Use the provided transaction data to construct your transaction."
             )
 
@@ -395,6 +395,11 @@ class AccountingContractService:
 
         fund_locks = contract_reader.functions.getUserLocks(checksum_user).call()
 
+        latest_timestamp = None
+        if self.reader_w3:
+            latest_block = self.reader_w3.eth.get_block("latest")
+            latest_timestamp = latest_block.get("timestamp")
+
         locks = []
         for i, lock in enumerate(fund_locks):
             # FundLock struct: (serviceId, tokenId, amount, expiry)
@@ -405,7 +410,7 @@ class AccountingContractService:
                 "token_id": "0x" + lock[1].hex(),
                 "amount": lock[2],
                 "expiry": lock[3],
-                "is_expired": lock[3] < self.w3.eth.get_block('latest')['timestamp'] if self.reader_w3 else False
+                "is_expired": bool(latest_timestamp is not None and lock[3] < latest_timestamp),
             }
 
             if service_address is None or lock[0].lower() == service_address.lower():

@@ -79,3 +79,5 @@ Thumbs.db
 logs/
 temp/
 tmp/
+*.orc
+accounting-module

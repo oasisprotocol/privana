@@ -18,15 +18,24 @@ logging.getLogger().setLevel(getattr(logging, settings.log_level.upper(), loggin
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """
     Manage application lifecycle.
-    
+
     Args:
         app: FastAPI application instance
     """
+    from src.services.deposit_listener import get_deposit_listener
+
     logger.info("Accounting Module API starting...")
+
+    deposit_listener = get_deposit_listener()
+    await deposit_listener.start()
+    logger.info("Deposit listener started")
+
     yield
+
+    await deposit_listener.stop()
     logger.info("Accounting Module API shutting down...")
 
 

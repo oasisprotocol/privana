@@ -1,0 +1,54 @@
+name: accounting-module
+version: 0.1.0
+tee: tdx
+kind: container
+resources:
+  memory: 512
+  cpus: 1
+  storage:
+    kind: disk-persistent
+    size: 512
+artifacts:
+  firmware: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.4.1/ovmf.tdx.fd#db47100a7d6a0c1f6983be224137c3f8d7cb09b63bb1c7a5ee7829d8e994a42f
+  kernel: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.4.1/stage1.bin#06e12cba9b2423b4dd5916f4d84bf9c043f30041ab03aa74006f46ef9c129d22
+  stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.4.1/stage2-podman.tar.bz2#6f2487aa064460384309a58c858ffea9316e739331b5c36789bb2f61117869d6
+  container:
+    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.4.2/rofl-containers#0cbaa4c0c1b35c5ed41156868bee9f3726f52eeedc01b3060d3b2eb67d76f546
+    compose: compose.yaml
+deployments:
+  testnet:
+    app_id: rofl1qp6ckw2clcggr7q8x05ly06yuj76plp79skeqh36
+    network: testnet
+    paratime: sapphire
+    admin: wt3_admin
+    oci_repository: rofl.sh/a09c7821-fc59-40fc-bdd6-cb04de601ca9:1759327665
+    trust_root:
+      height: 28668832
+      hash: a4dce1da81cb410ad573dfc547d46c3f51f76b1d8dfdc178213aed4426669380
+    policy:
+      quotes:
+        pcs:
+          tcb_validity_period: 30
+          min_tcb_evaluation_data_number: 18
+          tdx: {}
+      enclaves: []
+      endorsements:
+        - any: {}
+      fees: endorsing_node
+      max_expiration: 3
+    secrets:
+      - name: ACCOUNTING_CONTRACT_ADDRESS
+        value: pGJwa1ggx8eR+coc9uWVC4CU4weQ2KRLzyv2L/m76CriMCLW32VkbmFtZVgrZ682YatzRA5vweqFs6qSRRQLnO8xC19ktq52fIAxMgIw8Cze/dCAZGEhRGVub25jZU/kZrk4qNclOl4h3iv9yYtldmFsdWVYOhoZwVcSPdYc73/fm2ST0sZ37dRij4RqASZlYdl2TlP9TTq8TwHIfVXcD8fpRbrckE/x4k1VcAqUo6w=
+      - name: SAPPHIRE_CHAIN_ID
+        value: pGJwa1ggv8Cu9BX/rZTjffQtt4SRCGtyEYuDcDgrp1jKqcBfcClkbmFtZVgh6ktb9qCGtpOjnj49/1Eup+peYGNFHLI5kdPjuEufP5iIZW5vbmNlT+JThbsqHgdHPgboux3wdmV2YWx1ZVU2twSyELvym2D2dFGOpg4pxW0G5sk=
+      - name: SAPPHIRE_RPC_URL
+        value: pGJwa1ggp4DHl1qUX6zzbvuLxwK/bmFKEVnqR8tl8XswDDXlIE1kbmFtZVggOOBEZJFBaE4TyS02MN11dCFzHGvqlWGuGJMSdXzZxD9lbm9uY2VPkGksH+S5TuG6jwe2nGB+ZXZhbHVlWDE1iZo5lq414mdLLVbCJ9YJKNlSE1qfo63h6LPVmccycBZ7gsXgiGyZppNO2CHdy1fv
+      - name: ACCOUNTING_GAS_LIMIT
+        value: pGJwa1ggQtfiK7DBrAmPWDUVZfMraj95KvflBmv9ohV8DyPhMzZkbmFtZVgkMZTdjoH+SmgRNcpEkGuRkeRpuvn4yyCRY0aX3KeoscLyjx2IZW5vbmNlTyF/i6RhCBCA3TBOrvCyzGV2YWx1ZVZjV8o0mNMUCeFAaY08XhJsTWS2F+V0
+      - name: DEPOSIT_POLL_INTERVAL
+        value: pGJwa1gg19EPb2myy9qJkbmpdQSSON5GnKVHEGBL0dSUZ/2s/1BkbmFtZVgl3AiXbCY2MrFZWTZ1TP3p+6xyfXG563YAiMfxkzdiHn4SBHhcT2Vub25jZU9xoY2dl2NC3fxSEm7fPu1ldmFsdWVSkPzI2CbcFnfyY8cPUIJlfnMc
+    machines:
+      default:
+        provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
+        offer: playground_short
+        id: "0000000000000300"

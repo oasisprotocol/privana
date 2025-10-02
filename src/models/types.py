@@ -14,7 +14,8 @@ class Settings:
     environment: str = "development"
 
     accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
-    sapphire_chain_id: int = 23294
-    sapphire_rpc_url: str = "https://sapphire.oasis.io"
+    sapphire_chain_id: int = 23295
+    sapphire_rpc_url: str = "https://testnet.sapphire.oasis.io"
     accounting_gas_limit: int = 500_000
     chain_rpc_urls: Dict[int, str] = field(default_factory=dict)
+    deposit_poll_interval: int = 12
