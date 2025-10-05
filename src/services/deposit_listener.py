@@ -25,6 +25,7 @@ class DepositListener:
         self._tasks: Set[asyncio.Task] = set()
         self._deposit_address: Optional[str] = None
         self._last_processed_blocks: Dict[int, int] = {}
+        self._native_token_ids: Dict[int, str] = {}
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -46,6 +47,23 @@ class DepositListener:
             self._deposit_address = self.accounting_service._get_deposit_address()
             logger.info(f"Monitoring deposit address: {self._deposit_address}")
         return self._deposit_address
+
+
+    def _get_native_token_id(self, chain_id: int) -> str:
+        if chain_id in self._native_token_ids:
+            return self._native_token_ids[chain_id]
+
+        chain_bytes = int(chain_id).to_bytes(32, byteorder="big", signed=False)
+        padded_data = chain_bytes.ljust(32, b"\x00")
+        encoded = (
+            (0).to_bytes(32, byteorder="big")
+            + (64).to_bytes(32, byteorder="big")
+            + (len(chain_bytes)).to_bytes(32, byteorder="big")
+            + padded_data
+        )
+        token_id = Web3.to_hex(Web3.keccak(encoded))
+        self._native_token_ids[chain_id] = token_id
+        return token_id
 
     async def _process_deposit(
         self,
@@ -74,9 +92,10 @@ class DepositListener:
 
             # TODO: Add RLP block header, transaction index, and transaction proof stack
             # Need to ask Noah about this
+            token_id = self._get_native_token_id(chain_id)
             payload = {
                 "user_address": from_address,
-                "token_id": f"0x{'0' * 24}{chain_id:016x}{'0' * 40}",
+                "token_id": token_id,
                 "evm_transaction_data": evm_transaction_data,
                 "rlp_block_header": None,
                 "transaction_index_rlp": None,
@@ -89,8 +108,8 @@ class DepositListener:
                 f"status={result.status}"
             )
 
-        except Exception as e:
-            logger.error(f"Failed to process deposit {tx_hash} on chain {chain_id}: {str(e)}")
+        except Exception as exc:
+            logger.exception("Failed to process deposit %s on chain %s", tx_hash, chain_id)
 
     async def _monitor_chain(self, chain_id: int):
         chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")

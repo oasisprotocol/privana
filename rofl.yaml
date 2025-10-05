@@ -20,8 +20,8 @@ deployments:
     app_id: rofl1qrp55hemyhu2g2n6k3jyquu4x92ttmzz0vpad9q6
     network: testnet
     paratime: sapphire
-    admin: wt3_admin
-    oci_repository: rofl.sh/eb13922a-ece2-4146-b8cb-35874af20c93:1759568212
+    admin: testing
+    oci_repository: rofl.sh/11fa8b5a-86d8-4e57-8fcc-eba57da60a04:1759655567
     trust_root:
       height: 28684478
       hash: a588feea65923f80caf1a3c92a51fee24dc9fa20c4e96f87999a600a5eb4f337
@@ -32,8 +32,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: fdTDBNJueJoNjnaF5O7NSbRCci+rSCWnzFsvpt+NYI8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: WOq7nUXar0mwsZVq9y+DGrY00lFiOI+zrPJ9Zob3lyQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 4cae5TSKVoqIYILT5JGmbc8eLcgSZk3arK5Lv6JEWQkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: nD/eig7PGfH6XQfhkrzuokF/9eBb4xqM75QGZsPnxjgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -49,4 +49,4 @@ deployments:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: 000000000000030f
+        id: "0000000000000317"
