@@ -1,0 +1,1 @@
+@hashi/prover=lib/hashi/packages/evm/contracts/prover

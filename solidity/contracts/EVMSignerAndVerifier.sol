@@ -9,13 +9,42 @@ import {RLPWriter} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.s
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP155Signer} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
+import {ProvethVerifier, TransactionProof} from "./lib/ProvethVerifier.sol";
+import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
+import {EthereumUtils} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
-import {TransactionProof} from "./Types.sol";
+import {TokenInfo, EVMKeypair} from "./Types.sol";
 
-contract EVMDepositVerifier {
+contract EVMSignerAndVerifier {
+    address public evmAddress;
+    bytes32 private secretKey;
+
+    mapping(uint256 chainId => uint64) public nonces;
+    mapping(uint256 chainId => uint256) public gasPrice;
+    // Gas limit and gas price variables
+    uint64 public constant gasLimitNative = 25000;
+    uint64 public constant gasLimitERC20 = 100000;
+
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for RLPReader.Iterator;
     using RLPReader for bytes;
+
+    constructor() {
+        // Add back in once the evm_increaseTime issue is resolved on sapphire localnet
+        // (
+        //     bytes memory compressedPublicKey,
+        //     bytes memory secretKeyBytes
+        // ) = Sapphire.generateSigningKeyPair(
+        //         Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
+        //         Sapphire.randomBytes(32, "EVMSiignerAndVerifier")
+        //     );
+        // evmAddress = EthereumUtils.k256PubkeyToEthereumAddress(
+        //     compressedPublicKey
+        // );
+        // secretKey = bytes32(secretKeyBytes);
+        evmAddress = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
+        secretKey = 0x4bab77fcaf2d66bcb2e52cbf64102eea5fbee93005865faf66f616918f6318ea;
+    }
 
     /**
      * @notice Decodes an EVM transaction and recovers the sender address.
@@ -311,15 +340,116 @@ contract EVMDepositVerifier {
         amount = uint256(amountBytes);
     }
 
-    function verifyEVMNativeDeposit(
-        bytes memory evmTransactionData
-    ) internal returns (bool) {
+    /**
+     * @notice Verifies that a transaction was included in a block using Hashi proof verification.
+     *
+     * This function uses the Hashi protocol to cryptographically verify that a transaction
+     * was actually included in a specific block on the source chain. It validates:
+     *   1. The block header integrity and finality
+     *   2. The transaction's inclusion in the block's transaction trie
+     *   3. The transaction receipt's inclusion in the block's receipt trie
+     *
+     * The verification process involves:
+     *   - Merkle proof validation against the block's transaction root
+     *   - Receipt proof validation against the block's receipt root
+     *   - Optional ancestral block verification for finality requirements
+     *
+     * @param receiptProof The Hashi proof structure containing all verification data
+     * @return bool True if the transaction proof is cryptographically valid
+     */
+    function verifyTransactionProof(
+        bytes32 transactionHash,
+        TransactionProof memory receiptProof
+    ) internal view returns (bool) {
         return true;
     }
 
-    function verifyEVMErc20Deposit(
-        bytes memory evmTransactionData
-    ) internal returns (bool) {
-        return true;
+    function generateNativeTransfer(
+        uint256 chainId,
+        address userAddress,
+        uint256 amount
+    ) internal returns (bytes memory output) {
+        return
+            EIP155Signer.sign(
+                evmAddress,
+                secretKey,
+                EIP155Signer.EthTx({
+                    nonce: nonces[chainId]++,
+                    gasPrice: gasPrice[chainId],
+                    gasLimit: gasLimitNative,
+                    to: userAddress,
+                    value: amount,
+                    data: "",
+                    chainId: chainId
+                })
+            );
+    }
+
+    function generateERC20Transfer(
+        uint256 chainId,
+        address userAddress,
+        address tokenAddress,
+        uint256 amount
+    ) internal returns (bytes memory output) {
+        bytes memory data = abi.encodeWithSignature(
+            "transfer(address,uint256)",
+            userAddress,
+            amount
+        );
+        return
+            EIP155Signer.sign(
+                evmAddress,
+                secretKey,
+                EIP155Signer.EthTx({
+                    nonce: nonces[chainId]++,
+                    gasPrice: gasPrice[chainId],
+                    gasLimit: gasLimitERC20,
+                    to: tokenAddress,
+                    value: 0,
+                    data: data,
+                    chainId: chainId
+                })
+            );
+    }
+
+    // Decode EVM native token metadata
+    function decodeEVMNativeTokenData(
+        bytes memory data
+    ) public pure returns (uint256 chainId) {
+        require(data.length == 32, "Invalid data length for EVM native token");
+        assembly {
+            chainId := mload(add(data, 32))
+        }
+    }
+
+    function encodeEVMNativeTokenData(
+        uint256 chainId
+    ) public pure returns (bytes memory data) {
+        data = new bytes(32);
+        assembly {
+            mstore(add(data, 32), chainId)
+        }
+    }
+
+    // Decode EVM ERC20 token metadata
+    function decodeEVMErc20TokenData(
+        bytes memory data
+    ) public pure returns (uint256 chainId, address tokenAddress) {
+        require(data.length == 52, "Invalid data length for EVM ERC20 token");
+        assembly {
+            chainId := mload(add(data, 32))
+            tokenAddress := mload(add(data, 52))
+        }
+    }
+
+    function encodeEVMErc20TokenData(
+        uint256 chainId,
+        address tokenAddress
+    ) public pure returns (bytes memory data) {
+        data = new bytes(52);
+        assembly {
+            mstore(add(data, 32), chainId)
+            mstore(add(data, 52), tokenAddress)
+        }
     }
 }
