@@ -132,7 +132,7 @@ ACCOUNTING_ABI = [
     },
     {
         "inputs": [],
-        "name": "getEVMDepositAddress",
+        "name": "evmAddress",
         "outputs": [{"internalType": "address", "name": "", "type": "address"}],
         "stateMutability": "view",
         "type": "function",

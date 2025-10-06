@@ -81,14 +81,13 @@ class DepositListener:
             )
 
             web3 = self._get_chain_web3(chain_id)
-            tx = web3.eth.get_transaction(tx_hash)
             tx_receipt = web3.eth.get_transaction_receipt(tx_hash)
 
             if tx_receipt["status"] != 1:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
                 return
 
-            evm_transaction_data = f"0x{tx.hash.hex()[2:]}"
+            evm_transaction_data = web3.eth.get_raw_transaction(tx_hash).hex()
 
             # TODO: Add RLP block header, transaction index, and transaction proof stack
             # Need to ask Noah about this

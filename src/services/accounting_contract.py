@@ -161,7 +161,7 @@ class AccountingContractService:
     def _get_deposit_address(self) -> str:
         """Fetch the deposit address from the contract."""
         contract_reader = self._get_reader_contract()
-        return contract_reader.functions.getEVMDepositAddress().call()
+        return contract_reader.functions.evmAddress().call()
 
     def _get_reader_contract(self) -> Contract:
         if self.contract_reader is None:
