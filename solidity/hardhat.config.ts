@@ -39,6 +39,27 @@ task("addEVMNativeToken").addParam("address", "The address of the Accounting con
   console.log(`Token ID: ${tokenId}`);
 });
 
+task("addEVMErc20Token").addParam("address", "The address of the Accounting contract").addParam("chainid", "Chain ID").addParam("tokenaddress", "ERC20 token address").setAction(async (args, hre) => {
+  const accountingAddr = args.address;
+  const accounting = await hre.ethers.getContractAt("Accounting", accountingAddr);
+  const tokenType = 1;
+  const chainId = args.chainid;
+  const tokenAddress = args.tokenaddress;
+  const data = await accounting.encodeEVMErc20TokenData(chainId, tokenAddress);
+  const tx = await accounting.setTokenInfo({
+    tokenType,
+    data,
+  });
+  console.log(`Transaction hash: ${tx.hash}`);
+  const receipt = await tx.wait();
+  console.log(`Transaction confirmed in block ${receipt?.blockNumber}`);
+  const tokenId = await accounting.getTokenId({
+    tokenType,
+    data,
+  });
+  console.log(`Token ID: ${tokenId}`);
+});
+
 const TEST_HDWALLET = {
   mnemonic: 'test test test test test test test test test test test junk',
   path: "m/44'/60'/0'/0",

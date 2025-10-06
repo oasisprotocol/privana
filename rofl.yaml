@@ -21,7 +21,7 @@ deployments:
     network: testnet
     paratime: sapphire
     admin: testing
-    oci_repository: rofl.sh/11fa8b5a-86d8-4e57-8fcc-eba57da60a04:1759655567
+    oci_repository: rofl.sh/4e69d01c-96c3-4016-8b02-644dbd87bda0:1759751391
     trust_root:
       height: 28684478
       hash: a588feea65923f80caf1a3c92a51fee24dc9fa20c4e96f87999a600a5eb4f337
@@ -40,7 +40,7 @@ deployments:
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggz+jyLQ3XbCKuMLiq99YiiaYG1ierbIhDTRCEbJa2IyVkbmFtZVgrhI/RxM7sFGT4cqeD/Hlx3tzptVGFOITbHmXWlmIso5w2gV45cMZj/W8hPmVub25jZU/hqec1Wy3AHVY1uavVK7xldmFsdWVYOkIcWXLr0cY5fhMhwcqsT/u3zYgQULVTqnUKSNDM2O92PCIs0eAG86YCjJPZ4t4ySuLY/nb4EzYCb7U=
+        value: pGJwa1ggX6ob5XO6GyKgBteCDHkWpMlX3g9WxH6oXlZT4fqdBmNkbmFtZVgrzRMvzTT429/mR+J+v8egiikOkpng1bTwJZu+RUexm5K4ONJ5ZBgAMVadzmVub25jZU8A+QJUvgEYTF7HsLA+BU5ldmFsdWVYOs4TGl0D+N698wNAvfLdnIjyfJ0+ib1rQj/E0fnOdUV4Pfy1AY6mh70EjBkgrJnbiKGeux2VtjtbEok=
       - name: SAPPHIRE_CHAIN_ID
         value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL
@@ -49,4 +49,4 @@ deployments:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: "0000000000000317"
+        id: 000000000000031b

@@ -7,14 +7,16 @@ from typing import Dict, Optional, Set
 from web3 import Web3
 from web3.types import BlockData
 
-from src.config import CHAIN_NAMES, load_settings
+from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
 
 logger = logging.getLogger(__name__)
 
 
 class DepositListener:
-    """Monitors ETH deposits to the ROFL deposit address."""
+    """Monitors ETH and ERC20 token deposits to the ROFL deposit address."""
+
+    TRANSFER_EVENT_SIGNATURE = Web3.keccak(text="Transfer(address,address,uint256)").hex()
 
     def __init__(self):
         self.settings = load_settings()
@@ -26,6 +28,7 @@ class DepositListener:
         self._deposit_address: Optional[str] = None
         self._last_processed_blocks: Dict[int, int] = {}
         self._native_token_ids: Dict[int, str] = {}
+        self._erc20_token_ids: Dict[tuple, str] = {}
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -63,6 +66,27 @@ class DepositListener:
         )
         token_id = Web3.to_hex(Web3.keccak(encoded))
         self._native_token_ids[chain_id] = token_id
+        return token_id
+
+    def _get_erc20_token_id(self, chain_id: int, token_address: str) -> str:
+        cache_key = (chain_id, token_address.lower())
+        if cache_key in self._erc20_token_ids:
+            return self._erc20_token_ids[cache_key]
+
+        token_addr_bytes = bytes.fromhex(token_address.lower().replace("0x", ""))
+        token_data = (b"\x00" * 32) + token_addr_bytes
+
+        padding_needed = (32 - (len(token_data) % 32)) % 32
+        padded_data = token_data + (b"\x00" * padding_needed)
+
+        encoded = (
+            (1).to_bytes(32, byteorder="big")
+            + (64).to_bytes(32, byteorder="big")
+            + (len(token_data)).to_bytes(32, byteorder="big")
+            + padded_data
+        )
+        token_id = Web3.to_hex(Web3.keccak(encoded))
+        self._erc20_token_ids[cache_key] = token_id
         return token_id
 
     async def _process_deposit(
@@ -107,8 +131,53 @@ class DepositListener:
                 f"status={result.status}"
             )
 
-        except Exception as exc:
+        except Exception:
             logger.exception("Failed to process deposit %s on chain %s", tx_hash, chain_id)
+
+    async def _process_erc20_deposit(
+        self,
+        chain_id: int,
+        tx_hash: str,
+        token_address: str,
+        from_address: str,
+        value: int,
+        block_number: int,
+    ):
+        try:
+            chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
+            token_name = ERC20_TOKENS.get(chain_id, {}).get(token_address, token_address)
+            logger.info(
+                f"Processing {token_name} deposit on {chain_name}: "
+                f"tx={tx_hash}, from={from_address}, value={value}, block={block_number}"
+            )
+
+            web3 = self._get_chain_web3(chain_id)
+            tx_receipt = web3.eth.get_transaction_receipt(tx_hash)
+
+            if tx_receipt["status"] != 1:
+                logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
+                return
+
+            evm_transaction_data = web3.eth.get_raw_transaction(tx_hash).hex()
+
+            token_id = self._get_erc20_token_id(chain_id, token_address)
+            payload = {
+                "user_address": from_address,
+                "token_id": token_id,
+                "evm_transaction_data": evm_transaction_data,
+                "rlp_block_header": None,
+                "transaction_index_rlp": None,
+                "transaction_proof_stack": None,
+            }
+
+            result = self.accounting_service.include_deposit(payload)
+            logger.info(
+                f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
+                f"status={result.status}"
+            )
+
+        except Exception:
+            logger.exception("Failed to process ERC20 deposit %s on chain %s", tx_hash, chain_id)
 
     async def _monitor_chain(self, chain_id: int):
         chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
@@ -116,6 +185,7 @@ class DepositListener:
 
         web3 = self._get_chain_web3(chain_id)
         deposit_address = self._get_deposit_address().lower()
+        erc20_tokens = {addr.lower(): name for addr, name in ERC20_TOKENS.get(chain_id, {}).items()}
 
         if chain_id not in self._last_processed_blocks:
             self._last_processed_blocks[chain_id] = web3.eth.block_number
@@ -133,18 +203,44 @@ class DepositListener:
                             block: BlockData = web3.eth.get_block(block_num, full_transactions=True)
 
                             for tx in block["transactions"]:
+                                tx_hash = tx["hash"].hex()
+                                has_native_deposit = False
+
                                 if (
                                     tx.get("to")
                                     and tx["to"].lower() == deposit_address
                                     and tx.get("value", 0) > 0
                                 ):
+                                    has_native_deposit = True
                                     await self._process_deposit(
                                         chain_id=chain_id,
-                                        tx_hash=tx["hash"].hex(),
+                                        tx_hash=tx_hash,
                                         from_address=tx["from"],
                                         value=tx["value"],
                                         block_number=block_num,
                                     )
+
+                                if erc20_tokens or has_native_deposit:
+                                    receipt = web3.eth.get_transaction_receipt(tx_hash)
+
+                                    if erc20_tokens:
+                                        for log in receipt.get("logs", []):
+                                            if len(log["topics"]) >= 3 and log["topics"][0].hex() == self.TRANSFER_EVENT_SIGNATURE:
+                                                token_address = log["address"].lower()
+                                                if token_address in erc20_tokens:
+                                                    to_address = "0x" + log["topics"][2].hex()[-40:]
+                                                    if to_address.lower() == deposit_address:
+                                                        from_address = "0x" + log["topics"][1].hex()[-40:]
+                                                        value = int.from_bytes(log["data"], byteorder="big")
+
+                                                        await self._process_erc20_deposit(
+                                                            chain_id=chain_id,
+                                                            tx_hash=tx_hash,
+                                                            token_address=token_address,
+                                                            from_address=from_address,
+                                                            value=value,
+                                                            block_number=block_num,
+                                                        )
 
                             self._last_processed_blocks[chain_id] = block_num
 

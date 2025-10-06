@@ -17,12 +17,18 @@ _defaults = Settings()
 
 DEFAULT_CHAIN_RPC_URLS: Dict[int, str] = {
     # 8453: "https://mainnet.base.org",
-    84532: "https://sepolia.base.org",
+    84532: "https://base-sepolia-rpc.publicnode.com",
 }
 
 CHAIN_NAMES: Dict[int, str] = {
     # 8453: "Base",
     84532: "Base Sepolia",
+}
+
+ERC20_TOKENS: Dict[int, Dict[str, str]] = {
+    84532: {
+        "0x12084E1A0fe92b5ab803a81A0Ae54D91040F89ca": "USDC",
+    }
 }
 
 
@@ -64,4 +70,4 @@ def load_settings(refresh: bool = False) -> Settings:
     return _settings
 
 
-__all__ = ["load_settings", "CHAIN_NAMES"]
+__all__ = ["load_settings", "CHAIN_NAMES", "ERC20_TOKENS"]
