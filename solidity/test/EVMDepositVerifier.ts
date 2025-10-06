@@ -118,32 +118,30 @@ describe('EVMSignerAndVerifier', function () {
 
   });
 
-  // it("User should be able to deposit NATIVE token using every transaction type", async function () {
-  //   const depositAddress = await accounting.evmAddress();
+  it("User should be able to deposit NATIVE token using every transaction type", async function () {
+    const depositAddress = await accounting.evmAddress();
 
-  //   for (let type = 0; type <= 2; type++) {
-  //     const tx = await generateNativeTx({
-  //       signer: userWallet1,
-  //       to: depositAddress,
-  //       amount: parseEther("10"),
-  //       chainId: NATIVE_TOKEN.chainId,
-  //       nonce: 1,
-  //       type
-  //     });
+    for (let type = 0; type <= 2; type++) {
+      const tx = await generateNativeTx({
+        signer: userWallet1,
+        to: depositAddress,
+        amount: parseEther("10"),
+        chainId: NATIVE_TOKEN.chainId,
+        nonce: 1,
+        type
+      });
 
-  //     // Check balance before
-  //     const balanceBefore = await accounting.balances(userWallet1.address, NATIVE_TOKEN.tokenId);
+      // Check balance before
+      const balanceBefore = await accounting.balances(userWallet1.address, NATIVE_TOKEN.tokenId);
 
-  //     // Submit the deposit to Accounting contract
-  //     await accounting.includeEVMDeposit(userWallet1.address, NATIVE_TOKEN.tokenId, tx, { rlpBlockHeader: "0x", transactionIndexRlp: "0x", transactionProofStack: "0x" });
+      // Submit the deposit to Accounting contract
+      await accounting.includeEVMDeposit(userWallet1.address, NATIVE_TOKEN.tokenId, tx, { rlpBlockHeader: "0x", transactionIndexRlp: "0x", transactionProofStack: "0x" });
 
-  //     const balanceAfter = await accounting.balances(userWallet1.address, NATIVE_TOKEN.tokenId);
+      const balanceAfter = await accounting.balances(userWallet1.address, NATIVE_TOKEN.tokenId);
 
-  //     expect(balanceAfter - balanceBefore).to.equal(parseEther("10"));
-
-  //   }
-
-  // });
+      expect(balanceAfter - balanceBefore).to.equal(parseEther("10"));
+    }
+  });
 
 
 });

@@ -7,13 +7,10 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
-import {EVMWithdrawalSigner} from "./EVMWithdrawalSigner.sol";
 
 import {TokenInfo, TokenType, UserInfo, FundLock, TransactionProof} from "./Types.sol";
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
-
-import "hardhat/console.sol";
 
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     // Accounting for user balances
@@ -47,18 +44,18 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         require(from == userAddress, "From address mismatch");
 
         TokenInfo memory tInfo = tokens[tokenId];
-        (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
-            .decodeEVMErc20TokenData(tInfo.data);
-
-        require(tChainId == chainId, "ChainId mismatch");
 
         // TODO: Verify transaction hash proof using txProof
 
         uint256 amount;
 
-        console.log("Token type:", uint256(tInfo.tokenType));
-
         if (tInfo.tokenType == TokenType.NativeEVM) {
+            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
+                tInfo.data
+            );
+
+            require(tChainId == chainId, "ChainId mismatch");
+
             // Verify the to address is the deposit address
             require(
                 to == EVMSignerAndVerifier.evmAddress,
@@ -73,6 +70,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
             amount = value;
         } else if (tInfo.tokenType == TokenType.ERC20) {
+            (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
+                .decodeEVMErc20TokenData(tInfo.data);
+
+            require(tChainId == chainId, "ChainId mismatch");
+
             // Verify the to address matches the tokenAddress
             require(to == tokenAddress, "Not a deposit transaction");
 
