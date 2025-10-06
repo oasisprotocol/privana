@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 // This oracle checks if the deposit has been made on the source chain by verifying the transaction against the block hash, which is fetched from the BlockHashOracle.
 
-interface IEVMDepositVerifier {
+interface IEVMSignerAndVerifier {
     function verifyEVMNativeDeposit(
         bytes calldata evmTransactionData
     ) external returns (bool);

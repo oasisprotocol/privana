@@ -5,20 +5,17 @@ pragma solidity ^0.8.20;
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
-import {EVMDepositVerifier} from "./EVMDepositVerifier.sol";
+import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {EVMWithdrawalSigner} from "./EVMWithdrawalSigner.sol";
 
 import {TokenInfo, TokenType, UserInfo, FundLock, TransactionProof} from "./Types.sol";
 
-import {EVMUtils} from "./EVMUtils.sol";
+import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 
-contract Accounting is
-    EIP712SignatureVerifier,
-    EVMWithdrawalSigner,
-    EVMDepositVerifier,
-    EVMUtils
-{
+import "hardhat/console.sol";
+
+contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     // Accounting for user balances
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
         public balances;
@@ -26,91 +23,7 @@ contract Accounting is
 
     mapping(address user => UserInfo) private userInfo;
 
-    constructor() EVMWithdrawalSigner() EIP712SignatureVerifier() {}
-
-    function includeEVMNativeDeposit(
-        address userAddress,
-        bytes32 tokenId,
-        bytes calldata evmTransactionData,
-        TransactionProof calldata txProof
-    ) public {
-        (
-            uint256 chainId,
-            bytes32 txHash,
-            address from,
-            address to,
-            uint256 value,
-            bytes memory txData,
-            uint256 v,
-            uint256 r,
-            uint256 s
-        ) = EVMDepositVerifier.decodeEVMTransaction(evmTransactionData);
-
-        TokenInfo memory tInfo = tokens[tokenId];
-
-        uint256 tChainId = EVMUtils.decodeEVMNativeTokenData(tInfo.data);
-
-        require(tChainId == chainId, "ChainId mismatch");
-
-        // Verify the to address is the deposit address
-        require(to == getEVMDepositAddress(), "Not a deposit transaction");
-
-        // Verify from matches the userAddress
-        require(from == userAddress, "From address mismatch");
-
-        // Verify the txData is empty
-        require(txData.length == 0, "Non-empty tx data");
-
-        // TODO: Verify transaction hash proof using txProof
-
-        // Increase token balance by value
-        balances[userAddress][tokenId] += value;
-
-        emit Deposit(userAddress, tokenId, value);
-    }
-
-    function includeEVMErc20Deposit(
-        address userAddress,
-        bytes32 tokenId,
-        bytes calldata evmTransactionData,
-        TransactionProof calldata txProof
-    ) public {
-        (
-            uint256 chainId,
-            bytes32 txHash,
-            address from,
-            address to,
-            uint256 value,
-            bytes memory txData,
-            uint256 v,
-            uint256 r,
-            uint256 s
-        ) = EVMDepositVerifier.decodeEVMTransaction(evmTransactionData);
-
-        // Verify from matches the userAddress
-        require(from == userAddress, "From address mismatch");
-
-        TokenInfo memory tInfo = tokens[tokenId];
-        (uint256 tChainId, address tokenAddress) = EVMUtils
-            .decodeEVMErc20TokenData(tInfo.data);
-
-        require(tChainId == chainId, "ChainId mismatch");
-
-        // Verify the to address matches the tokenAddress
-        require(to == tokenAddress, "Not a deposit transaction");
-
-        (address erc20To, uint256 erc20Amount) = EVMDepositVerifier
-            .decodeTxDataForErc20Transfer(txData);
-
-        require(erc20To == getEVMDepositAddress(), "ERC20 to address mismatch");
-
-        // TODO: Verify transaction hash proof using txProof
-
-        // Increase token balance by value
-        balances[userAddress][tokenId] += erc20Amount;
-
-        emit Deposit(userAddress, tokenId, value);
-    }
+    constructor() EVMSignerAndVerifier() EIP712SignatureVerifier() {}
 
     function includeEVMDeposit(
         address userAddress,
@@ -128,13 +41,13 @@ contract Accounting is
             uint256 v,
             uint256 r,
             uint256 s
-        ) = EVMDepositVerifier.decodeEVMTransaction(evmTransactionData);
+        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
 
         // Verify from matches the userAddress
         require(from == userAddress, "From address mismatch");
 
         TokenInfo memory tInfo = tokens[tokenId];
-        (uint256 tChainId, address tokenAddress) = EVMUtils
+        (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
             .decodeEVMErc20TokenData(tInfo.data);
 
         require(tChainId == chainId, "ChainId mismatch");
@@ -143,9 +56,14 @@ contract Accounting is
 
         uint256 amount;
 
+        console.log("Token type:", uint256(tInfo.tokenType));
+
         if (tInfo.tokenType == TokenType.NativeEVM) {
             // Verify the to address is the deposit address
-            require(to == getEVMDepositAddress(), "Not a deposit transaction");
+            require(
+                to == EVMSignerAndVerifier.evmAddress,
+                "Not a deposit transaction"
+            );
 
             // Verify from matches the userAddress
             require(from == userAddress, "From address mismatch");
@@ -158,11 +76,11 @@ contract Accounting is
             // Verify the to address matches the tokenAddress
             require(to == tokenAddress, "Not a deposit transaction");
 
-            (address erc20To, uint256 erc20amount) = EVMDepositVerifier
+            (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
                 .decodeTxDataForErc20Transfer(txData);
 
             require(
-                erc20To == getEVMDepositAddress(),
+                erc20To == EVMSignerAndVerifier.evmAddress,
                 "ERC20 to address mismatch"
             );
 
@@ -315,12 +233,18 @@ contract Accounting is
         TokenInfo memory tInfo = tokens[tokenId];
 
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMUtils.decodeEVMNativeTokenData(tInfo.data);
-            signedTx = generateNativeTransfer(chainId, userAddress, amount);
+            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
+                tInfo.data
+            );
+            signedTx = EVMSignerAndVerifier.generateNativeTransfer(
+                chainId,
+                userAddress,
+                amount
+            );
         } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 chainId, address tokenAddress) = EVMUtils
+            (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
-            signedTx = generateERC20Transfer(
+            signedTx = EVMSignerAndVerifier.generateERC20Transfer(
                 chainId,
                 userAddress,
                 tokenAddress,

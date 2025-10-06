@@ -88,7 +88,7 @@ describe('Accounting', function () {
   });
 
   it("User should be able to deposit", async function () {
-    const depositAddress = await accounting.getEVMDepositAddress();
+    const depositAddress = await accounting.evmAddress();
 
     const tx = await generateERC20Tx({
       signer: userWallet1,
@@ -104,7 +104,7 @@ describe('Accounting', function () {
     const balanceBefore = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
 
     // Submit the deposit to Accounting contract
-    await accounting.includeEVMErc20Deposit(userWallet1.address, TEST_TOKEN.tokenId, tx, { rlpBlockHeader: "0x", transactionIndexRlp: "0x", transactionProofStack: "0x" });
+    await accounting.includeEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, tx, { rlpBlockHeader: "0x", transactionIndexRlp: "0x", transactionProofStack: "0x" });
 
     const balanceAfter = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
 
