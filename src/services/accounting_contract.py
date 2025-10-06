@@ -78,13 +78,24 @@ class AccountingContractService:
     # ------------------------------------------------------------------
     # Helper utilities
     # ------------------------------------------------------------------
-    def _build_tx(self, data: bytes, value: int = 0, gas: Optional[int] = None) -> Dict:
+    def _build_tx(self, data: Any, value: int = 0, gas: Optional[int] = None) -> Dict:
         gas_limit = gas or self.gas_limit
+
+        if isinstance(data, str):
+            if data.startswith("0x"):
+                data_bytes = HexBytes(data)
+            else:
+                data_bytes = data.encode("utf-8")
+        elif isinstance(data, (bytes, bytearray, memoryview, HexBytes)):
+            data_bytes = bytes(data)
+        else:
+            raise TypeError(f"Unsupported transaction data type: {type(data)!r}")
+
         tx = {
             "to": self.contract_address,
             "value": value,
             "gas": gas_limit,
-            "data": Web3.to_hex(data),
+            "data": Web3.to_hex(data_bytes),
         }
         return tx
 
