@@ -28,6 +28,11 @@ const types = {
     { name: "tokenId", type: "bytes32" },
     { name: "amount", type: "uint256" },
   ],
+  Withdraw: [
+    { name: "userAddress", type: "address" },
+    { name: "tokenId", type: "bytes32" },
+    { name: "amount", type: "uint256" },
+  ]
 }
 
 const TEST_TOKEN = {
@@ -287,6 +292,28 @@ describe('Accounting', function () {
       expiry + 11,
       signature
     )).to.be.revertedWith("Too many active locks");
+  });
+
+
+  it("User should be able to withdraw TEST token using EIP712 signature", async function () {
+    const signature = await userWallet1.signTypedData(
+      domain,
+      { Withdraw: types.Withdraw },
+      {
+        userAddress: userWallet1.address,
+        tokenId: TEST_TOKEN.tokenId,
+        amount: parseEther("0.1"),
+      }
+    );
+
+    // Submit the transfer to Accounting contract
+    const tx = await accounting.withdrawFunds(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseEther("0.1"),
+      signature
+    );
+    await tx.wait();
   });
 
 });

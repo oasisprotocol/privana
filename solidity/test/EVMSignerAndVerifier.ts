@@ -152,5 +152,11 @@ describe('EVMSignerAndVerifier', function () {
     }
   });
 
+  it("Sapphire contract should produce a valid withdrawal transaction for NATIVE token", async function () {
+    const [admin] = await ethers.getSigners();
+
+
+  });
+
 
 });

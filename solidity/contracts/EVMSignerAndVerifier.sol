@@ -20,7 +20,8 @@ contract EVMSignerAndVerifier {
     bytes32 private secretKey;
 
     mapping(uint256 chainId => uint64) public nonces;
-    mapping(uint256 chainId => uint256) public gasPrice;
+    mapping(uint256 chainId => uint256) public gasPrices;
+
     // Gas limit and gas price variables
     uint64 public constant gasLimitNative = 25000;
     uint64 public constant gasLimitERC20 = 100000;
@@ -364,6 +365,36 @@ contract EVMSignerAndVerifier {
         return true;
     }
 
+    /**
+     * @notice Sets the gas price for a specific EVM chain ID.
+     *
+     * @dev This function allows updating the gas price used in transaction generation.
+     *
+     * @param chainId The EVM chain ID to set the gas price for.
+     * @param gasPrice The gas price in wei to set for the specified chain ID.
+     */
+    function setGasPrice(uint256 chainId, uint256 gasPrice) public {
+        gasPrices[chainId] = gasPrice;
+    }
+
+    /**
+     * @notice Generates a signed native token transfer transaction for a specific EVM chain.
+     *
+     * This function creates and signs a native ETH transfer transaction using the Sapphire
+     * EIP155Signer to call SIGN_DIGEST precompile, which internally uses the secure signing environment to:
+     *   1. Construct a standard EVM transaction with the specified parameters
+     *   2. Sign it using the contract's private key (stored securely in Sapphire)
+     *   3. Return the RLP-encoded signed transaction ready for broadcast
+     *
+     * @dev Uses Sapphire's EIP155Signer to call SIGN_DIGEST precompile for secure transaction signing.
+     *      The nonce is automatically incremented to ensure transaction ordering.
+     *      Gas limit is set to a conservative 25,000 gas for native transfers.
+     *
+     * @param chainId The target blockchain's chain ID where the transaction will be sent
+     * @param userAddress The recipient address who will receive the native tokens
+     * @param amount The amount of native tokens to transfer (in wei)
+     * @return output The RLP-encoded signed transaction ready for broadcast to the target chain
+     */
     function generateNativeTransfer(
         uint256 chainId,
         address userAddress,
@@ -375,7 +406,7 @@ contract EVMSignerAndVerifier {
                 secretKey,
                 EIP155Signer.EthTx({
                     nonce: nonces[chainId]++,
-                    gasPrice: gasPrice[chainId],
+                    gasPrice: gasPrices[chainId],
                     gasLimit: gasLimitNative,
                     to: userAddress,
                     value: amount,
@@ -385,6 +416,30 @@ contract EVMSignerAndVerifier {
             );
     }
 
+    /**
+     * @notice Generates a signed ERC20 token transfer transaction for a specific EVM chain.
+     *
+     * This function creates and signs an ERC20 transfer transaction using the Sapphire
+     * EIP155Signer which uses the SIGN_DIGEST precompile. The process involves:
+     *   1. Encoding the ERC20 transfer(address,uint256) function call
+     *   2. Constructing a standard EVM transaction with the encoded calldata
+     *   3. Signing it using the contract's private key (stored securely in Sapphire)
+     *   4. Returning the RLP-encoded signed transaction ready for broadcast
+     *
+     * The calldata encodes: transfer(userAddress, amount) which instructs the
+     * ERC20 contract to transfer `amount` tokens from the contract's address
+     * (evmAddress) to the specified user address.
+     *
+     * @dev Uses Sapphire's EIP155Signer to call SIGN_DIGEST precompile for secure transaction signing.
+     *      The nonce is automatically incremented to ensure transaction ordering.
+     *      Gas limit is set to 100,000 gas to handle most ERC20 transfer scenarios.
+     *
+     * @param chainId The target blockchain's chain ID where the transaction will be sent
+     * @param userAddress The recipient address who will receive the ERC20 tokens
+     * @param tokenAddress The ERC20 contract address on the target chain
+     * @param amount The amount of ERC20 tokens to transfer (in token's base units)
+     * @return output The RLP-encoded signed transaction ready for broadcast to the target chain
+     */
     function generateERC20Transfer(
         uint256 chainId,
         address userAddress,
@@ -402,7 +457,7 @@ contract EVMSignerAndVerifier {
                 secretKey,
                 EIP155Signer.EthTx({
                     nonce: nonces[chainId]++,
-                    gasPrice: gasPrice[chainId],
+                    gasPrice: gasPrices[chainId],
                     gasLimit: gasLimitERC20,
                     to: tokenAddress,
                     value: 0,
@@ -412,7 +467,26 @@ contract EVMSignerAndVerifier {
             );
     }
 
-    // Decode EVM native token metadata
+    /**
+     * @notice Decodes EVM native token metadata to extract the chain ID.
+     *
+     * This function decodes the metadata stored for native EVM tokens (like ETH, MATIC, BNB).
+     * Native tokens are identified solely by their chain ID, as they don't have a specific
+     * contract address - they are the blockchain's native currency.
+     *
+     * Data structure (32 bytes total):
+     *   [0..32): chainId (uint256) - The EVM chain where this native token exists
+     *
+     * The function uses assembly for efficient memory access to extract the chain ID
+     * from the packed byte data. Since abi.encodePacked(chainId) creates exactly 32 bytes,
+     * we can directly load the chain ID using mload.
+     *
+     * @dev Uses assembly for gas-efficient decoding of the 32-byte chain ID.
+     *      Expects data created by encodeEVMNativeTokenData().
+     *
+     * @param data The packed metadata bytes containing the chain ID (must be 32 bytes)
+     * @return chainId The EVM chain ID where this native token exists
+     */
     function decodeEVMNativeTokenData(
         bytes memory data
     ) public pure returns (uint256 chainId) {
@@ -422,13 +496,55 @@ contract EVMSignerAndVerifier {
         }
     }
 
+    /**
+     * @notice Encodes EVM native token metadata for storage in the token registry.
+     *
+     * This function creates the metadata representation for native EVM tokens (like ETH, MATIC, BNB).
+     * Native tokens only require a chain ID for identification, as they are the inherent currency
+     * of their respective blockchains and don't have contract addresses.
+     *
+     * The encoded data structure is:
+     *   [0..32): chainId (uint256) - The EVM chain where this native token exists
+     *
+     * This creates a compact 32-byte representation that can be stored in the TokenInfo.data
+     * field and later decoded using decodeEVMNativeTokenData().
+     *
+     * @dev Uses abi.encodePacked for gas-efficient encoding without padding.
+     *      The result is exactly 32 bytes and can be decoded with decodeEVMNativeTokenData().
+     *
+     * @param chainId The EVM chain ID where this native token exists (e.g., 1 for Ethereum mainnet)
+     * @return data The packed metadata bytes (32 bytes) ready for storage
+     */
     function encodeEVMNativeTokenData(
         uint256 chainId
     ) public pure returns (bytes memory data) {
         return abi.encodePacked(chainId);
     }
 
-    // Decode EVM ERC20 token metadata
+    /**
+     * @notice Decodes EVM ERC20 token metadata to extract the chain ID and contract address.
+     *
+     * This function decodes the metadata stored for ERC20 tokens on EVM chains.
+     * ERC20 tokens require both a chain ID (to identify which blockchain) and a contract
+     * address (to identify the specific token contract).
+     *
+     * Data structure (52 bytes total):
+     *   [0..32):  chainId (uint256) - The EVM chain where this token contract exists
+     *   [32..52): tokenAddress (address) - The ERC20 contract address (20 bytes)
+     *
+     * The function uses assembly for efficient memory access to extract both values.
+     * Note: The address is stored in the last 20 bytes of a 32-byte word (right-aligned)
+     * when using abi.encodePacked, so we read at offset 52 to get the full 32-byte word
+     * containing the address.
+     *
+     * @dev Uses assembly for gas-efficient decoding. The address extraction reads a full
+     *      32-byte word at offset 52, where the address is right-aligned.
+     *      Expects data created by encodeEVMErc20TokenData().
+     *
+     * @param data The packed metadata bytes containing chain ID and token address (must be 52 bytes)
+     * @return chainId The EVM chain ID where this token contract exists
+     * @return tokenAddress The ERC20 contract address on the specified chain
+     */
     function decodeEVMErc20TokenData(
         bytes memory data
     ) public pure returns (uint256 chainId, address tokenAddress) {
@@ -439,6 +555,31 @@ contract EVMSignerAndVerifier {
         }
     }
 
+    /**
+     * @notice Encodes EVM ERC20 token metadata for storage in the token registry.
+     *
+     * This function creates the metadata representation for ERC20 tokens on EVM chains.
+     * ERC20 tokens require both a chain ID (to specify which blockchain) and a contract
+     * address (to identify the specific token contract on that chain).
+     *
+     * The encoded data structure is:
+     *   [0..32):  chainId (uint256) - The EVM chain where this token contract exists
+     *   [32..52): tokenAddress (address) - The ERC20 contract address (20 bytes)
+     *
+     * This creates a compact 52-byte representation that can be stored in the TokenInfo.data
+     * field and later decoded using decodeEVMErc20TokenData().
+     *
+     * The encoding uses abi.encodePacked which concatenates the values without padding,
+     * resulting in exactly 52 bytes (32 for chainId + 20 for address).
+     *
+     * @dev Uses abi.encodePacked for gas-efficient encoding without padding.
+     *      The result is exactly 52 bytes and can be decoded with decodeEVMErc20TokenData().
+     *      The address will be right-aligned in memory when decoded.
+     *
+     * @param chainId The EVM chain ID where this token contract exists (e.g., 1 for Ethereum mainnet)
+     * @param tokenAddress The ERC20 contract address on the specified chain
+     * @return data The packed metadata bytes (52 bytes) ready for storage
+     */
     function encodeEVMErc20TokenData(
         uint256 chainId,
         address tokenAddress
