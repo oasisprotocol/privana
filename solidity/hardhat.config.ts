@@ -78,6 +78,9 @@ const config: HardhatUserConfig = {
     'sapphire-testnet': { ...sapphireTestnet, accounts },
     'sapphire-localnet': { ...sapphireLocalnet, accounts },
   },
+  sourcify: {
+    enabled: true
+  },
   solidity: {
     version: '0.8.20',
     settings: {
