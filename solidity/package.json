@@ -13,8 +13,8 @@
     "format:prettier": "prettier --write --plugin=prettier-plugin-solidity '*.json' '**/*.ts' '**/*.sol'",
     "format": "npm-run-all format:**",
     "build": "hardhat compile",
-    "test": "hardhat test --network sapphire-localnet",
-    "coverage": "hardhat coverage --network sapphire-localnet"
+    "test": "hardhat test",
+    "coverage": "hardhat coverage"
   },
   "devDependencies": {
     "@ethereumjs/trie": "^6.2.1",

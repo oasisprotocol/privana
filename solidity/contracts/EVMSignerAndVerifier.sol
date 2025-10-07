@@ -425,10 +425,7 @@ contract EVMSignerAndVerifier {
     function encodeEVMNativeTokenData(
         uint256 chainId
     ) public pure returns (bytes memory data) {
-        data = new bytes(32);
-        assembly {
-            mstore(add(data, 32), chainId)
-        }
+        return abi.encodePacked(chainId);
     }
 
     // Decode EVM ERC20 token metadata
@@ -446,10 +443,6 @@ contract EVMSignerAndVerifier {
         uint256 chainId,
         address tokenAddress
     ) public pure returns (bytes memory data) {
-        data = new bytes(52);
-        assembly {
-            mstore(add(data, 32), chainId)
-            mstore(add(data, 52), tokenAddress)
-        }
+        return abi.encodePacked(chainId, tokenAddress);
     }
 }

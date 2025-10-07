@@ -13,9 +13,9 @@ const TEST_TOKEN = {
   // keccak256(abi.encode(info.tokenType, info.data));
   // Precomputed to save time and avoid dependency on ethers.utils.solidityPack
   // which is not available in the ethers v6 version used by hardhat
-  tokenId: "0x2caec014e240ce3c23bc5030e72c3cef9d88d6060dccc6f870e33c3a58a42132",
+  tokenId: "0x79f44edab45961a5df521cfbebc927dec4b0e45ef70411d65543ce55add20fff",
   chainId: 31337,
-  address: '0x0000000000000000000000000000000000000001',
+  address: '0x9dE8386e0082d83c235c4Dc1Eb287dED5ed29d35',
 };
 
 const NATIVE_TOKEN = {
@@ -49,6 +49,13 @@ describe('EVMSignerAndVerifier', function () {
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
       ethers.zeroPadValue(TEST_TOKEN.address, 20)
     ]);
+    const expectedData = await accounting.encodeEVMErc20TokenData(TEST_TOKEN.chainId, TEST_TOKEN.address);
+    console.log("Data:", data);
+    console.log("Expected data:", expectedData);
+    console.log("TEST_TOKEN.address:", TEST_TOKEN.address);
+    console.log("TEST_TOKEN.chainId:", TEST_TOKEN.chainId);
+
+    expect(data).to.equal(expectedData);
 
     const tx = await accounting.connect(admin).setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
@@ -72,6 +79,8 @@ describe('EVMSignerAndVerifier', function () {
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(NATIVE_TOKEN.chainId), 32),
     ]);
+    const dataExpected = await accounting.encodeEVMNativeTokenData(NATIVE_TOKEN.chainId);
+    expect(data).to.equal(dataExpected);
 
     const tx = await accounting.connect(admin).setTokenInfo({
       tokenType: NATIVE_TOKEN.tokenType,
