@@ -21,7 +21,7 @@ deployments:
     network: testnet
     paratime: sapphire
     admin: testing
-    oci_repository: rofl.sh/4e69d01c-96c3-4016-8b02-644dbd87bda0:1759751391
+    oci_repository: rofl.sh/492a6ad4-f710-49b8-a028-913cb785d972:1759844078
     trust_root:
       height: 28684478
       hash: a588feea65923f80caf1a3c92a51fee24dc9fa20c4e96f87999a600a5eb4f337
@@ -49,4 +49,4 @@ deployments:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: 000000000000031b
+        id: "0000000000000324"

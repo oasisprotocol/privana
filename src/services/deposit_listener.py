@@ -56,15 +56,11 @@ class DepositListener:
         if chain_id in self._native_token_ids:
             return self._native_token_ids[chain_id]
 
-        chain_bytes = int(chain_id).to_bytes(32, byteorder="big", signed=False)
-        padded_data = chain_bytes.ljust(32, b"\x00")
-        encoded = (
-            (0).to_bytes(32, byteorder="big")
-            + (64).to_bytes(32, byteorder="big")
-            + (len(chain_bytes)).to_bytes(32, byteorder="big")
-            + padded_data
-        )
-        token_id = Web3.to_hex(Web3.keccak(encoded))
+        contract = self.accounting_service._get_reader_contract()
+        token_data = contract.functions.encodeEVMNativeTokenData(chain_id).call()
+        token_info = (0, token_data)
+        token_id = Web3.to_hex(contract.functions.getTokenId(token_info).call())
+
         self._native_token_ids[chain_id] = token_id
         return token_id
 
@@ -73,19 +69,15 @@ class DepositListener:
         if cache_key in self._erc20_token_ids:
             return self._erc20_token_ids[cache_key]
 
-        token_addr_bytes = bytes.fromhex(token_address.lower().replace("0x", ""))
-        token_data = (b"\x00" * 32) + token_addr_bytes
+        contract = self.accounting_service._get_reader_contract()
+        checksummed_address = Web3.to_checksum_address(token_address)
+        token_data = contract.functions.encodeEVMErc20TokenData(chain_id, checksummed_address).call()
+        token_info = (1, token_data)
+        token_id = Web3.to_hex(contract.functions.getTokenId(token_info).call())
 
-        padding_needed = (32 - (len(token_data) % 32)) % 32
-        padded_data = token_data + (b"\x00" * padding_needed)
+        chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
+        logger.info(f"Retrieved ERC20 token ID for {checksummed_address} on {chain_name}: {token_id}")
 
-        encoded = (
-            (1).to_bytes(32, byteorder="big")
-            + (64).to_bytes(32, byteorder="big")
-            + (len(token_data)).to_bytes(32, byteorder="big")
-            + padded_data
-        )
-        token_id = Web3.to_hex(Web3.keccak(encoded))
         self._erc20_token_ids[cache_key] = token_id
         return token_id
 
