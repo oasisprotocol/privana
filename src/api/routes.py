@@ -163,12 +163,16 @@ async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
         balance = _service.get_balance(user_address, token_id)
         checksum_user = _service.w3.to_checksum_address(user_address)
 
+        token_hex = _service._require_hex(token_id, "token_id", expected_len=32)
+        token_symbol = _service._get_token_symbol(token_hex)
+        token_context = _service._get_token_context(token_hex)
+
         return {
             "user_address": checksum_user,
             "token_id": token_id.lower(),
             "balance": str(balance),
-            "token_symbol": _service.default_token_symbol,
-            "chain_id": str(_service.chain_id),
+            "token_symbol": token_symbol,
+            "chain_id": str(token_context.chain_id),
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

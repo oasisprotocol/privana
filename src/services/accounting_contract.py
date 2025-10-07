@@ -12,7 +12,7 @@ from web3.contract import Contract
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflAppdClient
-from src.config import CHAIN_NAMES, load_settings
+from src.config import CHAIN_NAMES, NATIVE_TOKEN_SYMBOLS, ERC20_TOKENS, load_settings
 from src.models.types import Settings
 
 
@@ -222,6 +222,41 @@ class AccountingContractService:
             token_address=token_address,
             is_native=is_native,
         )
+
+    def _get_token_symbol(self, token: HexBytes) -> str:
+        context = self._get_token_context(token)
+
+        if context.is_native:
+            return NATIVE_TOKEN_SYMBOLS.get(context.chain_id, "ETH")
+
+        if context.token_address:
+            token_lower = context.token_address.lower()
+            erc20_mapping = ERC20_TOKENS.get(context.chain_id, {})
+
+            for addr, symbol in erc20_mapping.items():
+                if addr.lower() == token_lower:
+                    return symbol
+
+            try:
+                chain_w3 = self._get_chain_web3(context.chain_id)
+                erc20_abi = [
+                    {
+                        "constant": True,
+                        "inputs": [],
+                        "name": "symbol",
+                        "outputs": [{"name": "", "type": "string"}],
+                        "type": "function"
+                    }
+                ]
+                token_contract = chain_w3.eth.contract(
+                    address=context.token_address,
+                    abi=erc20_abi
+                )
+                return token_contract.functions.symbol().call()
+            except Exception:
+                return "UNKNOWN"
+
+        return "UNKNOWN"
 
     def deposit_quote(self, user_address: str, token_id: str, amount: int) -> Dict[str, Any]:
         """Generate a deposit quote with transaction details for UI usage."""
