@@ -96,7 +96,7 @@ task("sign")
           throw new Error("Lock requires: tokenid and service");
         }
 
-        const expiry = args.expiry || Math.floor(Date.now() / 1000) + (5 * 60);
+        const expiry = args.expiry || Math.floor(Date.now() / 1000) + (60 * 60);
 
         types = {
           Lock: [
