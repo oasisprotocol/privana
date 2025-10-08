@@ -139,7 +139,7 @@ class RoflAppdClient:
         )
 
         response = self._client.post(
-            "http://localhost/rofl/v1/tx/sign-submit", json=payload, timeout=None
+            "http://localhost/rofl/v1/tx/sign-submit", json=payload, timeout=30.0
         )
         response.raise_for_status()
 

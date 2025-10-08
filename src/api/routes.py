@@ -1,5 +1,6 @@
 """FastAPI routes exposing the Accounting module flows."""
 
+import asyncio
 import logging
 from typing import Dict, Optional
 
@@ -44,7 +45,8 @@ async def create_deposit_quote(payload: DepositQuoteRequest) -> DepositQuoteResp
     """Return deposit destination details and transaction data for a user/token/amount."""
 
     try:
-        quote: Dict = _service.deposit_quote(
+        quote: Dict = await asyncio.to_thread(
+            _service.deposit_quote,
             payload.user_address,
             payload.token_id,
             payload.amount
@@ -59,7 +61,7 @@ async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositRespo
     """Submit a deposit inclusion transaction (automatically detects native/ERC20)."""
 
     try:
-        result = _service.include_deposit(payload.dict())
+        result = await asyncio.to_thread(_service.include_deposit, payload.dict())
         return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -73,7 +75,7 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
     """Lock user funds for a service with a signed authorization."""
 
     try:
-        submission = _service.lock_funds(payload.dict())
+        submission = await asyncio.to_thread(_service.lock_funds, payload.dict())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -87,7 +89,7 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
     """Transfer funds between accounting balances using a user signature."""
 
     try:
-        submission = _service.transfer_funds(payload.dict())
+        submission = await asyncio.to_thread(_service.transfer_funds, payload.dict())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -101,7 +103,7 @@ async def transfer_locked_funds(payload: TransferLockedFundsRequest) -> Transact
     """Transfer locked funds based on a casino service signature."""
 
     try:
-        submission = _service.transfer_locked_funds(payload.dict())
+        submission = await asyncio.to_thread(_service.transfer_locked_funds, payload.dict())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -115,7 +117,7 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
     """Unlock funds when lock expiry has passed."""
 
     try:
-        submission = _service.unlock_funds(payload.dict())
+        submission = await asyncio.to_thread(_service.unlock_funds, payload.dict())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -129,7 +131,7 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
     """Commit a withdrawal request by validating the user's signature."""
 
     try:
-        submission = _service.withdraw(payload.dict())
+        submission = await asyncio.to_thread(_service.withdraw, payload.dict())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -146,7 +148,7 @@ async def get_locked_funds(
     """Get locked funds for a user, optionally filtered by service address."""
 
     try:
-        result = _service.get_locked_funds(user_address, service_address)
+        result = await asyncio.to_thread(_service.get_locked_funds, user_address, service_address)
         return LockedFundsResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -159,7 +161,7 @@ async def get_locked_funds(
 async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
     """Get the user's balance for a specific token from the contract."""
 
-    try:
+    def _get_balance_data():
         balance = _service.get_balance(user_address, token_id)
         checksum_user = _service.w3.to_checksum_address(user_address)
 
@@ -174,6 +176,9 @@ async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
             "token_symbol": token_symbol,
             "chain_id": str(token_context.chain_id),
         }
+
+    try:
+        return await asyncio.to_thread(_get_balance_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
