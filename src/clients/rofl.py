@@ -138,19 +138,34 @@ class RoflAppdClient:
             tx.get("gas"),
         )
 
-        response = self._client.post(
-            "http://localhost/rofl/v1/tx/sign-submit", json=payload, timeout=30.0
-        )
-        response.raise_for_status()
+        try:
+            response = self._client.post(
+                "http://localhost/rofl/v1/tx/sign-submit", json=payload, timeout=30.0
+            )
 
-        result = response.json()
-        submission_id = result.get("data")
+            logger.info("ROFL response status: %s", response.status_code)
 
-        if not submission_id:
-            raise ValueError(f"Unexpected ROFL response payload: {result}")
+            if response.status_code != 200:
+                logger.error(
+                    "ROFL transaction submission failed: status=%s, response=%s",
+                    response.status_code,
+                    response.text
+                )
 
-        logger.info("ROFL submission id: %s", submission_id)
-        return submission_id
+            response.raise_for_status()
+
+            result = response.json()
+            submission_id = result.get("data")
+
+            if not submission_id:
+                raise ValueError(f"Unexpected ROFL response payload: {result}")
+
+            logger.info("ROFL submission id: %s", submission_id)
+            return submission_id
+
+        except Exception as e:
+            logger.error("ROFL submission exception: %s", str(e), exc_info=True)
+            raise
 
 def get_keypair(key_id: str = ACCOUNTING_SERVICE_KEY):
     """Get a keypair using the RoflAppdClient.
