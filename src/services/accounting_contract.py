@@ -207,10 +207,20 @@ class AccountingContractService:
 
         if token_type == 0:
             chain_id = int.from_bytes(token_data[:32], byteorder="big")
+            if chain_id == 0:
+                raise ValueError(
+                    f"Token {token.hex()} is not registered in the contract. "
+                    f"Please register it using the hardhat addEVMNativeToken or addEVMErc20Token task."
+                )
             token_address = None
             is_native = True
         elif token_type == 1:
             chain_id = int.from_bytes(token_data[:32], byteorder="big")
+            if chain_id == 0:
+                raise ValueError(
+                    f"Token {token.hex()} is not properly registered in the contract. "
+                    f"Chain ID is 0. Please re-register using the hardhat addEVMErc20Token task."
+                )
             token_address_bytes = token_data[32:52]
             token_address = _to_checksum("0x" + token_address_bytes.hex())
             is_native = False

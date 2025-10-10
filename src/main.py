@@ -2,9 +2,11 @@
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from src.api.routes import router
 from src.config import load_settings
@@ -55,6 +57,13 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def landing_page():
+    """Landing page for the Accounting Module API."""
+    template_path = Path(__file__).parent / "templates" / "landing.html"
+    return template_path.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":

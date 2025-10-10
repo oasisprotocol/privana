@@ -1,0 +1,754 @@
+<!-- GENERATED WITH AI, I DIDNT MAKE THIS... -->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accounting Module API</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            max-width: 950px;
+            width: 100%;
+            max-height: 90vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            padding: 40px 48px;
+            color: white;
+        }
+        .header h1 {
+            font-size: 2.25rem;
+            margin-bottom: 8px;
+            font-weight: 700;
+        }
+        .subtitle {
+            font-size: 1rem;
+            opacity: 0.95;
+            margin-bottom: 16px;
+        }
+        .network-badge {
+            display: inline-flex;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(10px);
+            padding: 6px 14px;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .network-badge::before {
+            content: "◆";
+            margin-right: 8px;
+            font-size: 0.75rem;
+        }
+        .content {
+            padding: 40px 48px;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .section-title {
+            color: #1e293b;
+            font-size: 1.25rem;
+            margin-bottom: 20px;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+        .endpoints {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .endpoint-item {
+            background: #f8fafc;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid #e2e8f0;
+            transition: all 0.2s;
+        }
+        .endpoint-item:hover {
+            border-color: #cbd5e1;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .endpoint-header {
+            display: flex;
+            align-items: center;
+            padding: 14px 18px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.15s;
+        }
+        .endpoint-header:hover {
+            background: #f1f5f9;
+        }
+        .method {
+            font-weight: 700;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            margin-right: 14px;
+            min-width: 55px;
+            text-align: center;
+            letter-spacing: 0.025em;
+        }
+        .method-get {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        .method-post {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .path {
+            font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', monospace;
+            color: #334155;
+            flex: 1;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        .chevron {
+            color: #94a3b8;
+            transition: transform 0.2s;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .chevron.open {
+            transform: rotate(180deg);
+        }
+        .endpoint-details {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            background: white;
+        }
+        .endpoint-details.open {
+            max-height: 2500px;
+            transition: max-height 0.5s ease-in;
+        }
+        .details-content {
+            padding: 24px;
+            border-top: 1px solid #e2e8f0;
+        }
+        .description {
+            color: #475569;
+            margin-bottom: 24px;
+            line-height: 1.7;
+            font-size: 0.9rem;
+        }
+        .params-section {
+            margin-bottom: 24px;
+        }
+        .params-section:last-child {
+            margin-bottom: 0;
+        }
+        .params-section h4 {
+            color: #1e293b;
+            font-size: 0.8rem;
+            margin-bottom: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.75px;
+            font-weight: 700;
+        }
+        .param {
+            background: #f8fafc;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            font-size: 0.85rem;
+            border: 1px solid #f1f5f9;
+        }
+        .param:last-child {
+            margin-bottom: 0;
+        }
+        .param-name {
+            font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', monospace;
+            color: #6366f1;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        .param-type {
+            color: #64748b;
+            font-style: italic;
+            margin-left: 8px;
+            font-size: 0.8rem;
+        }
+        .param-desc {
+            color: #475569;
+            margin-top: 6px;
+            line-height: 1.5;
+            font-size: 0.825rem;
+        }
+        .required {
+            color: #dc2626;
+            font-size: 0.7rem;
+            font-weight: 700;
+            margin-left: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .optional {
+            color: #64748b;
+            font-size: 0.7rem;
+            font-weight: 600;
+            margin-left: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 5px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Accounting Module API</h1>
+            <p class="subtitle">ROFL accounting service for deposits, withdrawals, and fund management</p>
+            <div class="network-badge">Sapphire Testnet</div>
+        </div>
+
+        <div class="content">
+            <h2 class="section-title">API Endpoints</h2>
+            <div class="endpoints">
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/quote/deposit</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Generate deposit instructions and transaction data for a user/token/amount combination.</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">EVM address of the user</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Bytes32 token identifier (hex)</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">amount</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Amount to deposit in base units (e.g., wei for ETH)</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Checksummed address</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Normalised bytes32 token identifier</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">amount</span>
+                                    <span class="param-type">integer</span>
+                                    <div class="param-desc">Amount to deposit</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">deposit_address</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">ROFL-controlled destination address</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">transaction</span>
+                                    <span class="param-type">object</span>
+                                    <div class="param-desc">Transaction data to execute (to, value, data, chain_id)</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">instructions</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Deposit guidance for clients</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/deposits</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Submit a deposit inclusion transaction (automatically detects native/ERC20 based on token_id).</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Depositor address</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Bytes32 token identifier (hex)</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">evm_transaction_data</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">RLP-encoded transaction payload</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">rlp_block_header</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">RLP-encoded block header</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">transaction_index_rlp</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">RLP-encoded transaction index</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">transaction_proof_stack</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">Merkle proof stack</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">submission_id</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">ROFL submission identifier</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">status</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Submission status, e.g. submitted</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/funds/lock</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Lock user funds for a service using the user's EIP-712 signature.</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">service_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">amount</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">expiry</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Unix timestamp</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">signature</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">User EIP-712 Lock signature</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">submission_id</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">status</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">detail</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-get">GET</span>
+                        <span class="path">/v1/accounting/funds/locked/{user_address}</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Get locked funds for a user, optionally filtered by service address.</div>
+                            <div class="params-section">
+                                <h4>Query Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">service_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">Filter locks by service address</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Checksummed user address</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">service_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">Service address filter if provided</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">locks</span>
+                                    <span class="param-type">array</span>
+                                    <div class="param-desc">List of lock information (lock_index, user_address, service_address, token_id, amount, expiry, is_expired)</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">total_locked</span>
+                                    <span class="param-type">integer</span>
+                                    <div class="param-desc">Total amount locked across all locks</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/funds/transfer</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Transfer balances between users with the originator's EIP-712 signature.</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">to_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">amount</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">signature</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">User EIP-712 Transfer signature</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">submission_id</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">status</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">detail</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/funds/transfer-locked</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Consume or release locked funds using the service's EIP-712 signature.</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Owner of the lock</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">lock_index</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">to_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">amount</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">signature</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">Service EIP-712 TransferLocked signature</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">submission_id</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">status</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">detail</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/funds/unlock</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Unlock an expired lock without a signature.</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">lock_index</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">submission_id</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">status</span>
+                                    <span class="param-type">string</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">detail</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-post">POST</span>
+                        <span class="path">/v1/accounting/withdraw</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Initiate a withdrawal based on the user's EIP-712 signature. The service verifies the signature, generates the withdrawal transaction via the contract, and relays it to the chain RPC mapped to the token.</div>
+                            <div class="params-section">
+                                <h4>Request Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">amount</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="required">required</span>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">signature</span>
+                                    <span class="param-type">string</span>
+                                    <span class="required">required</span>
+                                    <div class="param-desc">User EIP-712 Withdraw signature</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">submission_id</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Hash of the relayed transaction</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">status</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Submission status, e.g. submitted</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">detail</span>
+                                    <span class="param-type">string</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">Metadata such as chain_id and token_address</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-get">GET</span>
+                        <span class="path">/v1/accounting/balances/{user_address}/{token_id}</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Get the user's balance for a specific token from the contract.</div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">user_address</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Checksummed address</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_id</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Token identifier</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">balance</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">User's balance in base units (wei for ETH)</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">token_symbol</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Token symbol</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">chain_id</span>
+                                    <span class="param-type">string</span>
+                                    <div class="param-desc">Default Sapphire chain ID</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function toggleEndpoint(header) {
+            const details = header.nextElementSibling;
+            const chevron = header.querySelector('.chevron');
+
+            details.classList.toggle('open');
+            chevron.classList.toggle('open');
+        }
+    </script>
+</body>
+</html>
