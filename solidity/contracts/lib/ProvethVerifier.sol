@@ -11,7 +11,7 @@ struct StorageProof {
     bytes storageProofStack;
 }
 
-struct TransactionProof {
+struct EVMTransactionProof {
     bytes rlpBlockHeader;
     bytes transactionIndexRlp;
     bytes transactionProofStack;
@@ -122,7 +122,7 @@ contract ProvethVerifier {
     }
 
     function validateTxProof(
-        TransactionProof calldata txProof
+        EVMTransactionProof calldata txProof
     ) public pure returns (bytes memory) {
         RLPReader.RLPItem[] memory blockHeader = txProof
             .rlpBlockHeader

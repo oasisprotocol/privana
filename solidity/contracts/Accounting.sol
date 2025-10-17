@@ -12,7 +12,7 @@ import {TokenInfo, TokenType, UserInfo, FundLock, TransactionProof} from "./Type
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 
-import {ProvethVerifier} from "./lib/ProvethVerifier.sol";
+import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
 
 /**
  * @title Accounting
@@ -72,18 +72,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      *
      * @param userAddress The address of the user making the deposit
      * @param tokenId The identifier of the token being deposited
-     * @param evmTransactionData The raw RLP-encoded transaction data
      * @param txProof The cryptographic proof that the transaction was included in a block
      */
     function includeEVMDeposit(
         address userAddress,
         bytes32 tokenId,
-        bytes calldata evmTransactionData,
-        TransactionProof calldata txProof
+        EVMTransactionProof calldata txProof
     ) public {
-        bytes memory evmTransactionData = ProvethVerifier.validateTxProof(
-            txProof
-        );
+        bytes memory evmTransactionData = validateTxProof(txProof);
 
         (
             uint256 chainId,

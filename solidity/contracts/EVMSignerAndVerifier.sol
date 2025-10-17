@@ -9,14 +9,16 @@ import {RLPWriter} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.s
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP155Signer} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
-import {ProvethVerifier, TransactionProof} from "./lib/ProvethVerifier.sol";
+import {ProvethVerifier, EVMTransactionProof} from "./lib/ProvethVerifier.sol";
+
+import {SliceBytes} from "./lib/SliceBytes.sol";
 import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
 import {EthereumUtils} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
 import {TokenInfo, EVMKeypair} from "./Types.sol";
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 
-contract EVMSignerAndVerifier {
+contract EVMSignerAndVerifier is ProvethVerifier {
     address public evmAddress;
     bytes32 private secretKey;
     IShoyuBashi public shoyuBashi;
@@ -31,6 +33,7 @@ contract EVMSignerAndVerifier {
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for RLPReader.Iterator;
     using RLPReader for bytes;
+    using SliceBytes for bytes;
 
     constructor() {
         // Add back in once the evm_increaseTime issue is resolved on sapphire localnet
@@ -91,7 +94,7 @@ contract EVMSignerAndVerifier {
      * @return s The signature s value.
      */
     function decodeEVMTransaction(
-        bytes calldata evmTransactionData
+        bytes memory evmTransactionData
     )
         internal
         returns (
@@ -168,7 +171,10 @@ contract EVMSignerAndVerifier {
             hash = keccak256(evmTransactionData);
 
             // Remove the type byte (0x01) prefix.
-            evmTransactionData = evmTransactionData[1:];
+            evmTransactionData = evmTransactionData.getSlice(
+                1,
+                evmTransactionData.length
+            );
 
             // RLP-decode the remaining bytes into fields.
             // EIP-2930 order: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS]
@@ -222,7 +228,10 @@ contract EVMSignerAndVerifier {
             hash = keccak256(evmTransactionData);
 
             // Remove the type byte (0x02) prefix.
-            evmTransactionData = evmTransactionData[1:];
+            evmTransactionData = evmTransactionData.getSlice(
+                1,
+                evmTransactionData.length
+            );
 
             // RLP-decode the remaining bytes into fields.
             // EIP-1559 order: [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS]
@@ -342,30 +351,6 @@ contract EVMSignerAndVerifier {
         to = address(uint160(uint256(toBytes)));
         // Convert the 32-byte word to uint256
         amount = uint256(amountBytes);
-    }
-
-    /**
-     * @notice Verifies that a transaction was included in a block using Hashi proof verification.
-     *
-     * This function uses the Hashi protocol to cryptographically verify that a transaction
-     * was actually included in a specific block on the source chain. It validates:
-     *   1. The block header integrity and finality
-     *   2. The transaction's inclusion in the block's transaction trie
-     *   3. The transaction receipt's inclusion in the block's receipt trie
-     *
-     * The verification process involves:
-     *   - Merkle proof validation against the block's transaction root
-     *   - Receipt proof validation against the block's receipt root
-     *   - Optional ancestral block verification for finality requirements
-     *
-     * @param receiptProof The Hashi proof structure containing all verification data
-     * @return bool True if the transaction proof is cryptographically valid
-     */
-    function verifyTransactionProof(
-        bytes32 transactionHash,
-        TransactionProof memory receiptProof
-    ) internal view returns (bool) {
-        return true;
     }
 
     /**
@@ -597,6 +582,13 @@ contract EVMSignerAndVerifier {
             .toRlpItem()
             .toList();
         blockNumber = (blockHeader[5].toUint());
+    }
+
+    function validateEVMTxProof(
+        EVMTransactionProof calldata txProof
+    ) internal view returns (bytes memory) {
+        // Validate the transaction proof using the ProvethVerifier
+        return validateTxProof(txProof);
     }
 
     function verifyBlockHash(
