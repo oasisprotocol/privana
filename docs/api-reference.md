@@ -104,7 +104,7 @@ Initiate a withdrawal based on the user's EIP-712 signature. The service verifie
   - `signature` (string, required) – User EIP-712 `Withdraw` signature.
 - **Response body**
   - `submission_id` (string) – Hash of the relayed transaction.
-  - `status` (string) – Typically `sent` when broadcast succeeds.
+  - `status` (string) – Submission status, e.g. `submitted`.
   - `detail` (string, optional) – Metadata such as `chain_id` and `token_address`.
 
 ### GET `/balances/{user_address}/{token_id}`

@@ -356,7 +356,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
         // If the expiry has passed or there are no funds in the, undo the above step, otherwise revert
         require(lockIndex < locks.length, "Invalid lock index");
-        FundLock memory lock = locks[lockIndex];
+        FundLock storage lock = locks[lockIndex];
 
         EIP712SignatureVerifier.verifyTransferLockedSignature(
             lock.serviceId,

@@ -25,6 +25,11 @@ CHAIN_NAMES: Dict[int, str] = {
     84532: "Base Sepolia",
 }
 
+NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
+    # 8453: "ETH",
+    84532: "ETH",
+}
+
 ERC20_TOKENS: Dict[int, Dict[str, str]] = {
     84532: {
         "0x12084E1A0fe92b5ab803a81A0Ae54D91040F89ca": "USDC",
@@ -70,4 +75,4 @@ def load_settings(refresh: bool = False) -> Settings:
     return _settings
 
 
-__all__ = ["load_settings", "CHAIN_NAMES", "ERC20_TOKENS"]
+__all__ = ["load_settings", "CHAIN_NAMES", "NATIVE_TOKEN_SYMBOLS", "ERC20_TOKENS"]

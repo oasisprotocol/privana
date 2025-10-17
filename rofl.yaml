@@ -13,7 +13,7 @@ artifacts:
   kernel: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage1.bin#e5d4d654ca1fa2c388bf64b23fc6e67815893fc7cb8b7cfee253d87963f54973
   stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage2-podman.tar.bz2#b2ea2a0ca769b6b2d64e3f0c577ee9c08f0bb81a6e33ed5b15b2a7e50ef9a09f
   container:
-    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.0/rofl-containers#08eb5bbe5df26af276d9a72e9fd7353b3a90b7d27e1cf33e276a82dfd551eec6
+    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.1/rofl-containers#993e66f3b037cdc63896216cde4dc91b4976cc82a698c63123a9bba8710852c4
     compose: compose.yaml
 deployments:
   default:
@@ -21,7 +21,7 @@ deployments:
     network: testnet
     paratime: sapphire
     admin: testing
-    oci_repository: rofl.sh/c289f29b-d497-4bd8-a348-dcf471c3fedf:1759851123
+    oci_repository: rofl.sh/75c945d1-034d-4517-ba08-23a7d6030f27:1760082644
     trust_root:
       height: 28684478
       hash: a588feea65923f80caf1a3c92a51fee24dc9fa20c4e96f87999a600a5eb4f337
@@ -32,15 +32,15 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: 4cae5TSKVoqIYILT5JGmbc8eLcgSZk3arK5Lv6JEWQkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: nD/eig7PGfH6XQfhkrzuokF/9eBb4xqM75QGZsPnxjgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: Dbo4ckp1utKY5nuwF1BejvvTOv6GDcXMAG8XdNlrTXEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: AlyntxN/yOauCh3zwRKwdDCUbK552piYcKI+giZlqaUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggBRNh4cuYqT/x6FVMlCE2Wk6fk5ip7NNtih+/W6/flVRkbmFtZVgr7HY1jEl6sgsPXEWo+b0Rc20il9fxwCX2d9t4pUuPC8X010OaQYQHs1cxC2Vub25jZU9BboLhWa03X9Sh6XHnZV9ldmFsdWVYOrKgewnLAsj/QiBlKXVr0QPK7x2Rnt07Vw90dgcYtFUnzMrVHiB95yFfdGMBblFcCQvRSrDrEsdmwXY=
+        value: pGJwa1ggNdZOSoHOWvASeb1++A8CQ5BPkKQETZGKc/SCoGFsGzdkbmFtZVgrc7Nt4NzZ9G/993t1rZPbd3PMNAuKgCi7f5X1cUbX+xcwlZXiaI5geIyR+mVub25jZU9IYkQMctReYSe54sqg+N9ldmFsdWVYOtiv9wgA5w53lo362wcoXNLGgxpFYK/OuyhHnHqUacsFaWJZdXF43S00sMdeXi0QaV8FfzTThDs0zEA=
       - name: SAPPHIRE_CHAIN_ID
         value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL
@@ -49,4 +49,4 @@ deployments:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: "0000000000000326"
+        id: "0000000000000336"
