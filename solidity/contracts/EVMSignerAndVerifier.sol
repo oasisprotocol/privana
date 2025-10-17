@@ -14,10 +14,12 @@ import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol
 import {EthereumUtils} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
 import {TokenInfo, EVMKeypair} from "./Types.sol";
+import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 
 contract EVMSignerAndVerifier {
     address public evmAddress;
     bytes32 private secretKey;
+    IShoyuBashi public shoyuBashi;
 
     mapping(uint256 chainId => uint64) public nonces;
     mapping(uint256 chainId => uint256) public gasPrices;
@@ -45,6 +47,7 @@ contract EVMSignerAndVerifier {
         // secretKey = bytes32(secretKeyBytes);
         evmAddress = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
         secretKey = 0x4bab77fcaf2d66bcb2e52cbf64102eea5fbee93005865faf66f616918f6318ea;
+        shoyuBashi = IShoyuBashi(0x284a3Fe2939a4e4859e6321537d4264533E3D549); // Replace with actual ShoyuBashi contract address on Sapphire
     }
 
     /**
@@ -585,5 +588,29 @@ contract EVMSignerAndVerifier {
         address tokenAddress
     ) public pure returns (bytes memory data) {
         return abi.encodePacked(chainId, tokenAddress);
+    }
+
+    function getBlockNumber(
+        bytes memory rlpBlockHeader
+    ) public pure returns (uint256 blockNumber) {
+        RLPReader.RLPItem[] memory blockHeader = rlpBlockHeader
+            .toRlpItem()
+            .toList();
+        blockNumber = (blockHeader[5].toUint());
+    }
+
+    function verifyBlockHash(
+        bytes32 expectedBlockHash,
+        uint256 blockNumber,
+        uint256 chainId
+    ) public view {
+        // Call Blockhash oracle with hash, blocknumber and chainId
+        bytes32 actualBlockHash = shoyuBashi.getUnanimousHash(
+            chainId,
+            blockNumber
+        );
+        // @ahmed needs to call Shoyubashi before submitting the includeEVMDeposit to update the blockhash oracle
+        // Call this function https://github.com/rube-de/hashi/blob/b43726b27eedddf15e48e65e0175aba4b2a8096e/packages/evm/contracts/ownable/ShoyuBashi.sol#L28
+        require(actualBlockHash == expectedBlockHash, "Invalid block hash");
     }
 }

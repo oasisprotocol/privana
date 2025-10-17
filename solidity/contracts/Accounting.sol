@@ -12,6 +12,8 @@ import {TokenInfo, TokenType, UserInfo, FundLock, TransactionProof} from "./Type
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 
+import {ProvethVerifier} from "./lib/ProvethVerifier.sol";
+
 /**
  * @title Accounting
  * @notice Cross-chain accounting module for managing user balances and fund operations.
@@ -79,6 +81,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes calldata evmTransactionData,
         TransactionProof calldata txProof
     ) public {
+        bytes memory evmTransactionData = ProvethVerifier.validateTxProof(
+            txProof
+        );
+
         (
             uint256 chainId,
             bytes32 txHash,
@@ -90,6 +96,16 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             uint256 r,
             uint256 s
         ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+
+        uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
+            txProof.rlpBlockHeader
+        );
+
+        EVMSignerAndVerifier.verifyBlockHash(
+            keccak256(txProof.rlpBlockHeader),
+            blockNumber,
+            chainId
+        );
 
         // Verify from matches the userAddress
         require(from == userAddress, "From address mismatch");
