@@ -14,6 +14,8 @@ import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 
 import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
 
+import "hardhat/console.sol";
+
 /**
  * @title Accounting
  * @notice Cross-chain accounting module for managing user balances and fund operations.
@@ -42,7 +44,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
      * @dev Calls parent constructors to set up EIP-712 domain and EVM signing infrastructure.
      */
-    constructor() EVMSignerAndVerifier() EIP712SignatureVerifier() {}
+    constructor(
+        address _shoyubashi
+    ) EVMSignerAndVerifier(_shoyubashi) EIP712SignatureVerifier() {}
 
     /**
      * @notice Processes and verifies an EVM deposit transaction to credit user's account.
@@ -79,6 +83,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes32 tokenId,
         EVMTransactionProof calldata txProof
     ) public {
+        console.log("includeEVMDeposit called");
+
         bytes memory evmTransactionData = validateTxProof(txProof);
 
         (
@@ -93,15 +99,21 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             uint256 s
         ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
 
+        console.log("proof validated");
+
         uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
             txProof.rlpBlockHeader
         );
+
+        console.log("block number:", blockNumber);
 
         EVMSignerAndVerifier.verifyBlockHash(
             keccak256(txProof.rlpBlockHeader),
             blockNumber,
             chainId
         );
+
+        console.log("transaction verified");
 
         // Verify from matches the userAddress
         require(from == userAddress, "From address mismatch");

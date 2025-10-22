@@ -185,23 +185,34 @@ task("sign")
     return signature;
   });
 
+task("accounts").addOptionalParam("idx", "Account index").setAction(async (args, hre) => {
+  const accounts = hre.config.networks.hardhat.accounts as HDAccountsUserConfig;
+  const index = args.idx; // first wallet, increment for next wallets
+  const wallet1 = hre.ethers.Wallet.fromPhrase(accounts.mnemonic);
+
+  console.log("private key:", wallet1.privateKey);
+  console.log("address:", wallet1.address);
+
+});
+
 const TEST_HDWALLET = {
-  mnemonic: 'test test test test test test test test test test test junk',
+  mnemonic: 'chimney theory present latin find behave ankle clock shadow earn suit reflect',
   path: "m/44'/60'/0'/0",
   initialIndex: 0,
   count: 20,
   passphrase: '',
 } as const satisfies HDAccountsUserConfig;
 
-const accounts = process.env.PRIVATE_KEY
-  ? [process.env.PRIVATE_KEY]
-  : TEST_HDWALLET;
+const accounts = TEST_HDWALLET;
 
 const config: HardhatUserConfig = {
   networks: {
     sapphire: { ...sapphireMainnet, accounts },
     'sapphire-testnet': { ...sapphireTestnet, accounts },
     'sapphire-localnet': { ...sapphireLocalnet, accounts },
+    hardhat: {
+      accounts
+    }
   },
   sourcify: {
     enabled: true

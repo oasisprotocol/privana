@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
+/* solhint-disable no-console */
 pragma solidity ^0.8.18;
 
 import "solidity-rlp/contracts/RLPReader.sol";
+
+import "hardhat/console.sol";
 
 struct StorageProof {
     bytes rlpBlockHeader;
