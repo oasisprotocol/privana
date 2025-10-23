@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
+/* solhint-disable no-console */
 pragma solidity ^0.8.18;
 
 import "solidity-rlp/contracts/RLPReader.sol";
+
+import "hardhat/console.sol";
 
 struct StorageProof {
     bytes rlpBlockHeader;
@@ -11,7 +14,7 @@ struct StorageProof {
     bytes storageProofStack;
 }
 
-struct TransactionProof {
+struct EVMTransactionProof {
     bytes rlpBlockHeader;
     bytes transactionIndexRlp;
     bytes transactionProofStack;
@@ -122,7 +125,7 @@ contract ProvethVerifier {
     }
 
     function validateTxProof(
-        TransactionProof calldata txProof
+        EVMTransactionProof calldata txProof
     ) public pure returns (bytes memory) {
         RLPReader.RLPItem[] memory blockHeader = txProof
             .rlpBlockHeader

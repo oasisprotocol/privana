@@ -1,8 +1,10 @@
 import { expect, version } from 'chai';
-import { ethers } from 'hardhat';
-import { parseEther, Wallet } from 'ethers';
-import { Accounting } from '../typechain-types';
-import { generateERC20Tx } from './utils';
+import { ethers, config } from 'hardhat';
+import { keccak256, parseEther, Wallet } from 'ethers';
+import { Accounting, MockShoyuBashi } from '../typechain-types';
+import { generateERC20Tx, getRlpUint } from './utils';
+import { getTxInclusionProof } from './utils';
+import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 // import {
 //   isCalldataEnveloped,
 //   wrapEthereumProvider,
@@ -37,27 +39,51 @@ const types = {
 
 const TEST_TOKEN = {
   tokenType: 1, // ERC20
-  // keccak256(abi.encodePacked(uint256(31337), address(0x0000000000000000000000000000000000000001)))
+  // keccak256(abi.encodePacked(uint256(84532), address(0x12084e1a0fe92b5ab803a81a0ae54d91040f89ca)))
   // Precomputed to save time and avoid dependency on ethers.utils.solidityPack
   // which is not available in the ethers v6 version used by hardhat
-  tokenId: "0x2caec014e240ce3c23bc5030e72c3cef9d88d6060dccc6f870e33c3a58a42132",
-  chainId: 31337,
-  address: '0x0000000000000000000000000000000000000001',
+  tokenId: "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+  chainId: 84532,
+  address: '0x036cbd53842c5426634e7929541ec2318f3dcf7e',
 };
 
-const userWallet1 = Wallet.createRandom().connect(ethers.provider);
-const userWallet2 = Wallet.createRandom().connect(ethers.provider);
+function parseUsdt(amount: string): bigint {
+  const [whole, fraction = ''] = amount.split('.');
+  if (fraction.length > 6) {
+    throw new Error('USDT supports up to 6 decimal places');
+  }
+  const wholePart = BigInt(whole) * BigInt(10 ** 6);
+  const fractionPart = BigInt(fraction.padEnd(6, '0'));
+  return wholePart + fractionPart;
+}
 
 describe('Accounting', function () {
   let accounting: Accounting;
+  let mockShoyubashi: MockShoyuBashi;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let userWallet1: Wallet;
+  let userWallet2: Wallet;
 
   before(async () => {
     const provider = ethers.provider;
 
+    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
+    mockShoyubashi = await MockShoyubashiFactory.deploy();
+    await mockShoyubashi.waitForDeployment();
+
     const AccountingFactory = await ethers.getContractFactory('Accounting');
-    accounting = await AccountingFactory.deploy();
+    accounting = await AccountingFactory.deploy(await mockShoyubashi.getAddress());
     await accounting.waitForDeployment();
+
+    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
+      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
+    );
+
+    // Drive index 0 and 1 wallets
+    userWallet1 = hdNodeWallet.connect(provider);
+    userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(provider);
+
+    console.log("wallets", userWallet1.address, userWallet2.address);
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -88,6 +114,8 @@ describe('Accounting', function () {
       data: data
     });
 
+    console.log("tokenId", tokenId);
+
     expect(tokenId).to.equal(TEST_TOKEN.tokenId);
     expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
   });
@@ -95,26 +123,33 @@ describe('Accounting', function () {
   it("User should be able to deposit", async function () {
     const depositAddress = await accounting.evmAddress();
 
-    const tx = await generateERC20Tx({
-      signer: userWallet1,
-      tokenAddress: TEST_TOKEN.address,
-      to: depositAddress,
-      amount: parseEther("10"),
-      chainId: TEST_TOKEN.chainId,
-      nonce: 1,
-      type: 0
-    });
+    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+
+    const blockNumber = 32680090;
+    const transactionIndex = 45;
+
+    const { rlpBlockHeader, proof } = await getTxInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
 
     // Check balance before
     const balanceBefore = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
 
+    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
+
     // Submit the deposit to Accounting contract
-    await accounting.includeEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, tx, { rlpBlockHeader: "0x", transactionIndexRlp: "0x", transactionProofStack: "0x" });
+    await accounting.includeEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+      rlpBlockHeader,
+      transactionIndexRlp: getRlpUint(transactionIndex),
+      transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
+    });
 
     const balanceAfter = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
 
     expect(balanceBefore).to.equal(0);
-    expect(balanceAfter).to.equal(parseEther("10"));
+    expect(balanceAfter).to.equal(parseUsdt("10"));
   });
 
   it("Test EIP712 transfer", async function () {
@@ -125,7 +160,7 @@ describe('Accounting', function () {
         userAddress: userWallet1.address,
         toAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
-        amount: parseEther("1"),
+        amount: parseUsdt("1"),
       }
     );
 
@@ -138,7 +173,7 @@ describe('Accounting', function () {
       userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
-      parseEther("1"),
+      parseUsdt("1"),
       signature
     );
     await tx.wait();
@@ -146,10 +181,10 @@ describe('Accounting', function () {
     const balance1After = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
     const balance2After = await accounting.balances(userWallet2.address, TEST_TOKEN.tokenId);
 
-    expect(balance1Before).to.equal(parseEther("10"));
-    expect(balance1After).to.equal(parseEther("9"));
+    expect(balance1Before).to.equal(parseUsdt("10"));
+    expect(balance1After).to.equal(parseUsdt("9"));
     expect(balance2Before).to.equal(0);
-    expect(balance2After).to.equal(parseEther("1"));
+    expect(balance2After).to.equal(parseUsdt("1"));
   });
 
   it("Test locking with EIP712", async function () {
@@ -162,7 +197,7 @@ describe('Accounting', function () {
         userAddress: userWallet1.address,
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
-        amount: parseEther("1"),
+        amount: parseUsdt("1"),
         expiry
       }
     );
@@ -176,7 +211,7 @@ describe('Accounting', function () {
       userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
-      parseEther("1"),
+      parseUsdt("1"),
       expiry,
       signature
     );
@@ -185,10 +220,10 @@ describe('Accounting', function () {
     const balance1After = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
     const balance2After = await accounting.balances(userWallet2.address, TEST_TOKEN.tokenId);
 
-    expect(balance1Before).to.equal(parseEther("9"));
-    expect(balance1After).to.equal(parseEther("8"));
-    expect(balance2Before).to.equal(parseEther("1"));
-    expect(balance2After).to.equal(parseEther("1"));
+    expect(balance1Before).to.equal(parseUsdt("9"));
+    expect(balance1After).to.equal(parseUsdt("8"));
+    expect(balance2Before).to.equal(parseUsdt("1"));
+    expect(balance2After).to.equal(parseUsdt("1"));
 
     // It doesn't go to the normal balance, instead a lock is appended to the user info
     const userLocks = await accounting.getUserLocks(userWallet1.address);
@@ -196,7 +231,7 @@ describe('Accounting', function () {
     expect(userLocks.length).to.equal(1);
     expect(userLocks[0][0]).to.equal(userWallet2.address);
     expect(userLocks[0][1]).to.equal(TEST_TOKEN.tokenId);
-    expect(userLocks[0][2]).to.equal(parseEther("1"));
+    expect(userLocks[0][2]).to.equal(parseUsdt("1"));
     expect(userLocks[0][3]).to.be.equal(expiry);
   });
 
@@ -208,7 +243,7 @@ describe('Accounting', function () {
         userAddress: userWallet1.address,
         toAddress: userWallet2.address,
         lockIndex: 0,
-        amount: parseEther("0.5"),
+        amount: parseUsdt("0.5"),
       }
     );
 
@@ -220,7 +255,7 @@ describe('Accounting', function () {
       userWallet1.address,
       userWallet2.address,
       0,
-      parseEther("0.5"),
+      parseUsdt("0.5"),
       signature
     );
     await tx.wait();
@@ -251,7 +286,7 @@ describe('Accounting', function () {
           userAddress: userWallet1.address,
           serviceAddress: userWallet2.address,
           tokenId: TEST_TOKEN.tokenId,
-          amount: parseEther("0.1"),
+          amount: parseUsdt("0.1"),
           expiry: expiry + i
         }
       );
@@ -261,7 +296,7 @@ describe('Accounting', function () {
         userWallet1.address,
         userWallet2.address,
         TEST_TOKEN.tokenId,
-        parseEther("0.1"),
+        parseUsdt("0.1"),
         expiry + i,
         signature
       );
@@ -279,7 +314,7 @@ describe('Accounting', function () {
         userAddress: userWallet1.address,
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
-        amount: parseEther("0.1"),
+        amount: parseUsdt("0.1"),
         expiry: expiry + 11
       }
     );
@@ -288,7 +323,7 @@ describe('Accounting', function () {
       userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
-      parseEther("0.1"),
+      parseUsdt("0.1"),
       expiry + 11,
       signature
     )).to.be.revertedWith("Too many active locks");
@@ -302,7 +337,7 @@ describe('Accounting', function () {
       {
         userAddress: userWallet1.address,
         tokenId: TEST_TOKEN.tokenId,
-        amount: parseEther("0.1"),
+        amount: parseUsdt("0.1"),
       }
     );
 
@@ -310,7 +345,7 @@ describe('Accounting', function () {
     const tx = await accounting.withdrawFunds(
       userWallet1.address,
       TEST_TOKEN.tokenId,
-      parseEther("0.1"),
+      parseUsdt("0.1"),
       signature
     );
     await tx.wait();

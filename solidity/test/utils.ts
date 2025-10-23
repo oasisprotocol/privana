@@ -92,10 +92,6 @@ export async function generateERC20Tx({
 
 // Inclusion proofs
 
-const publicProvider = new ethers.JsonRpcProvider("https://eth.llamarpc.com", {
-	chainId: 1,
-	name: "ethereum"
-});
 
 export function getMappingStorageSlot(mappingKey: BytesLike, mappingSlot: BytesLike): string {
 	return ethers.keccak256(
@@ -113,13 +109,6 @@ export function getRlpUint(number: any): string {
 		hex_value = "0x0" + hex_value.slice(2);
 	}
 	return number > 0 ? ethers.encodeRlp(ethers.getBytes(hex_value)) : ethers.encodeRlp("0x");
-}
-
-function throwIfEmpty<T>(val: T | undefined | null, valStr: string): T {
-	if (val === undefined || val === null) {
-		throw new Error("Expected value to be non-empty: " + valStr);
-	}
-	return val;
 }
 
 export async function getTxInclusionProof(
@@ -161,55 +150,5 @@ export async function getTxInclusionProof(
 	return {
 		rlpBlockHeader: ethers.encodeRlp(blockHeader),
 		proof: txProofHex,
-	};
-}
-
-async function getTxInclusion(gethProvider: JsonRpcProvider, txHash: string) {
-	const signedWithdrawalTx = await publicProvider.getTransaction(txHash);
-	if (signedWithdrawalTx === null) {
-		throw new Error("Withdrawal transaction is null");
-	}
-	if (signedWithdrawalTx.type !== 2) {
-		throw new Error("Unsupported transaction type (must be 2 for getTxInclusion)");
-	}
-	const txReceipt = await gethProvider.getTransactionReceipt(txHash);
-	if (txReceipt === null) {
-		throw new Error("Withdrawal transaction receipt is null");
-	}
-	const { proof, rlpBlockHeader } = await getTxInclusionProof(
-		gethProvider,
-		txReceipt.blockNumber,
-		txReceipt.index,
-	);
-
-	// Get proof
-	// This can be gathered from the transaction data of the included transaction
-	const signedTxFormatted = {
-		transaction: {
-			chainId: signedWithdrawalTx.chainId,
-			nonce: signedWithdrawalTx.nonce,
-			maxPriorityFeePerGas: throwIfEmpty(
-				signedWithdrawalTx.maxPriorityFeePerGas,
-				"maxPriorityFeePerGas",
-			),
-			maxFeePerGas: throwIfEmpty(signedWithdrawalTx.maxFeePerGas, "maxFeePerGas"),
-			gasLimit: signedWithdrawalTx.gasLimit,
-			destination: throwIfEmpty(signedWithdrawalTx.to, "to"),
-			amount: signedWithdrawalTx.value,
-			payload: signedWithdrawalTx.data,
-		},
-		r: signedWithdrawalTx.signature.r,
-		s: signedWithdrawalTx.signature.s,
-		v: signedWithdrawalTx.signature.v,
-	};
-
-	return {
-		signedTxFormatted,
-		inclusionProof: {
-			rlpBlockHeader,
-			transactionIndexRlp: getRlpUint(txReceipt.index),
-			transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
-		},
-		proofBlockNumber: txReceipt.blockNumber,
 	};
 }

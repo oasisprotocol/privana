@@ -12,6 +12,10 @@ import {TokenInfo, TokenType, UserInfo, FundLock, TransactionProof} from "./Type
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 
+import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
+
+import "hardhat/console.sol";
+
 /**
  * @title Accounting
  * @notice Cross-chain accounting module for managing user balances and fund operations.
@@ -40,7 +44,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
      * @dev Calls parent constructors to set up EIP-712 domain and EVM signing infrastructure.
      */
-    constructor() EVMSignerAndVerifier() EIP712SignatureVerifier() {}
+    constructor(
+        address _shoyubashi
+    ) EVMSignerAndVerifier(_shoyubashi) EIP712SignatureVerifier() {}
 
     /**
      * @notice Processes and verifies an EVM deposit transaction to credit user's account.
@@ -70,15 +76,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      *
      * @param userAddress The address of the user making the deposit
      * @param tokenId The identifier of the token being deposited
-     * @param evmTransactionData The raw RLP-encoded transaction data
      * @param txProof The cryptographic proof that the transaction was included in a block
      */
     function includeEVMDeposit(
         address userAddress,
         bytes32 tokenId,
-        bytes calldata evmTransactionData,
-        TransactionProof calldata txProof
+        EVMTransactionProof calldata txProof
     ) public {
+        console.log("includeEVMDeposit called");
+
+        bytes memory evmTransactionData = validateTxProof(txProof);
+
         (
             uint256 chainId,
             bytes32 txHash,
@@ -90,6 +98,22 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             uint256 r,
             uint256 s
         ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+
+        console.log("proof validated");
+
+        uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
+            txProof.rlpBlockHeader
+        );
+
+        console.log("block number:", blockNumber);
+
+        EVMSignerAndVerifier.verifyBlockHash(
+            keccak256(txProof.rlpBlockHeader),
+            blockNumber,
+            chainId
+        );
+
+        console.log("transaction verified");
 
         // Verify from matches the userAddress
         require(from == userAddress, "From address mismatch");
