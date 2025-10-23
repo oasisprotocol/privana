@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: MIT
-/* solhint-disable no-console */
 pragma solidity ^0.8.20;
-
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
-
-import {TokenInfo, TokenType, UserInfo, FundLock, TransactionProof} from "./Types.sol";
-
+import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
-
 import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
-
-import "hardhat/console.sol";
 
 /**
  * @title Accounting
@@ -83,29 +74,23 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes32 tokenId,
         EVMTransactionProof calldata txProof
     ) public {
-        console.log("includeEVMDeposit called");
-
         bytes memory evmTransactionData = validateTxProof(txProof);
 
         (
             uint256 chainId,
-            bytes32 txHash,
+            ,
             address from,
             address to,
             uint256 value,
             bytes memory txData,
-            uint256 v,
-            uint256 r,
-            uint256 s
-        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+            ,
+            ,
 
-        console.log("proof validated");
+        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
 
         uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
             txProof.rlpBlockHeader
         );
-
-        console.log("block number:", blockNumber);
 
         EVMSignerAndVerifier.verifyBlockHash(
             keccak256(txProof.rlpBlockHeader),
@@ -113,14 +98,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             chainId
         );
 
-        console.log("transaction verified");
-
         // Verify from matches the userAddress
         require(from == userAddress, "From address mismatch");
 
         TokenInfo memory tInfo = tokens[tokenId];
-
-        // TODO: Verify transaction hash proof using txProof
 
         uint256 amount;
 
@@ -489,7 +470,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param info The token information containing type and chain-specific data
      * @return The unique bytes32 identifier for the token
      */
-    function getTokenId(TokenInfo calldata info) public view returns (bytes32) {
+    function getTokenId(TokenInfo calldata info) public pure returns (bytes32) {
         return keccak256(abi.encode(info.tokenType, info.data));
     }
 

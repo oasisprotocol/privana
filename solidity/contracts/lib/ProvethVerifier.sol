@@ -4,8 +4,6 @@ pragma solidity ^0.8.18;
 
 import "solidity-rlp/contracts/RLPReader.sol";
 
-import "hardhat/console.sol";
-
 struct StorageProof {
     bytes rlpBlockHeader;
     address addr;
@@ -24,9 +22,9 @@ contract ProvethVerifier {
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for bytes;
 
-    uint256 constant BLOCK_HEADER_STATE_ROOT_INDEX = 3;
-    uint256 constant BLOCK_HEADER_TX_ROOT_INDEX = 4;
-    uint256 constant ACCOUNT_STORAGE_ROOT_INDEX = 2;
+    uint256 private constant BLOCK_HEADER_STATE_ROOT_INDEX = 3;
+    uint256 private constant BLOCK_HEADER_TX_ROOT_INDEX = 4;
+    uint256 private constant ACCOUNT_STORAGE_ROOT_INDEX = 2;
 
     function isEmpty(
         RLPReader.RLPItem memory item

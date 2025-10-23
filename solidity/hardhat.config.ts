@@ -13,9 +13,9 @@ import { task } from "hardhat/config";
 
 dotenvConfig();
 
-task("deploy").setAction(async (_args, hre) => {
+task("deploy").addParam("shoyubashi", "The address of the ShoyuBashi oracle").setAction(async (args, hre) => {
   const Accounting = await hre.ethers.getContractFactory("Accounting");
-  const accounting = await Accounting.deploy();
+  const accounting = await Accounting.deploy(args.shoyubashi);
   const accountingAddr = await accounting.waitForDeployment();
 
   console.log(`Accounting address: ${accountingAddr.target}`);
