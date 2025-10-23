@@ -140,7 +140,7 @@ describe('Accounting', function () {
     await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
 
     // Submit the deposit to Accounting contract
-    await accounting.includeEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+    await accounting.creditDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
       rlpBlockHeader,
       transactionIndexRlp: getRlpUint(transactionIndex),
       transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
@@ -169,7 +169,7 @@ describe('Accounting', function () {
     const balance2Before = await accounting.balances(userWallet2.address, TEST_TOKEN.tokenId);
 
     // Submit the transfer to Accounting contract
-    const tx = await accounting.transferFunds(
+    const tx = await accounting.transferBalance(
       userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
@@ -207,7 +207,7 @@ describe('Accounting', function () {
     const balance2Before = await accounting.balances(userWallet2.address, TEST_TOKEN.tokenId);
 
     // Submit the transfer to Accounting contract
-    const tx = await accounting.lockFunds(
+    const tx = await accounting.createLock(
       userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
@@ -251,7 +251,7 @@ describe('Accounting', function () {
     const balance1Before = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
 
     // Submit the transfer to Accounting contract
-    const tx = await accounting.transferLockedFunds(
+    const tx = await accounting.transferFromLock(
       userWallet1.address,
       userWallet2.address,
       0,
@@ -268,7 +268,7 @@ describe('Accounting', function () {
     await ethers.provider.send("evm_increaseTime", [2 * 3600]);
     await ethers.provider.send("evm_mine", []);
 
-    await accounting.unlockFunds(userWallet1.address, 0);
+    await accounting.unlockSingleLock(userWallet1.address, 0);
 
     const userLocks = await accounting.getUserLocks(userWallet1.address);
     expect(userLocks.length).to.equal(0);
@@ -292,7 +292,7 @@ describe('Accounting', function () {
       );
 
       // Submit the transfer to Accounting contract
-      const tx = await accounting.lockFunds(
+      const tx = await accounting.createLock(
         userWallet1.address,
         userWallet2.address,
         TEST_TOKEN.tokenId,
@@ -319,14 +319,14 @@ describe('Accounting', function () {
       }
     );
 
-    await expect(accounting.lockFunds(
+    await expect(accounting.createLock(
       userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
       parseUsdt("0.1"),
       expiry + 11,
       signature
-    )).to.be.revertedWith("Too many active locks");
+    )).to.be.revertedWithCustomError(accounting, "TooManyActiveLocks");
   });
 
 
@@ -342,7 +342,7 @@ describe('Accounting', function () {
     );
 
     // Submit the transfer to Accounting contract
-    const tx = await accounting.withdrawFunds(
+    const tx = await accounting.withdraw(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       parseUsdt("0.1"),

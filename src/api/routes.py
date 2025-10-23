@@ -7,8 +7,11 @@ from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException
 
 from src.models.accounting import (
+    BatchBalancesRequest,
+    BatchBalancesResponse,
     DepositQuoteRequest,
     DepositQuoteResponse,
+    ExpiredLocksResponse,
     IncludeDepositRequest,
     IncludeDepositResponse,
     LockFundsRequest,
@@ -16,6 +19,7 @@ from src.models.accounting import (
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
+    UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
     WithdrawalRequest,
 )
@@ -61,7 +65,7 @@ async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositRespo
     """Submit a deposit inclusion transaction (automatically detects native/ERC20)."""
 
     try:
-        result = await asyncio.to_thread(_service.include_deposit, payload.dict())
+        result = await asyncio.to_thread(_service.include_deposit, payload.model_dump())
         return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -75,7 +79,7 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
     """Lock user funds for a service with a signed authorization."""
 
     try:
-        submission = await asyncio.to_thread(_service.lock_funds, payload.dict())
+        submission = await asyncio.to_thread(_service.lock_funds, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -89,7 +93,7 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
     """Transfer funds between accounting balances using a user signature."""
 
     try:
-        submission = await asyncio.to_thread(_service.transfer_funds, payload.dict())
+        submission = await asyncio.to_thread(_service.transfer_funds, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -103,7 +107,7 @@ async def transfer_locked_funds(payload: TransferLockedFundsRequest) -> Transact
     """Transfer locked funds based on a casino service signature."""
 
     try:
-        submission = await asyncio.to_thread(_service.transfer_locked_funds, payload.dict())
+        submission = await asyncio.to_thread(_service.transfer_locked_funds, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -117,7 +121,7 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
     """Unlock funds when lock expiry has passed."""
 
     try:
-        submission = await asyncio.to_thread(_service.unlock_funds, payload.dict())
+        submission = await asyncio.to_thread(_service.unlock_funds, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -131,7 +135,7 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
     """Commit a withdrawal request by validating the user's signature."""
 
     try:
-        submission = await asyncio.to_thread(_service.withdraw, payload.dict())
+        submission = await asyncio.to_thread(_service.withdraw, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -184,3 +188,45 @@ async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
     except Exception as exc:
         logger.exception("Failed to get balance")
         raise HTTPException(status_code=500, detail="Failed to retrieve balance") from exc
+
+
+@router.post("/funds/unlock-all-expired", response_model=TransactionSubmissionResponse)
+async def unlock_all_expired_locks(payload: UnlockAllExpiredLocksRequest) -> TransactionSubmissionResponse:
+    """Unlock all expired locks for a user."""
+
+    try:
+        submission = await asyncio.to_thread(_service.unlock_all_expired_locks, payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to unlock all expired locks")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get("/funds/expired/{user_address}", response_model=ExpiredLocksResponse)
+async def get_expired_locks(user_address: str) -> ExpiredLocksResponse:
+    """Get all expired locks for a user."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_expired_locks, user_address)
+        return ExpiredLocksResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get expired locks")
+        raise HTTPException(status_code=500, detail="Failed to retrieve expired locks") from exc
+
+
+@router.post("/balances/batch", response_model=BatchBalancesResponse)
+async def get_batch_balances(payload: BatchBalancesRequest) -> BatchBalancesResponse:
+    """Get balances for multiple tokens for a user."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_balances, payload.user_address, payload.token_ids)
+        return BatchBalancesResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get batch balances")
+        raise HTTPException(status_code=500, detail="Failed to retrieve balances") from exc

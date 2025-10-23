@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
-import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
 
 /**
@@ -17,59 +16,118 @@ import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
  * verification to ensure secure and authorized operations.
  *
  * Key features:
- * - Multi-chain deposit verification using transaction proofs
+ * - Multi-chain deposit verification using ShoyuBashi oracle and transaction proofs
  * - Fund locking mechanism for service interactions
  * - Peer-to-peer transfers within the accounting system
  * - Automated withdrawal transaction generation
  * - Universal token abstraction supporting various tokens
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
-    // Accounting for user balances
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
         public balances;
     mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
-
     mapping(address user => UserInfo) private userInfo;
+
+    event Deposit(
+        address indexed userAddress,
+        bytes32 indexed tokenId,
+        uint256 amount
+    );
+
+    event LockCreated(
+        address indexed userAddress,
+        address indexed serviceAddress,
+        bytes32 indexed tokenId,
+        uint256 amount,
+        uint256 expiry,
+        uint256 lockIndex
+    );
+
+    event LockUnlocked(
+        address indexed userAddress,
+        bytes32 indexed tokenId,
+        uint256 amount,
+        uint256 lockIndex
+    );
+
+    event BalanceTransferred(
+        address indexed fromAddress,
+        address indexed toAddress,
+        bytes32 indexed tokenId,
+        uint256 amount
+    );
+
+    event LockedFundsTransferred(
+        address indexed userAddress,
+        address indexed serviceAddress,
+        address indexed toAddress,
+        bytes32 tokenId,
+        uint256 amount,
+        uint256 lockIndex
+    );
+
+    event Withdrawal(
+        address indexed userAddress,
+        bytes32 indexed tokenId,
+        uint256 amount,
+        uint256 chainId
+    );
+
+    event TokenRegistered(
+        bytes32 indexed tokenId,
+        TokenType tokenType
+    );
+
+    error InvalidDeposit();
+    error InsufficientBalance();
+    error TooManyActiveLocks();
+    error InvalidLockIndex();
+    error LockNotExpired();
+    error InsufficientLockedAmount();
+    error UnsupportedTokenType();
+    error ChainIdMismatch();
+    error AddressMismatch();
+    error InvalidTransactionData();
 
     /**
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
      * @dev Calls parent constructors to set up EIP-712 domain and EVM signing infrastructure.
+     * @param _shoyubashi Address of the ShoyuBashi oracle for cross-chain block hash verification
      */
     constructor(
         address _shoyubashi
     ) EVMSignerAndVerifier(_shoyubashi) EIP712SignatureVerifier() {}
 
     /**
-     * @notice Processes and verifies an EVM deposit transaction to credit user's account.
+     * @notice Credits user's account after verifying an EVM deposit transaction.
      *
      * This function decodes and verifies a transaction from an EVM chain to confirm
      * that a user has deposited tokens. It supports both native tokens (ETH, MATIC, etc.)
      * and ERC20 tokens from any EVM-compatible chain.
      *
      * The verification process:
-     * 1. Decodes the raw transaction data to extract all transaction fields
-     * 2. Verifies the transaction sender matches the claimed user
-     * 3. Validates the transaction target and parameters match the token type
-     * 4. For native tokens: verifies the recipient is the deposit address
-     * 5. For ERC20 tokens: verifies the contract call and transfer recipient
-     * 6. Credits the verified amount to the user's account balance
+     * 1. Validates the transaction proof using ProvethVerifier
+     * 2. Decodes the raw transaction data to extract all transaction fields
+     * 3. Verifies block hash through ShoyuBashi oracle for cross-chain security
+     * 4. Verifies the transaction sender matches the claimed user
+     * 5. Validates the transaction target and parameters match the token type
+     * 6. For native tokens: verifies the recipient is the deposit address
+     * 7. For ERC20 tokens: verifies the contract call and transfer recipient
+     * 8. Credits the verified amount to the user's account balance
      *
      * Security features:
-     * - Transaction proof verification (TODO: implement with txProof parameter)
+     * - Transaction proof verification via Merkle Patricia Trie
+     * - ShoyuBashi oracle block hash verification (multi-oracle consensus)
      * - Sender address verification against claimed user
      * - Token-specific validation (native vs ERC20)
-     * - Chain ID verification to prevent cross-chain replay
+     * - Chain ID verification to prevent cross-chain replay attacks
      * - Transaction data decoding and validation
-     *
-     * @dev Currently transaction proof verification is not implemented (TODO).
-     *      The function assumes the provided transaction data is included in
-     *      the block that will be specified by the txProof.
      *
      * @param userAddress The address of the user making the deposit
      * @param tokenId The identifier of the token being deposited
      * @param txProof The cryptographic proof that the transaction was included in a block
      */
-    function includeEVMDeposit(
+    function creditDeposit(
         address userAddress,
         bytes32 tokenId,
         EVMTransactionProof calldata txProof
@@ -98,8 +156,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             chainId
         );
 
-        // Verify from matches the userAddress
-        require(from == userAddress, "From address mismatch");
+        if (from != userAddress) revert AddressMismatch();
 
         TokenInfo memory tInfo = tokens[tokenId];
 
@@ -110,49 +167,38 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
                 tInfo.data
             );
 
-            require(tChainId == chainId, "ChainId mismatch");
+            if (tChainId != chainId) revert ChainIdMismatch();
 
-            // Verify the to address is the deposit address
-            require(
-                to == EVMSignerAndVerifier.evmAddress,
-                "Not a deposit transaction"
-            );
+            if (to != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
 
-            // Verify from matches the userAddress
-            require(from == userAddress, "From address mismatch");
-
-            // Verify the txData is empty
-            require(txData.length == 0, "Non-empty tx data");
+            if (txData.length != 0) revert InvalidTransactionData();
 
             amount = value;
         } else if (tInfo.tokenType == TokenType.ERC20) {
             (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
 
-            require(tChainId == chainId, "ChainId mismatch");
+            if (tChainId != chainId) revert ChainIdMismatch();
 
-            // Verify the to address matches the tokenAddress
-            require(to == tokenAddress, "Not a deposit transaction");
+            if (to != tokenAddress) revert InvalidDeposit();
 
             (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
                 .decodeTxDataForErc20Transfer(txData);
 
-            require(
-                erc20To == EVMSignerAndVerifier.evmAddress,
-                "ERC20 to address mismatch"
-            );
+            if (erc20To != EVMSignerAndVerifier.evmAddress) revert AddressMismatch();
 
             amount = erc20amount;
+        } else {
+            revert UnsupportedTokenType();
         }
 
-        // Increase token balance by value
         balances[userAddress][tokenId] += amount;
 
         emit Deposit(userAddress, tokenId, amount);
     }
 
     /**
-     * @notice Locks user funds for exclusive access by a designated service.
+     * @notice Creates a lock on user funds for exclusive access by a designated service.
      *
      * This function allows users to lock a portion of their funds for use by a specific
      * service. Locked funds are removed from the user's available balance but remain
@@ -180,7 +226,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param expiry The timestamp when the lock expires and funds can be reclaimed
      * @param signature The EIP-712 signature from the user authorizing the lock
      */
-    function lockFunds(
+    function createLock(
         address userAddress,
         address serviceAddress,
         bytes32 tokenId,
@@ -200,16 +246,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
-        if (locks.length >= 10) {
-            revert("Too many active locks");
-        }
+        if (locks.length >= 10) revert TooManyActiveLocks();
 
-        require(
-            balances[userAddress][tokenId] >= amount,
-            "Insufficient balance"
-        );
+        if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+
         balances[userAddress][tokenId] -= amount;
 
+        uint256 lockIndex = locks.length;
         locks.push(
             FundLock({
                 serviceId: serviceAddress,
@@ -219,13 +262,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             })
         );
 
-        // TODO: Emit event
+        emit LockCreated(userAddress, serviceAddress, tokenId, amount, expiry, lockIndex);
     }
 
     /**
-     * @notice Unlocks expired fund locks and returns funds to the user's available balance.
+     * @notice Unlocks a single expired fund lock and returns funds to the user's available balance.
      *
-     * This function allows users to reclaim funds from expired locks. Once a lock's
+     * This function allows users to reclaim funds from an expired lock. Once a lock's
      * expiry timestamp has passed, the original user can call this function to
      * unlock the funds and restore them to their available balance.
      *
@@ -244,28 +287,134 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      *      The lock order may change after removal due to the swap operation.
      *      Anyone can call this function for any user if the lock has expired.
      *      The purpose of this function is to allow users to reclaim funds if
-     *      a service goes down.
+     *      a service goes down or becomes unresponsive.
      *
      * @param userAddress The address of the user whose lock should be unlocked
      * @param lockIndex The index of the lock in the user's activeLocks array
      */
-    function unlockFunds(address userAddress, uint256 lockIndex) public {
+    function unlockSingleLock(address userAddress, uint256 lockIndex) public {
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
-        // If the expiry has passed or there are no funds in the, undo the above step, otherwise revert
-        require(lockIndex < locks.length, "Invalid lock index");
+        if (lockIndex >= locks.length) revert InvalidLockIndex();
+
         FundLock memory lock = locks[lockIndex];
+
         if (lock.amount != 0) {
-            require(block.timestamp >= lock.expiry, "Lock not yet expired");
+            if (block.timestamp < lock.expiry) revert LockNotExpired();
             balances[userAddress][lock.tokenId] += lock.amount;
         }
 
-        // Remove the lock by swapping with the last and popping
         locks[lockIndex] = locks[locks.length - 1];
         locks.pop();
 
-        // TODO: emit event that funds were unlocked
+        emit LockUnlocked(userAddress, lock.tokenId, lock.amount, lockIndex);
+    }
+
+    /**
+     * @notice Unlocks all expired fund locks for a user and returns funds to available balance.
+     *
+     * This function iterates through all of a user's active locks and unlocks any that
+     * have expired. This is a convenience function to avoid calling unlockSingleLock
+     * multiple times when a user has several expired locks.
+     *
+     * @dev Iterates backwards to handle swap-and-pop without skipping elements.
+     *      Anyone can call this function for any user.
+     *
+     * @param userAddress The address of the user whose expired locks should be unlocked
+     * @return unlockedCount The number of locks that were successfully unlocked
+     */
+    function unlockAllExpiredLocks(address userAddress) external returns (uint256 unlockedCount) {
+        UserInfo storage uInfo = userInfo[userAddress];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        unlockedCount = 0;
+        uint256 i = locks.length;
+
+        while (i > 0) {
+            i--;
+            FundLock memory lock = locks[i];
+
+            if (block.timestamp >= lock.expiry && lock.amount > 0) {
+                balances[userAddress][lock.tokenId] += lock.amount;
+
+                locks[i] = locks[locks.length - 1];
+                locks.pop();
+
+                emit LockUnlocked(userAddress, lock.tokenId, lock.amount, i);
+                unlockedCount++;
+            }
+        }
+
+        return unlockedCount;
+    }
+
+    /**
+     * @notice Transfers locked funds under service authorization.
+     *
+     * This function allows a service to transfer funds that were previously locked
+     * to them by a user. Unlike regular transfers, this requires authorization from
+     * the service (not the original user) since the funds are under the service's
+     * temporary control.
+     *
+     * The transfer process:
+     * 1. Validates the lock index and retrieves the lock details
+     * 2. Verifies the service's EIP-712 signature authorizing the transfer
+     * 3. Checks that the lock has sufficient funds for the transfer
+     * 4. Reduces the locked amount and credits the recipient
+     * 5. Removes the lock if all funds are transferred
+     *
+     * Security features:
+     * - Service signature verification (not user signature)
+     * - Lock amount validation before transfer
+     * - Automatic lock cleanup when empty
+     * - Signature replay protection via EIP712SignatureVerifier
+     *
+     * @dev The signature must be from the service address associated with the lock.
+     *      If the lock amount reaches zero, the lock is automatically removed.
+     *      The lock array may be reordered due to swap-and-pop removal. The service is
+     *      a user (managed the same way as regular users) and any user can act as a service.
+     *
+     * @param userAddress The address of the user who originally locked the funds
+     * @param toAddress The address receiving the transferred locked funds
+     * @param lockIndex The index of the lock in the user's activeLocks array
+     * @param amount The amount of locked tokens to transfer
+     * @param signature The EIP-712 signature from the service authorizing the transfer
+     */
+    function transferFromLock(
+        address userAddress,
+        address toAddress,
+        uint256 lockIndex,
+        uint256 amount,
+        bytes calldata signature
+    ) public {
+        UserInfo storage uInfo = userInfo[userAddress];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        if (lockIndex >= locks.length) revert InvalidLockIndex();
+
+        FundLock storage lock = locks[lockIndex];
+
+        EIP712SignatureVerifier.verifyTransferLockedSignature(
+            lock.serviceId,
+            userAddress,
+            toAddress,
+            lockIndex,
+            amount,
+            signature
+        );
+
+        if (lock.amount < amount) revert InsufficientLockedAmount();
+
+        lock.amount -= amount;
+        balances[toAddress][lock.tokenId] += amount;
+
+        emit LockedFundsTransferred(userAddress, lock.serviceId, toAddress, lock.tokenId, amount, lockIndex);
+
+        if (lock.amount == 0) {
+            locks[lockIndex] = locks[locks.length - 1];
+            locks.pop();
+        }
     }
 
     /**
@@ -294,7 +443,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param amount The amount of tokens to transfer
      * @param signature The EIP-712 signature from the sender authorizing the transfer
      */
-    function transferFunds(
+    function transferBalance(
         address userAddress,
         address toAddress,
         bytes32 tokenId,
@@ -309,82 +458,16 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             signature
         );
 
-        require(
-            balances[userAddress][tokenId] >= amount,
-            "Insufficient balance"
-        );
+        if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
+
+        emit BalanceTransferred(userAddress, toAddress, tokenId, amount);
     }
 
     /**
-     * @notice Transfers locked funds under service authorization.
-     *
-     * This function allows a service to transfer funds that were previously locked
-     * to them by a user. Unlike regular transfers, this requires authorization from
-     * the service (not the original user) since the funds are under the service's
-     * temporary control.
-     *
-     * The transfer process:
-     * 1. Validates the lock index and retrieves the lock details
-     * 2. Verifies the service's EIP-712 signature authorizing the transfer
-     * 3. Checks that the lock has sufficient funds for the transfer
-     * 4. Reduces the locked amount and credits the recipient
-     * 5. Removes the lock if all funds are transferred
-     *
-     * Security features:
-     * - Service signature verification (not user signature)
-     * - Lock amount validation before transfer
-     * - Automatic lock cleanup when empty
-     * - Signature replay protection via EIP712SignatureVerifier
-     *
-     * @dev The signature must be from the service address associated with the lock.
-     *      If the lock amount reaches zero, the lock can be removed by calling unlockFunds();
-     *      The lock array may be reordered due to swap-and-pop removal. The service is
-     *      a user (managed the same way as regular users) and any user can act as a service.
-     *
-     * @param userAddress The address of the user who originally locked the funds
-     * @param toAddress The address receiving the transferred locked funds
-     * @param lockIndex The index of the lock in the user's activeLocks array
-     * @param amount The amount of locked tokens to transfer
-     * @param signature The EIP-712 signature from the service authorizing the transfer
-     */
-    function transferLockedFunds(
-        address userAddress,
-        address toAddress,
-        uint256 lockIndex,
-        uint256 amount,
-        bytes calldata signature
-    ) public {
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        // If the expiry has passed or there are no funds in the, undo the above step, otherwise revert
-        require(lockIndex < locks.length, "Invalid lock index");
-        FundLock storage lock = locks[lockIndex];
-
-        EIP712SignatureVerifier.verifyTransferLockedSignature(
-            lock.serviceId,
-            userAddress,
-            toAddress,
-            lockIndex,
-            amount,
-            signature
-        );
-
-        require(lock.amount >= amount, "Insufficient locked amount");
-        lock.amount -= amount;
-        balances[toAddress][lock.tokenId] += amount;
-
-        // Remove the lock by swapping with the last and popping
-        if (lock.amount == 0) {
-            locks[lockIndex] = locks[locks.length - 1];
-            locks.pop();
-        }
-    }
-
-    /**
-     * @notice Withdraws user funds by generating a signed transaction for the origin chain.
+     * @notice Initiates withdrawal by generating a signed transaction for the origin chain.
      *
      * This function processes user withdrawal requests by:
      * 1. Verifying the user's authorization via EIP-712 signature
@@ -411,7 +494,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param signature The EIP-712 signature from the user authorizing the withdrawal
      * @return signedTx The raw signed transaction ready for broadcast
      */
-    function withdrawFunds(
+    function withdraw(
         address userAddress,
         bytes32 tokenId,
         uint256 amount,
@@ -424,10 +507,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             signature
         );
 
-        require(
-            balances[userAddress][tokenId] >= amount,
-            "Insufficient balance"
-        );
+        if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+
         balances[userAddress][tokenId] -= amount;
 
         TokenInfo memory tInfo = tokens[tokenId];
@@ -441,6 +522,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
                 userAddress,
                 amount
             );
+
+            emit Withdrawal(userAddress, tokenId, amount, chainId);
         } else if (tInfo.tokenType == TokenType.ERC20) {
             (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
@@ -450,8 +533,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
                 tokenAddress,
                 amount
             );
+
+            emit Withdrawal(userAddress, tokenId, amount, chainId);
         } else {
-            revert("Unsupported token type");
+            revert UnsupportedTokenType();
         }
 
         return signedTx;
@@ -486,11 +571,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     function setTokenInfo(TokenInfo calldata info) external {
         bytes32 tokenId = getTokenId(info);
         tokens[tokenId] = info;
+
+        emit TokenRegistered(tokenId, info.tokenType);
     }
 
     /**
      * @notice Retrieves all active fund locks for a specific user.
-     *
      *
      * @dev Returns a memory copy of the locks array.
      *      The returned array may be reordered if locks are removed concurrently.
@@ -505,11 +591,100 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         return uInfo.activeLocks;
     }
 
-    error InvalidDeposit();
+    /**
+     * @notice Retrieves all expired fund locks for a specific user.
+     *
+     * This function filters the user's active locks to return only those that
+     * have expired (current timestamp >= lock expiry). This is useful for UIs
+     * to display which locks can be unlocked.
+     *
+     * @dev Returns arrays of expired locks and their corresponding indices.
+     *      The indices correspond to positions in the user's activeLocks array.
+     *
+     * @param user The address of the user whose expired locks to retrieve
+     * @return expiredLocks Array of expired FundLock structs
+     * @return lockIndices Array of indices corresponding to each expired lock
+     */
+    function getExpiredLocks(
+        address user
+    ) external view returns (FundLock[] memory expiredLocks, uint256[] memory lockIndices) {
+        UserInfo storage uInfo = userInfo[user];
+        FundLock[] storage allLocks = uInfo.activeLocks;
 
-    event Deposit(
-        address indexed userAddress,
-        bytes32 indexed tokenId,
-        uint256 amount
-    );
+        uint256 expiredCount = 0;
+        for (uint256 i = 0; i < allLocks.length; i++) {
+            if (block.timestamp >= allLocks[i].expiry) {
+                expiredCount++;
+            }
+        }
+
+        expiredLocks = new FundLock[](expiredCount);
+        lockIndices = new uint256[](expiredCount);
+
+        uint256 currentIndex = 0;
+        for (uint256 i = 0; i < allLocks.length; i++) {
+            if (block.timestamp >= allLocks[i].expiry) {
+                expiredLocks[currentIndex] = allLocks[i];
+                lockIndices[currentIndex] = i;
+                currentIndex++;
+            }
+        }
+
+        return (expiredLocks, lockIndices);
+    }
+
+    /**
+     * @notice Retrieves balances for multiple tokens for a specific user.
+     *
+     * This function allows batch querying of token balances to reduce the number
+     * of RPC calls needed by frontends and services.
+     *
+     * @dev Returns balances in the same order as the input tokenIds array.
+     *
+     * @param user The address of the user whose balances to retrieve
+     * @param tokenIds Array of token identifiers to query
+     * @return Array of balances corresponding to each token ID
+     */
+    function getBalances(
+        address user,
+        bytes32[] calldata tokenIds
+    ) external view returns (uint256[] memory) {
+        uint256[] memory userBalances = new uint256[](tokenIds.length);
+
+        for (uint256 i = 0; i < tokenIds.length; i++) {
+            userBalances[i] = balances[user][tokenIds[i]];
+        }
+
+        return userBalances;
+    }
+
+    /**
+     * @notice Calculates the total locked balance for a specific token across all locks.
+     *
+     * This function sums up all locked amounts for a given token ID across all
+     * of a user's active locks. This is useful for displaying the user's total
+     * unavailable balance.
+     *
+     * @dev Iterates through all active locks and sums matching token amounts.
+     *
+     * @param user The address of the user
+     * @param tokenId The token identifier to calculate total locked amount for
+     * @return The total amount of the token that is currently locked
+     */
+    function getTotalLockedBalance(
+        address user,
+        bytes32 tokenId
+    ) external view returns (uint256) {
+        UserInfo storage uInfo = userInfo[user];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        uint256 totalLocked = 0;
+        for (uint256 i = 0; i < locks.length; i++) {
+            if (locks[i].tokenId == tokenId) {
+                totalLocked += locks[i].amount;
+            }
+        }
+
+        return totalLocked;
+    }
 }

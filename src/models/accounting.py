@@ -180,3 +180,43 @@ class LockedFundsResponse(BaseModel):
     service_address: Optional[str] = Field(None, description="Filter by service address if provided")
     locks: list[LockInfo]
     total_locked: int
+
+
+class UnlockAllExpiredLocksRequest(BaseModel):
+    """Payload for unlocking all expired locks for a user."""
+
+    user_address: str
+
+
+class ExpiredLocksResponse(BaseModel):
+    """Response containing user's expired locks."""
+
+    user_address: str
+    expired_locks: list[LockInfo]
+
+
+class BatchBalancesRequest(BaseModel):
+    """Request for batch balance queries."""
+
+    user_address: str = Field(..., min_length=1)
+    token_ids: list[str] = Field(..., min_items=1)
+
+    @field_validator("token_ids")
+    def _normalise_token_ids(cls, value: list[str]) -> list[str]:
+        return [_normalise_hex(tid) for tid in value]
+
+
+class TokenBalance(BaseModel):
+    """Individual token balance information."""
+
+    token_id: str
+    balance: str
+    token_symbol: str
+    chain_id: str
+
+
+class BatchBalancesResponse(BaseModel):
+    """Response containing multiple token balances."""
+
+    user_address: str
+    balances: list[TokenBalance]

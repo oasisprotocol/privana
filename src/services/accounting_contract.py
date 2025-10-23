@@ -359,7 +359,7 @@ class AccountingContractService:
         expiry = self._require_positive(payload["expiry"], "expiry")
         signature = self._require_hex(payload["signature"], "signature")
 
-        fn = self.contract.functions.lockFunds(
+        fn = self.contract.functions.createLock(
             user,
             service,
             token,
@@ -376,7 +376,7 @@ class AccountingContractService:
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
 
-        fn = self.contract.functions.transferFunds(
+        fn = self.contract.functions.transferBalance(
             user,
             to_addr,
             token,
@@ -394,7 +394,7 @@ class AccountingContractService:
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
 
-        fn = self.contract.functions.transferLockedFunds(
+        fn = self.contract.functions.transferFromLock(
             user,
             to_addr,
             lock_index,
@@ -409,7 +409,7 @@ class AccountingContractService:
             payload["lock_index"], "lock_index", allow_zero=True
         )
 
-        fn = self.contract.functions.unlockFunds(
+        fn = self.contract.functions.unlockSingleLock(
             user,
             lock_index,
         )
@@ -424,7 +424,7 @@ class AccountingContractService:
         )
         proof = self._build_tx_proof(payload)
 
-        fn = self.contract.functions.includeEVMDeposit(
+        fn = self.contract.functions.creditDeposit(
             user,
             token,
             tx_data,
@@ -489,7 +489,7 @@ class AccountingContractService:
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
 
-        fn = self.contract.functions.withdrawFunds(
+        fn = self.contract.functions.withdraw(
             user,
             token,
             amount,
@@ -505,6 +505,83 @@ class AccountingContractService:
         detail = "; ".join(detail_parts)
 
         return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
+
+    def unlock_all_expired_locks(self, payload: Dict) -> SubmissionResult:
+        """Unlock all expired locks for a user."""
+        user = self._require_address(payload["user_address"], "user_address")
+
+        fn = self.contract.functions.unlockAllExpiredLocks(user)
+        return self._submit(fn._encode_transaction_data())
+
+    def get_expired_locks(self, user_address: str) -> Dict[str, Any]:
+        """Get all expired locks for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+
+        contract_reader = self._get_reader_contract()
+
+        expired_locks, lock_indices = contract_reader.functions.getExpiredLocks(checksum_user).call()
+
+        locks = []
+        for i, lock in enumerate(expired_locks):
+            lock_info = {
+                "lock_index": lock_indices[i],
+                "user_address": checksum_user,
+                "service_address": lock[0],
+                "token_id": "0x" + lock[1].hex(),
+                "amount": lock[2],
+                "expiry": lock[3],
+            }
+            locks.append(lock_info)
+
+        return {
+            "user_address": checksum_user,
+            "expired_locks": locks,
+        }
+
+    def get_balances(self, user_address: str, token_ids: list[str]) -> Dict[str, Any]:
+        """Get balances for multiple tokens for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+
+        token_hex_list = [self._require_hex(token_id, "token_id", expected_len=32) for token_id in token_ids]
+
+        contract_reader = self._get_reader_contract()
+
+        balances = contract_reader.functions.getBalances(
+            checksum_user,
+            [bytes(token) for token in token_hex_list]
+        ).call()
+
+        token_balances = []
+        for i, token_id in enumerate(token_ids):
+            token_hex = token_hex_list[i]
+            token_symbol = self._get_token_symbol(token_hex)
+            token_context = self._get_token_context(token_hex)
+
+            token_balances.append({
+                "token_id": token_id.lower(),
+                "balance": str(balances[i]),
+                "token_symbol": token_symbol,
+                "chain_id": str(token_context.chain_id),
+            })
+
+        return {
+            "user_address": checksum_user,
+            "balances": token_balances,
+        }
+
+    def get_total_locked_balance(self, user_address: str, token_id: str) -> int:
+        """Get total locked balance for a specific token."""
+        checksum_user = self._require_address(user_address, "user_address")
+        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+
+        contract_reader = self._get_reader_contract()
+
+        total_locked = contract_reader.functions.getTotalLockedBalance(
+            checksum_user,
+            bytes(token_hex)
+        ).call()
+
+        return total_locked
 
 
 _service_instance: Optional[AccountingContractService] = None
