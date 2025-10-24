@@ -416,7 +416,7 @@ class AccountingContractService:
         return self._submit(fn._encode_transaction_data())
 
     def include_deposit(self, payload: Dict) -> SubmissionResult:
-        """Unified method for including deposits using includeEVMDeposit."""
+        """Unified method for including deposits using creditEVMDeposit."""
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         tx_data = self._require_hex(
@@ -424,7 +424,7 @@ class AccountingContractService:
         )
         proof = self._build_tx_proof(payload)
 
-        fn = self.contract.functions.creditDeposit(
+        fn = self.contract.functions.creditEVMDeposit(
             user,
             token,
             tx_data,

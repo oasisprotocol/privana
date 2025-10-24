@@ -25,17 +25,18 @@ Generate deposit instructions and transaction data for a user/token/amount combi
   - `instructions` (string) – Deposit guidance for clients.
 
 ### POST `/deposits`
-Submit a deposit inclusion transaction (automatically detects native/ERC20 based on token_id).
+Submit an EVM deposit inclusion transaction (automatically detects native/ERC20 based on token_id). Uses the `creditEVMDeposit` contract function.
 - **Request body**
   - `user_address` (string, required) – Depositor address.
   - `token_id` (string, required) – Bytes32 token identifier (hex).
-  - `evm_transaction_data` (string, required) – RLP-encoded transaction payload.
+  - `evm_transaction_data` (string, required) – RLP-encoded EVM transaction payload.
   - `rlp_block_header` (string, optional) – RLP-encoded block header.
   - `transaction_index_rlp` (string, optional) – RLP-encoded transaction index.
   - `transaction_proof_stack` (string, optional) – Merkle proof stack.
 - **Response body**
   - `submission_id` (string) – ROFL submission identifier.
   - `status` (string) – Submission status, e.g. `submitted`.
+- **Note:** This endpoint is specifically for EVM-compatible chains. Future endpoints for other blockchains (Solana, Sui, etc.) will be added separately.
 
 ### POST `/funds/lock`
 Lock user funds for a service using the user's EIP-712 signature.

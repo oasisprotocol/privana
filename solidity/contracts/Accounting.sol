@@ -127,7 +127,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param tokenId The identifier of the token being deposited
      * @param txProof The cryptographic proof that the transaction was included in a block
      */
-    function creditDeposit(
+    function creditEVMDeposit(
         address userAddress,
         bytes32 tokenId,
         EVMTransactionProof calldata txProof

@@ -140,7 +140,7 @@ describe('Accounting', function () {
     await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
 
     // Submit the deposit to Accounting contract
-    await accounting.creditDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+    await accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
       rlpBlockHeader,
       transactionIndexRlp: getRlpUint(transactionIndex),
       transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
