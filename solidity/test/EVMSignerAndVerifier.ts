@@ -38,65 +38,6 @@ describe('EVMSignerAndVerifier', function () {
     await mockEVMSignerAndVerifier.waitForDeployment();
   });
 
-  // it("Admin adds tokenInfo for Test token", async function () {
-  //   const [admin] = await ethers.getSigners();
-
-  //   // Pad chainId to 32 bytes, token address to 20 bytes, then concatenate
-  //   const data = ethers.concat([
-  //     ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-  //     ethers.zeroPadValue(TEST_TOKEN.address, 20)
-  //   ]);
-  //   const expectedData = await accounting.encodeEVMErc20TokenData(TEST_TOKEN.chainId, TEST_TOKEN.address);
-  //   console.log("Data:", data);
-  //   console.log("Expected data:", expectedData);
-  //   console.log("TEST_TOKEN.address:", TEST_TOKEN.address);
-  //   console.log("TEST_TOKEN.chainId:", TEST_TOKEN.chainId);
-
-  //   expect(data).to.equal(expectedData);
-
-  //   const tx = await accounting.connect(admin).setTokenInfo({
-  //     tokenType: TEST_TOKEN.tokenType,
-  //     data: data
-  //   });
-  //   await tx.wait();
-
-  //   const tokenId = await accounting.getTokenId({
-  //     tokenType: TEST_TOKEN.tokenType,
-  //     data: data
-  //   });
-
-  //   expect(tokenId).to.equal(TEST_TOKEN.tokenId);
-  //   expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
-  // });
-
-  // it("Admin adds tokenInfo for Native token", async function () {
-  //   const [admin] = await ethers.getSigners();
-
-  //   // Pad chainId to 32 bytes, then concatenate
-  //   const data = ethers.concat([
-  //     ethers.zeroPadValue(ethers.toBeHex(NATIVE_TOKEN.chainId), 32),
-  //   ]);
-  //   const dataExpected = await accounting.encodeEVMNativeTokenData(NATIVE_TOKEN.chainId);
-  //   expect(data).to.equal(dataExpected);
-
-  //   const tx = await accounting.connect(admin).setTokenInfo({
-  //     tokenType: NATIVE_TOKEN.tokenType,
-  //     data: data
-  //   });
-  //   await tx.wait();
-
-  //   const tokenId = await accounting.getTokenId({
-  //     tokenType: NATIVE_TOKEN.tokenType,
-  //     data: data
-  //   });
-
-
-  //   const tokenInfo = await accounting.tokens(tokenId);
-
-  //   expect(tokenId).to.equal(NATIVE_TOKEN.tokenId);
-  //   expect(await accounting.decodeEVMNativeTokenData(data)).to.equal(NATIVE_TOKEN.chainId);
-  // });
-
   it("User should be able to deposit TEST token using every transaction type", async function () {
     const depositAddress = await mockEVMSignerAndVerifier.evmAddress();
 
