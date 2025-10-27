@@ -144,6 +144,22 @@ class AccountingContractService:
             return b""
         return bytes(self._require_hex(value, field))
 
+    def _validate_proof_data(self, request_payload: Dict[str, Optional[str]]) -> None:
+        required_fields = ["rlp_block_header", "transaction_index_rlp", "transaction_proof_stack"]
+        missing_fields = []
+
+        for field in required_fields:
+            value = request_payload.get(field)
+            if value is None or value == "" or value == "0x":
+                missing_fields.append(field)
+
+        if missing_fields:
+            raise ValueError(
+                f"Proof data is incomplete. Missing or empty fields: {', '.join(missing_fields)}. "
+                f"Proofs are required for contract validation. "
+                f"Ensure ALCHEMY_API_KEY is configured and RPC endpoint supports debug_getRawBlock."
+            )
+
     def _build_tx_proof(self, request_payload: Dict[str, Optional[str]]):
         return (
             self._optional_hex(
@@ -422,6 +438,8 @@ class AccountingContractService:
         tx_data = self._require_hex(
             payload["evm_transaction_data"], "evm_transaction_data"
         )
+
+        self._validate_proof_data(payload)
         proof = self._build_tx_proof(payload)
 
         fn = self.contract.functions.creditEVMDeposit(

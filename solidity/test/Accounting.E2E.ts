@@ -152,6 +152,57 @@ describe('Accounting', function () {
     expect(balanceAfter).to.equal(parseUsdt("10"));
   });
 
+  it("Should reject deposit with invalid proof", async function () {
+    const depositAddress = await accounting.evmAddress();
+    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+
+    const blockNumber = 32680090;
+    const transactionIndex = 45;
+
+    const { rlpBlockHeader, proof } = await getTxInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
+    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
+
+    const invalidProof = proof.slice(0, proof.length - 1);
+
+    await expect(
+      accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+        rlpBlockHeader,
+        transactionIndexRlp: getRlpUint(transactionIndex),
+        transactionProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      })
+    ).to.be.reverted;
+  });
+
+  it("Should reject deposit with wrong block hash", async function () {
+    const depositAddress = await accounting.evmAddress();
+    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+
+    const blockNumber = 32680090;
+    const transactionIndex = 45;
+
+    const { rlpBlockHeader, proof } = await getTxInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
+    const wrongBlockHash = "0x1234567890123456789012345678901234567890123456789012345678901234";
+    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, wrongBlockHash);
+
+    await expect(
+      accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+        rlpBlockHeader,
+        transactionIndexRlp: getRlpUint(transactionIndex),
+        transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      })
+    ).to.be.revertedWith("Invalid block hash");
+  });
+
   it("Test EIP712 transfer", async function () {
     const signature = await userWallet1.signTypedData(
       domain,

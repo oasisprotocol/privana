@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Dict, Optional
 
 import rlp
@@ -5,6 +7,8 @@ from eth_typing import HexStr
 from trie import HexaryTrie
 from web3 import Web3
 from web3.types import TxReceipt
+
+logger = logging.getLogger(__name__)
 
 
 class ProofGeneratorService:
@@ -68,14 +72,57 @@ class ProofGeneratorService:
         web3: Web3,
         block_number: int,
         tx_index: int,
+        max_retries: int = 3,
     ) -> Dict[str, str]:
-        raw_block = web3.provider.make_request(
-            "debug_getRawBlock",
-            [self._get_rpc_uint(block_number)]
-        )
+        last_error = None
 
-        if 'error' in raw_block:
-            raise Exception(f"RPC Error calling debug_getRawBlock: {raw_block['error']}")
+        for attempt in range(max_retries):
+            try:
+                raw_block = web3.provider.make_request(
+                    "debug_getRawBlock",
+                    [self._get_rpc_uint(block_number)]
+                )
+
+                if 'error' in raw_block:
+                    error_msg = raw_block['error']
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get('message', str(error_msg))
+
+                    if 'method not found' in str(error_msg).lower() or 'not supported' in str(error_msg).lower():
+                        raise ValueError(
+                            f"RPC endpoint does not support debug_getRawBlock API. "
+                            f"Archive node with debug API is required. "
+                            f"Error: {error_msg}"
+                        )
+
+                    last_error = Exception(f"RPC Error calling debug_getRawBlock: {error_msg}")
+
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.warning(
+                            f"debug_getRawBlock failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time}s: {error_msg}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    raise last_error
+
+                break
+
+            except ValueError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"Proof generation failed (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time}s: {str(e)}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise
 
         raw_block_hex = raw_block['result']
         block_rlp = rlp.decode(bytes.fromhex(raw_block_hex[2:]))
