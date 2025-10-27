@@ -9,6 +9,7 @@ from web3.types import BlockData
 
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
+from src.services.proof_generator import get_proof_generator
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class DepositListener:
         self._last_processed_blocks: Dict[int, int] = {}
         self._native_token_ids: Dict[int, str] = {}
         self._erc20_token_ids: Dict[tuple, str] = {}
+        self._proof_generator = get_proof_generator(self.chain_rpc_urls)
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -107,13 +109,20 @@ class DepositListener:
             evm_transaction_data = raw_tx.hex()
 
             token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
+
+            proof = await asyncio.to_thread(
+                self._proof_generator.generate_tx_proof,
+                chain_id,
+                tx_hash
+            )
+
             payload = {
                 "user_address": from_address,
                 "token_id": token_id,
                 "evm_transaction_data": evm_transaction_data,
-                "rlp_block_header": None,
-                "transaction_index_rlp": None,
-                "transaction_proof_stack": None,
+                "rlp_block_header": proof["rlp_block_header"],
+                "transaction_index_rlp": proof["transaction_index_rlp"],
+                "transaction_proof_stack": proof["transaction_proof_stack"],
             }
 
             result = self.accounting_service.include_deposit(payload)
@@ -153,13 +162,20 @@ class DepositListener:
             evm_transaction_data = raw_tx.hex()
 
             token_id = await asyncio.to_thread(self._get_erc20_token_id, chain_id, token_address)
+
+            proof = await asyncio.to_thread(
+                self._proof_generator.generate_tx_proof,
+                chain_id,
+                tx_hash
+            )
+
             payload = {
                 "user_address": from_address,
                 "token_id": token_id,
                 "evm_transaction_data": evm_transaction_data,
-                "rlp_block_header": None,
-                "transaction_index_rlp": None,
-                "transaction_proof_stack": None,
+                "rlp_block_header": proof["rlp_block_header"],
+                "transaction_index_rlp": proof["transaction_index_rlp"],
+                "transaction_proof_stack": proof["transaction_proof_stack"],
             }
 
             result = self.accounting_service.include_deposit(payload)

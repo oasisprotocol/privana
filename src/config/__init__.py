@@ -15,18 +15,15 @@ logging.basicConfig(
 _settings: Optional[Settings] = None
 _defaults = Settings()
 
-DEFAULT_CHAIN_RPC_URLS: Dict[int, str] = {
-    # 8453: "https://mainnet.base.org",
-    84532: "https://base-sepolia-rpc.publicnode.com",
+ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
+    84532: "base-sepolia",
 }
 
 CHAIN_NAMES: Dict[int, str] = {
-    # 8453: "Base",
     84532: "Base Sepolia",
 }
 
 NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
-    # 8453: "ETH",
     84532: "ETH",
 }
 
@@ -47,11 +44,29 @@ def _get_int(name: str, default: int) -> int:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
 
 
+def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
+    if not alchemy_api_key or alchemy_api_key == "your-alchemy-api-key-here":
+        logging.warning(
+            "ALCHEMY_API_KEY not configured. Proof generation will fail. "
+            "Get an API key from https://dashboard.alchemy.com/"
+        )
+        return {}
+
+    rpc_urls = {}
+    for chain_id, subdomain in ALCHEMY_CHAIN_SUBDOMAINS.items():
+        rpc_urls[chain_id] = f"https://{subdomain}.g.alchemy.com/v2/{alchemy_api_key}"
+
+    return rpc_urls
+
+
 def load_settings(refresh: bool = False) -> Settings:
     """Load settings, optionally refreshing cached values."""
 
     global _settings
     if _settings is None or refresh:
+        alchemy_api_key = os.getenv("ALCHEMY_API_KEY")
+        chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key)
+
         _settings = Settings(
             api_host=os.getenv("API_HOST", _defaults.api_host),
             api_port=_get_int("API_PORT", _defaults.api_port),
@@ -67,7 +82,7 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_gas_limit=_get_int(
                 "ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit
             ),
-            chain_rpc_urls=dict(DEFAULT_CHAIN_RPC_URLS),
+            chain_rpc_urls=chain_rpc_urls,
             deposit_poll_interval=_get_int(
                 "DEPOSIT_POLL_INTERVAL", _defaults.deposit_poll_interval
             ),
