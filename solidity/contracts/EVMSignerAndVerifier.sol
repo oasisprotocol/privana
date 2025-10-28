@@ -36,21 +36,18 @@ contract EVMSignerAndVerifier is ProvethVerifier {
     using SliceBytes for bytes;
 
     constructor(address _shoyubashi) {
-        // Add back in once the evm_increaseTime issue is resolved on sapphire localnet
-        // (
-        //     bytes memory compressedPublicKey,
-        //     bytes memory secretKeyBytes
-        // ) = Sapphire.generateSigningKeyPair(
-        //         Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
-        //         Sapphire.randomBytes(32, "EVMSiignerAndVerifier")
-        //     );
-        // evmAddress = EthereumUtils.k256PubkeyToEthereumAddress(
-        //     compressedPublicKey
-        // );
-        // secretKey = bytes32(secretKeyBytes);
-        evmAddress = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
-        secretKey = 0x4bab77fcaf2d66bcb2e52cbf64102eea5fbee93005865faf66f616918f6318ea;
-        shoyuBashi = IShoyuBashi(_shoyubashi); // Replace with actual ShoyuBashi contract address on Sapphire
+        (
+            bytes memory compressedPublicKey,
+            bytes memory secretKeyBytes
+        ) = Sapphire.generateSigningKeyPair(
+                Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
+                Sapphire.randomBytes(32, "EVMSignerAndVerifier")
+            );
+        evmAddress = EthereumUtils.k256PubkeyToEthereumAddress(
+            compressedPublicKey
+        );
+        secretKey = bytes32(secretKeyBytes);
+        shoyuBashi = IShoyuBashi(_shoyubashi);
     }
 
     /**
