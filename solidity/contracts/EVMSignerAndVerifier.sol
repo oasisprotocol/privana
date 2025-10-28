@@ -17,8 +17,9 @@ import {EthereumUtils} from "@oasisprotocol/sapphire-contracts/contracts/Ethereu
 
 import {TokenInfo, EVMKeypair} from "./Types.sol";
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract EVMSignerAndVerifier is ProvethVerifier {
+contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
     address public evmAddress;
     bytes32 private secretKey;
     IShoyuBashi public shoyuBashi;
@@ -35,7 +36,7 @@ contract EVMSignerAndVerifier is ProvethVerifier {
     using RLPReader for bytes;
     using SliceBytes for bytes;
 
-    constructor(address _shoyubashi) {
+    constructor(address _shoyubashi) Ownable(msg.sender) {
         (
             bytes memory compressedPublicKey,
             bytes memory secretKeyBytes
@@ -354,11 +355,12 @@ contract EVMSignerAndVerifier is ProvethVerifier {
      * @notice Sets the gas price for a specific EVM chain ID.
      *
      * @dev This function allows updating the gas price used in transaction generation.
+     *      Only callable by the contract owner to prevent unauthorized manipulation.
      *
      * @param chainId The EVM chain ID to set the gas price for.
      * @param gasPrice The gas price in wei to set for the specified chain ID.
      */
-    function setGasPrice(uint256 chainId, uint256 gasPrice) public {
+    function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
         gasPrices[chainId] = gasPrice;
     }
 

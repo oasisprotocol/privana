@@ -92,6 +92,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     /**
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
      * @dev Calls parent constructors to set up EIP-712 domain and EVM signing infrastructure.
+     *      The deployer (msg.sender) becomes the contract owner through EVMSignerAndVerifier.
      * @param _shoyubashi Address of the ShoyuBashi oracle for cross-chain block hash verification
      */
     constructor(
@@ -566,9 +567,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * an existing token's configuration. The token ID is automatically
      * computed from the provided token information.
      *
+     * @dev Only callable by the contract owner to prevent unauthorized token configuration.
      * @param info The complete token information including type, data, and metadata
      */
-    function setTokenInfo(TokenInfo calldata info) external {
+    function setTokenInfo(TokenInfo calldata info) external onlyOwner {
         bytes32 tokenId = getTokenId(info);
         tokens[tokenId] = info;
 
