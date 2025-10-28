@@ -203,7 +203,9 @@ const TEST_HDWALLET = {
   passphrase: '',
 } as const satisfies HDAccountsUserConfig;
 
-const accounts = TEST_HDWALLET;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+
+const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : TEST_HDWALLET;
 
 const config: HardhatUserConfig = {
   networks: {
@@ -211,7 +213,7 @@ const config: HardhatUserConfig = {
     'sapphire-testnet': { ...sapphireTestnet, accounts },
     'sapphire-localnet': { ...sapphireLocalnet, accounts },
     hardhat: {
-      accounts
+      accounts: TEST_HDWALLET
     }
   },
   sourcify: {
