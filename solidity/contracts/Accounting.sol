@@ -89,6 +89,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error AddressMismatch();
     error InvalidTransactionData();
     error InvalidExpiry();
+    error InvalidAmount();
 
     /**
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
@@ -194,6 +195,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             revert UnsupportedTokenType();
         }
 
+        if (amount == 0) revert InvalidAmount();
+
         balances[userAddress][tokenId] += amount;
 
         emit Deposit(userAddress, tokenId, amount);
@@ -238,6 +241,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes calldata signature
     ) public {
         if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (amount == 0) revert InvalidAmount();
 
         EIP712SignatureVerifier.verifyLockSignature(
             userAddress,
@@ -393,6 +397,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 amount,
         bytes calldata signature
     ) public {
+        if (amount == 0) revert InvalidAmount();
+
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
@@ -455,6 +461,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 amount,
         bytes calldata signature
     ) public {
+        if (amount == 0) revert InvalidAmount();
+
         EIP712SignatureVerifier.verifyTransferSignature(
             userAddress,
             toAddress,
@@ -505,6 +513,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 amount,
         bytes calldata signature
     ) public returns (bytes memory signedTx) {
+        if (amount == 0) revert InvalidAmount();
+
         EIP712SignatureVerifier.verifyWithdrawSignature(
             userAddress,
             tokenId,
