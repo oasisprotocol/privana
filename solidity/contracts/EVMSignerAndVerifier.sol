@@ -27,9 +27,12 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
     mapping(uint256 chainId => uint64) public nonces;
     mapping(uint256 chainId => uint256) public gasPrices;
 
-    // Gas limit and gas price variables
     uint64 public constant gasLimitNative = 25000;
     uint64 public constant gasLimitERC20 = 100000;
+
+    error GasPriceNotSet(uint256 chainId);
+
+    event GasPriceSet(uint256 indexed chainId, uint256 gasPrice);
 
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for RLPReader.Iterator;
@@ -356,12 +359,15 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
      *
      * @dev This function allows updating the gas price used in transaction generation.
      *      Only callable by the contract owner to prevent unauthorized manipulation.
+     *      Gas price must be greater than 0 to prevent transaction failures.
      *
      * @param chainId The EVM chain ID to set the gas price for.
      * @param gasPrice The gas price in wei to set for the specified chain ID.
      */
     function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
+        require(gasPrice > 0, "Gas price must be greater than zero");
         gasPrices[chainId] = gasPrice;
+        emit GasPriceSet(chainId, gasPrice);
     }
 
     /**
@@ -376,6 +382,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
      * @dev Uses Sapphire's EIP155Signer to call SIGN_DIGEST precompile for secure transaction signing.
      *      The nonce is automatically incremented to ensure transaction ordering.
      *      Gas limit is set to a conservative 25,000 gas for native transfers.
+     *      Gas price must be set for the chain via setGasPrice() before calling this function.
      *
      * @param chainId The target blockchain's chain ID where the transaction will be sent
      * @param userAddress The recipient address who will receive the native tokens
@@ -387,6 +394,8 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         address userAddress,
         uint256 amount
     ) internal returns (bytes memory output) {
+        if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+
         return
             EIP155Signer.sign(
                 evmAddress,
@@ -420,6 +429,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
      * @dev Uses Sapphire's EIP155Signer to call SIGN_DIGEST precompile for secure transaction signing.
      *      The nonce is automatically incremented to ensure transaction ordering.
      *      Gas limit is set to 100,000 gas to handle most ERC20 transfer scenarios.
+     *      Gas price must be set for the chain via setGasPrice() before calling this function.
      *
      * @param chainId The target blockchain's chain ID where the transaction will be sent
      * @param userAddress The recipient address who will receive the ERC20 tokens
@@ -433,6 +443,8 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         address tokenAddress,
         uint256 amount
     ) internal returns (bytes memory output) {
+        if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+
         bytes memory data = abi.encodeWithSignature(
             "transfer(address,uint256)",
             userAddress,
