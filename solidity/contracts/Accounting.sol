@@ -88,6 +88,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error ChainIdMismatch();
     error AddressMismatch();
     error InvalidTransactionData();
+    error InvalidExpiry();
 
     /**
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
@@ -213,18 +214,19 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      *
      * Security features:
      * - EIP-712 signature verification to authorize the lock
-     * - Expiry timestamp to prevent indefinite locks
+     * - Expiry timestamp validation to ensure locks are created with future expiry
      * - Balance verification before locking
      * - Limited number of active locks per user (max 10)
      *
      * @dev The signature must be from the user whose funds are being locked.
      *      Locked funds are stored in the user's activeLocks array.
+     *      The expiry must be a timestamp in the future (> block.timestamp).
      *
      * @param userAddress The address of the user whose funds will be locked
      * @param serviceAddress The address of the service that will have access to the locked funds
      * @param tokenId The identifier of the token to lock
      * @param amount The amount of tokens to lock
-     * @param expiry The timestamp when the lock expires and funds can be reclaimed
+     * @param expiry The timestamp when the lock expires and funds can be reclaimed (must be in future)
      * @param signature The EIP-712 signature from the user authorizing the lock
      */
     function createLock(
@@ -235,6 +237,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 expiry,
         bytes calldata signature
     ) public {
+        if (expiry <= block.timestamp) revert InvalidExpiry();
+
         EIP712SignatureVerifier.verifyLockSignature(
             userAddress,
             serviceAddress,
