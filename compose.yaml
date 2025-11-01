@@ -12,7 +12,7 @@ services:
       - SAPPHIRE_CHAIN_ID=${SAPPHIRE_CHAIN_ID:-23295}
       - SAPPHIRE_RPC_URL=${SAPPHIRE_RPC_URL:-https://testnet.sapphire.oasis.io}
       - ACCOUNTING_GAS_LIMIT=${ACCOUNTING_GAS_LIMIT:-500000}
-      - DEPOSIT_POLL_INTERVAL=${DEPOSIT_POLL_INTERVAL:-12}
+      - DEPOSIT_POLL_INTERVAL=${DEPOSIT_POLL_INTERVAL:-1}
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
     ports:

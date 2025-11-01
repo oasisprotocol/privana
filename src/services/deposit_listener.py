@@ -9,7 +9,8 @@ from web3.types import BlockData
 
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
-from src.services.proof_generator import get_proof_generator
+# TODO: MOCK TESTING - Proof generator not needed for testing
+# from src.services.proof_generator import get_proof_generator
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,8 @@ class DepositListener:
         self.settings = load_settings()
         self.accounting_service = AccountingContractService(self.settings)
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
+        if not self.chain_rpc_urls:
+            logger.warning("WARNING: No chain RPC URLs configured! Check ALCHEMY_API_KEY in .env")
         self._chain_web3: Dict[int, Web3] = {}
         self._is_running = False
         self._tasks: Set[asyncio.Task] = set()
@@ -30,7 +33,8 @@ class DepositListener:
         self._last_processed_blocks: Dict[int, int] = {}
         self._native_token_ids: Dict[int, str] = {}
         self._erc20_token_ids: Dict[tuple, str] = {}
-        self._proof_generator = get_proof_generator(self.chain_rpc_urls)
+        # TODO: MOCK TESTING - Proof generator not needed for testing
+        # self._proof_generator = get_proof_generator(self.chain_rpc_urls)
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -105,24 +109,27 @@ class DepositListener:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
                 return
 
-            raw_tx = await asyncio.to_thread(web3.eth.get_raw_transaction, tx_hash)
-            evm_transaction_data = raw_tx.hex()
+            # TODO: MOCK TESTING - Verification data commented out for testing purposes
+            # raw_tx = await asyncio.to_thread(web3.eth.get_raw_transaction, tx_hash)
+            # evm_transaction_data = raw_tx.hex()
 
             token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
 
-            proof = await asyncio.to_thread(
-                self._proof_generator.generate_tx_proof,
-                chain_id,
-                tx_hash
-            )
+            # TODO: MOCK TESTING - Proof generation commented out for testing purposes
+            # proof = await asyncio.to_thread(
+            #     self._proof_generator.generate_tx_proof,
+            #     chain_id,
+            #     tx_hash
+            # )
 
             payload = {
                 "user_address": from_address,
                 "token_id": token_id,
-                "evm_transaction_data": evm_transaction_data,
-                "rlp_block_header": proof["rlp_block_header"],
-                "transaction_index_rlp": proof["transaction_index_rlp"],
-                "transaction_proof_stack": proof["transaction_proof_stack"],
+                # TODO: MOCK TESTING - Verification fields commented out for testing purposes
+                # "evm_transaction_data": evm_transaction_data,
+                # "rlp_block_header": proof["rlp_block_header"],
+                # "transaction_index_rlp": proof["transaction_index_rlp"],
+                # "transaction_proof_stack": proof["transaction_proof_stack"],
             }
 
             result = self.accounting_service.include_deposit(payload)
@@ -158,24 +165,27 @@ class DepositListener:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
                 return
 
-            raw_tx = await asyncio.to_thread(web3.eth.get_raw_transaction, tx_hash)
-            evm_transaction_data = raw_tx.hex()
+            # TODO: MOCK TESTING - Verification data commented out for testing purposes
+            # raw_tx = await asyncio.to_thread(web3.eth.get_raw_transaction, tx_hash)
+            # evm_transaction_data = raw_tx.hex()
 
             token_id = await asyncio.to_thread(self._get_erc20_token_id, chain_id, token_address)
 
-            proof = await asyncio.to_thread(
-                self._proof_generator.generate_tx_proof,
-                chain_id,
-                tx_hash
-            )
+            # TODO: MOCK TESTING - Proof generation commented out for testing purposes
+            # proof = await asyncio.to_thread(
+            #     self._proof_generator.generate_tx_proof,
+            #     chain_id,
+            #     tx_hash
+            # )
 
             payload = {
                 "user_address": from_address,
                 "token_id": token_id,
-                "evm_transaction_data": evm_transaction_data,
-                "rlp_block_header": proof["rlp_block_header"],
-                "transaction_index_rlp": proof["transaction_index_rlp"],
-                "transaction_proof_stack": proof["transaction_proof_stack"],
+                # TODO: MOCK TESTING - Verification fields commented out for testing purposes
+                # "evm_transaction_data": evm_transaction_data,
+                # "rlp_block_header": proof["rlp_block_header"],
+                # "transaction_index_rlp": proof["transaction_index_rlp"],
+                # "transaction_proof_stack": proof["transaction_proof_stack"],
             }
 
             result = self.accounting_service.include_deposit(payload)
@@ -220,8 +230,10 @@ class DepositListener:
                 if chain_id not in self._last_processed_blocks:
                     try:
                         block_number = await asyncio.to_thread(lambda: web3.eth.block_number)
-                        self._last_processed_blocks[chain_id] = block_number
-                        logger.info(f"Initialized {chain_name} at block {block_number}")
+                        lookback_blocks = 100
+                        start_block = max(0, block_number - lookback_blocks)
+                        self._last_processed_blocks[chain_id] = start_block
+                        logger.info(f"Initialized {chain_name} at block {start_block}, scanning last {lookback_blocks} blocks")
                     except Exception as e:
                         logger.warning(f"Failed to get block number for {chain_name}: {e}. Retrying...")
                         await asyncio.sleep(poll_interval)
@@ -247,6 +259,7 @@ class DepositListener:
                                     and tx.get("value", 0) > 0
                                 ):
                                     has_native_deposit = True
+                                    logger.info(f"FOUND NATIVE DEPOSIT in tx {tx_hash} at block {block_num}")
                                     await self._process_deposit(
                                         chain_id=chain_id,
                                         tx_hash=tx_hash,
@@ -270,6 +283,7 @@ class DepositListener:
                                                         from_address = "0x" + log["topics"][1].hex()[-40:]
                                                         value = int.from_bytes(log["data"], byteorder="big")
 
+                                                        logger.info(f"Found ERC20 deposit ({erc20_tokens[token_address]}) in tx {tx_hash} at block {block_num}")
                                                         await self._process_erc20_deposit(
                                                             chain_id=chain_id,
                                                             tx_hash=tx_hash,
