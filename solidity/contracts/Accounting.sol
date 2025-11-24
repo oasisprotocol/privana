@@ -28,6 +28,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
     mapping(address user => UserInfo) private userInfo;
 
+    WithdrawalRequest[] public withdrawals;
+
     event Deposit(
         address indexed userAddress,
         bytes32 indexed tokenId,
@@ -73,10 +75,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 chainId
     );
 
-    event TokenRegistered(
-        bytes32 indexed tokenId,
-        TokenType tokenType
-    );
+    event TokenRegistered(bytes32 indexed tokenId, TokenType tokenType);
 
     error InvalidDeposit();
     error InsufficientBalance();
@@ -90,6 +89,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error InvalidTransactionData();
     error InvalidExpiry();
     error InvalidAmount();
+    error WithdrawalAlreadyResolved();
+    error WithdrawalTooSoon();
+
+    struct WithdrawalRequest {
+        address userAddress;
+        uint256 amount;
+        uint256 blockNumber;
+        bytes32 tokenId;
+        bool resolved;
+        bytes txIdentifier; // nonce, utxo identifier, or similar
+    }
 
     /**
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
@@ -189,7 +199,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         //     (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
         //         .decodeTxDataForErc20Transfer(txData);
 
-        //     if (erc20To != EVMSignerAndVerifier.evmAddress) revert AddressMismatch();
+        // if (erc20To != EVMSignerAndVerifier.evmAddress)
+        //     revert AddressMismatch();
 
         //     amount = erc20amount;
         // } else {
@@ -260,7 +271,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
         if (locks.length >= 10) revert TooManyActiveLocks();
 
-        if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+        if (balances[userAddress][tokenId] < amount)
+            revert InsufficientBalance();
 
         balances[userAddress][tokenId] -= amount;
 
@@ -274,7 +286,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             })
         );
 
-        emit LockCreated(userAddress, serviceAddress, tokenId, amount, expiry, lockIndex);
+        emit LockCreated(
+            userAddress,
+            serviceAddress,
+            tokenId,
+            amount,
+            expiry,
+            lockIndex
+        );
     }
 
     /**
@@ -336,7 +355,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param userAddress The address of the user whose expired locks should be unlocked
      * @return unlockedCount The number of locks that were successfully unlocked
      */
-    function unlockAllExpiredLocks(address userAddress) external returns (uint256 unlockedCount) {
+    function unlockAllExpiredLocks(
+        address userAddress
+    ) external returns (uint256 unlockedCount) {
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
@@ -423,7 +444,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         lock.amount -= amount;
         balances[toAddress][lock.tokenId] += amount;
 
-        emit LockedFundsTransferred(userAddress, lock.serviceId, toAddress, lock.tokenId, amount, lockIndex);
+        emit LockedFundsTransferred(
+            userAddress,
+            lock.serviceId,
+            toAddress,
+            lock.tokenId,
+            amount,
+            lockIndex
+        );
 
         if (lock.amount == 0) {
             locks[lockIndex] = locks[locks.length - 1];
@@ -474,7 +502,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             signature
         );
 
-        if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+        if (balances[userAddress][tokenId] < amount)
+            revert InsufficientBalance();
 
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
@@ -483,41 +512,29 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     }
 
     /**
-     * @notice Initiates withdrawal by generating a signed transaction for the origin chain.
+     * @notice Initiates withdrawal by scheduling it for future resolution.
      *
      * This function processes user withdrawal requests by:
      * 1. Verifying the user's authorization via EIP-712 signature
      * 2. Debiting the requested amount from the user's account
-     * 3. Generating a signed transaction to send funds on the origin chain
-     * 4. Returning the signed transaction for broadcast
-     *
-     * The generated transaction is signed using the contract's private key and can be
-     * broadcast to the appropriate blockchain to complete the withdrawal. The transaction
-     * type (native transfer vs ERC20 transfer) is determined by the token configuration.
+     * 3. Scheduling the withdrawal for resolution in a future block
      *
      * Security features:
      * - EIP-712 signature verification to authorize withdrawal
      * - Balance verification before debiting
-     * - Token-type specific transaction generation
-     *
-     * @dev The returned transaction must be broadcast externally to complete withdrawal.
-     *      The function debits the user's balance immediately upon signature verification.
-     *      Replay protection mechanisms are automatically managed for the target chain.
+     * - Nonce setting when scheduling transactions
      *
      * @param userAddress The address of the user requesting the withdrawal
      * @param tokenId The identifier of the token to withdraw
      * @param amount The amount of tokens to withdraw
      * @param signature The EIP-712 signature from the user authorizing the withdrawal
-     * @return signedTx The raw signed transaction ready for broadcast
      */
-    function withdraw(
+    function requestWithdrawal(
         address userAddress,
         bytes32 tokenId,
         uint256 amount,
         bytes calldata signature
-    ) public returns (bytes memory signedTx) {
-        if (amount == 0) revert InvalidAmount();
-
+    ) public {
         EIP712SignatureVerifier.verifyWithdrawSignature(
             userAddress,
             tokenId,
@@ -525,31 +542,123 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             signature
         );
 
-        if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+        if (balances[userAddress][tokenId] < amount)
+            revert InsufficientBalance();
 
         balances[userAddress][tokenId] -= amount;
 
+        TokenInfo memory tInfo = tokens[tokenId];
+
+        bytes memory txIdentifier;
+
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
+                tInfo.data
+            );
+
+            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+
+            emit Withdrawal(userAddress, tokenId, amount, chainId);
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (uint256 chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
+                tInfo.data
+            );
+
+            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+
+            emit Withdrawal(userAddress, tokenId, amount, chainId);
+        } else {
+            revert UnsupportedTokenType();
+        }
+
+        withdrawals.push(
+            WithdrawalRequest({
+                userAddress: userAddress,
+                amount: amount,
+                blockNumber: block.number,
+                tokenId: tokenId,
+                txIdentifier: txIdentifier,
+                resolved: false
+            })
+        );
+    }
+
+    /**
+     * @notice Resolves a withdrawal by generating a signed transaction for the origin chain.
+     *
+     * This function processes user withdrawal requests by:
+     * 1. Taking a previously scheduled withdrawal request
+     * 2. Ensuring a minimum block delay has passed to prevent simulation attacks
+     * 3. Generating a signed transaction to transfer the requested tokens back to the user
+     *
+     * The generated transaction is signed using the contract's private key and can be
+     * broadcast to the appropriate blockchain to complete the withdrawal. The transaction
+     * type (native transfer vs ERC20 transfer) is determined by the token configuration.
+     *
+     * Security features:
+     *  - Token-type specific transaction generation
+     *  - Simulation-attack protection by enforcing a minimum block delay before resolution
+     *
+     * @dev The returned transaction must be broadcast externally to complete withdrawal.
+     *      The function debits the user's balance immediately upon signature verification.
+     *      Replay protection mechanisms are automatically managed for the target chain.
+     *
+     * @param index The index of the withdrawal request to resolve
+     * @return signedTx The raw signed transaction ready for broadcast
+     */
+    function resolveWithdrawal(
+        uint256 index
+    ) public returns (bytes memory signedTx) {
+        WithdrawalRequest storage withdrawalRequest = withdrawals[index];
+
+        if (withdrawalRequest.resolved) {
+            revert WithdrawalAlreadyResolved();
+        }
+
+        if (block.number - withdrawalRequest.blockNumber < 1) {
+            revert WithdrawalTooSoon();
+        }
+
+        withdrawalRequest.resolved = true;
+
+        address userAddress = withdrawalRequest.userAddress;
+        bytes32 tokenId = withdrawalRequest.tokenId;
+        uint256 amount = withdrawalRequest.amount;
         TokenInfo memory tInfo = tokens[tokenId];
 
         if (tInfo.tokenType == TokenType.NativeEVM) {
             uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
                 tInfo.data
             );
+
+            (uint64 nonce) = abi.decode(
+                withdrawalRequest.txIdentifier,
+                (uint64)
+            );
+
             signedTx = EVMSignerAndVerifier.generateNativeTransfer(
                 chainId,
                 userAddress,
-                amount
+                amount,
+                nonce
             );
 
             emit Withdrawal(userAddress, tokenId, amount, chainId);
         } else if (tInfo.tokenType == TokenType.ERC20) {
             (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
+
+            (uint64 nonce) = abi.decode(
+                withdrawalRequest.txIdentifier,
+                (uint64)
+            );
+
             signedTx = EVMSignerAndVerifier.generateERC20Transfer(
                 chainId,
                 userAddress,
                 tokenAddress,
-                amount
+                amount,
+                nonce
             );
 
             emit Withdrawal(userAddress, tokenId, amount, chainId);
@@ -626,7 +735,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      */
     function getExpiredLocks(
         address user
-    ) external view returns (FundLock[] memory expiredLocks, uint256[] memory lockIndices) {
+    )
+        external
+        view
+        returns (FundLock[] memory expiredLocks, uint256[] memory lockIndices)
+    {
         UserInfo storage uInfo = userInfo[user];
         FundLock[] storage allLocks = uInfo.activeLocks;
 

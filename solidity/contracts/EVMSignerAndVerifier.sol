@@ -5,15 +5,23 @@ pragma solidity ^0.8.20;
 import {TokenInfo, EVMKeypair} from "./Types.sol";
 
 import {RLPReader} from "solidity-rlp/contracts/RLPReader.sol";
-import {RLPWriter} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.sol";
+import {
+    RLPWriter
+} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.sol";
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {EIP155Signer} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
+import {
+    EIP155Signer
+} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
 import {ProvethVerifier, EVMTransactionProof} from "./lib/ProvethVerifier.sol";
 
 import {SliceBytes} from "./lib/SliceBytes.sol";
-import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
-import {EthereumUtils} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
+import {
+    Sapphire
+} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
+import {
+    EthereumUtils
+} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
 import {TokenInfo, EVMKeypair} from "./Types.sol";
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
@@ -392,7 +400,8 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
     function generateNativeTransfer(
         uint256 chainId,
         address userAddress,
-        uint256 amount
+        uint256 amount,
+        uint64 nonce
     ) internal returns (bytes memory output) {
         if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
 
@@ -401,7 +410,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
                 evmAddress,
                 secretKey,
                 EIP155Signer.EthTx({
-                    nonce: nonces[chainId]++,
+                    nonce: nonce,
                     gasPrice: gasPrices[chainId],
                     gasLimit: gasLimitNative,
                     to: userAddress,
@@ -441,7 +450,8 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         uint256 chainId,
         address userAddress,
         address tokenAddress,
-        uint256 amount
+        uint256 amount,
+        uint64 nonce
     ) internal returns (bytes memory output) {
         if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
 
@@ -455,7 +465,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
                 evmAddress,
                 secretKey,
                 EIP155Signer.EthTx({
-                    nonce: nonces[chainId]++,
+                    nonce: nonce,
                     gasPrice: gasPrices[chainId],
                     gasLimit: gasLimitERC20,
                     to: tokenAddress,
@@ -615,5 +625,11 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         // @ahmed needs to call Shoyubashi before submitting the includeEVMDeposit to update the blockhash oracle
         // Call this function https://github.com/rube-de/hashi/blob/b43726b27eedddf15e48e65e0175aba4b2a8096e/packages/evm/contracts/ownable/ShoyuBashi.sol#L28
         require(actualBlockHash == expectedBlockHash, "Invalid block hash");
+    }
+
+    function getEVMNonceAndIncrement(
+        uint256 chainId
+    ) internal returns (uint64 nonce) {
+        return uint64(nonces[chainId]++);
     }
 }

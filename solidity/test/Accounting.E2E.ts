@@ -393,13 +393,27 @@ describe('Accounting', function () {
     );
 
     // Submit the transfer to Accounting contract
-    const tx = await accounting.withdraw(
+    const tx = await accounting.requestWithdrawal(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       parseUsdt("0.1"),
       signature
     );
     await tx.wait();
+
+    const withdrawals = await accounting.withdrawals(0);
+    expect(withdrawals.userAddress).to.equal(userWallet1.address);
+    expect(withdrawals.amount).to.equal(parseUsdt("0.1"));
+    expect(withdrawals.tokenId).to.equal(TEST_TOKEN.tokenId);
+    expect(withdrawals.resolved).to.equal(false);
+
+    // // Wait 1 block by waiting 20 seconds
+    // await new Promise(resolve => setTimeout(resolve, 20000));
+
+    // Admin resolves the withdrawal
+    const tx2 = await accounting.resolveWithdrawal(0);
+    const receipt2 = await tx2.wait();
+
   });
 
 });
