@@ -112,16 +112,39 @@ Get all expired locks for a user.
   - `expired_locks` (array) – List of expired lock information (same structure as locks in `/funds/locked`).
 
 ### POST `/withdraw`
-Initiate a withdrawal based on the user's EIP-712 signature. The service verifies the signature, generates the withdrawal transaction via the contract, and relays it to the chain RPC mapped to the token.
+Request a withdrawal based on the user's EIP-712 signature. This schedules the withdrawal for resolution in a later block (simulation attack protection). The user's balance is debited immediately and a nonce is reserved for the withdrawal transaction.
 - **Request body**
   - `user_address` (string, required).
   - `token_id` (string, required).
   - `amount` (integer, required).
   - `signature` (string, required) – User EIP-712 `Withdraw` signature.
 - **Response body**
-  - `submission_id` (string) – Hash of the relayed transaction.
+  - `submission_id` (string) – ROFL submission identifier.
   - `status` (string) – Submission status, e.g. `submitted`.
   - `detail` (string, optional) – Metadata such as `chain_id` and `token_address`.
+- **Note:** After this call succeeds, you must call `/withdraw/resolve` in a subsequent block to generate the signed withdrawal transaction.
+
+### POST `/withdraw/resolve`
+Resolve a pending withdrawal request to generate the signed transaction for the origin chain. Must be called at least 1 block after the withdrawal was requested.
+- **Request body**
+  - `index` (integer, required) – Index of the withdrawal request to resolve.
+- **Response body**
+  - `submission_id` (string) – ROFL submission identifier.
+  - `status` (string) – Submission status, e.g. `submitted`.
+  - `detail` (string, optional).
+
+### GET `/withdraw/{index}`
+Get information about a specific withdrawal request.
+- **Path parameters**
+  - `index` (integer, required) – Index of the withdrawal request.
+- **Response body**
+  - `index` (integer) – Withdrawal request index.
+  - `user_address` (string) – Address of the user who requested the withdrawal.
+  - `amount` (string) – Amount requested in base units.
+  - `block_number` (integer) – Block number when the withdrawal was requested.
+  - `token_id` (string) – Token identifier.
+  - `resolved` (boolean) – Whether the withdrawal has been resolved.
+  - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
 
 ### GET `/balances/{user_address}/{token_id}`
 Get the user's balance for a specific token from the contract.
