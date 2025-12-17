@@ -514,6 +514,39 @@ class AccountingContractService:
             "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
         }
 
+    def get_pending_withdrawals(self, user_address: str) -> Dict[str, Any]:
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+
+        pending = []
+        index = 0
+        max_iterations = 10000
+
+        while index < max_iterations:
+            try:
+                result = contract_reader.functions.withdrawals(index).call()
+                withdrawal_user = result[0]
+                resolved = result[4]
+
+                if withdrawal_user.lower() == checksum_user.lower() and not resolved:
+                    pending.append({
+                        "index": index,
+                        "user_address": result[0],
+                        "amount": str(result[1]),
+                        "block_number": result[2],
+                        "token_id": "0x" + result[3].hex(),
+                        "resolved": result[4],
+                        "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+                    })
+                index += 1
+            except Exception:
+                break
+
+        return {
+            "user_address": checksum_user,
+            "pending_withdrawals": pending,
+        }
+
     def unlock_all_expired_locks(self, payload: Dict) -> SubmissionResult:
         """Unlock all expired locks for a user."""
         user = self._require_address(payload["user_address"], "user_address")

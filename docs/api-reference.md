@@ -133,6 +133,21 @@ Resolve a pending withdrawal request to generate the signed transaction for the 
   - `status` (string) – Submission status, e.g. `submitted`.
   - `detail` (string, optional).
 
+### GET `/withdraw/pending/{user_address}`
+Get all pending (unresolved) withdrawal requests for a user. Use this to find the withdrawal index needed to call `/withdraw/resolve`.
+- **Path parameters**
+  - `user_address` (string, required) – User's EVM address.
+- **Response body**
+  - `user_address` (string) – Checksummed user address.
+  - `pending_withdrawals` (array) – List of pending withdrawal requests:
+    - `index` (integer) – Withdrawal request index (use this for `/withdraw/resolve`).
+    - `user_address` (string) – Address of the user who requested the withdrawal.
+    - `amount` (string) – Amount requested in base units.
+    - `block_number` (integer) – Block number when the withdrawal was requested.
+    - `token_id` (string) – Token identifier.
+    - `resolved` (boolean) – Always `false` for pending withdrawals.
+    - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
+
 ### GET `/withdraw/{index}`
 Get information about a specific withdrawal request.
 - **Path parameters**

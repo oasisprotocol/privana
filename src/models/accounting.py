@@ -159,8 +159,8 @@ class ResolveWithdrawalRequest(BaseModel):
     index: int = Field(..., ge=0, description="Index of the withdrawal to resolve")
 
 
-class WithdrawalInfoResponse(BaseModel):
-    """Response containing withdrawal information."""
+class WithdrawalInfo(BaseModel):
+    """Information about a single withdrawal request."""
 
     index: int
     user_address: str
@@ -169,6 +169,19 @@ class WithdrawalInfoResponse(BaseModel):
     token_id: str
     resolved: bool
     tx_identifier: str
+
+
+class WithdrawalInfoResponse(WithdrawalInfo):
+    """Response containing withdrawal information."""
+
+    pass
+
+
+class PendingWithdrawalsResponse(BaseModel):
+    """Response containing pending withdrawals for a user."""
+
+    user_address: str
+    pending_withdrawals: list[WithdrawalInfo]
 
 
 class TransactionSubmissionResponse(BaseModel):

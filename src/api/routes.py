@@ -16,6 +16,7 @@ from src.models.accounting import (
     IncludeDepositResponse,
     LockFundsRequest,
     LockedFundsResponse,
+    PendingWithdrawalsResponse,
     ResolveWithdrawalRequest,
     TransactionSubmissionResponse,
     TransferFundsRequest,
@@ -158,6 +159,20 @@ async def resolve_withdrawal(payload: ResolveWithdrawalRequest) -> TransactionSu
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to resolve withdrawal")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get("/withdraw/pending/{user_address}", response_model=PendingWithdrawalsResponse)
+async def get_pending_withdrawals(user_address: str) -> PendingWithdrawalsResponse:
+    """Get all pending (unresolved) withdrawal requests for a user."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_pending_withdrawals, user_address)
+        return PendingWithdrawalsResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get pending withdrawals")
+        raise HTTPException(status_code=500, detail="Failed to retrieve pending withdrawals") from exc
 
 
 @router.get("/withdraw/{index}", response_model=WithdrawalInfoResponse)
