@@ -16,11 +16,13 @@ from src.models.accounting import (
     IncludeDepositResponse,
     LockFundsRequest,
     LockedFundsResponse,
+    ResolveWithdrawalRequest,
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
     UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
+    WithdrawalInfoResponse,
     WithdrawalRequest,
 )
 from src.services.accounting_contract import (
@@ -132,16 +134,44 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
 
 @router.post("/withdraw", response_model=TransactionSubmissionResponse)
 async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissionResponse:
-    """Commit a withdrawal request by validating the user's signature."""
+    """Request a withdrawal by validating the user's signature. Must be resolved in a later block."""
 
     try:
-        submission = await asyncio.to_thread(_service.withdraw, payload.model_dump())
+        submission = await asyncio.to_thread(_service.request_withdrawal, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to submit withdrawal request")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/withdraw/resolve", response_model=TransactionSubmissionResponse)
+async def resolve_withdrawal(payload: ResolveWithdrawalRequest) -> TransactionSubmissionResponse:
+    """Resolve a pending withdrawal request to generate the signed transaction."""
+
+    try:
+        submission = await asyncio.to_thread(_service.resolve_withdrawal, payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to resolve withdrawal")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get("/withdraw/{index}", response_model=WithdrawalInfoResponse)
+async def get_withdrawal_info(index: int) -> WithdrawalInfoResponse:
+    """Get information about a specific withdrawal request."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_withdrawal, index)
+        return WithdrawalInfoResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get withdrawal info")
+        raise HTTPException(status_code=500, detail="Failed to retrieve withdrawal info") from exc
 
 
 @router.get("/funds/locked/{user_address}", response_model=LockedFundsResponse)

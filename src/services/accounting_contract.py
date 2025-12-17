@@ -468,13 +468,13 @@ class AccountingContractService:
 
         return response
 
-    def withdraw(self, payload: Dict) -> SubmissionResult:
+    def request_withdrawal(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
 
-        fn = self.contract.functions.withdraw(
+        fn = self.contract.functions.requestWithdrawal(
             user,
             token,
             amount,
@@ -490,6 +490,29 @@ class AccountingContractService:
         detail = "; ".join(detail_parts)
 
         return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
+
+    def resolve_withdrawal(self, payload: Dict) -> SubmissionResult:
+        index = self._require_positive(payload["index"], "index", allow_zero=True)
+
+        fn = self.contract.functions.resolveWithdrawal(index)
+
+        submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
+
+        return SubmissionResult(submission_id=submission_id, status="submitted")
+
+    def get_withdrawal(self, index: int) -> Dict[str, Any]:
+        contract_reader = self._get_reader_contract()
+        result = contract_reader.functions.withdrawals(index).call()
+
+        return {
+            "index": index,
+            "user_address": result[0],
+            "amount": str(result[1]),
+            "block_number": result[2],
+            "token_id": "0x" + result[3].hex(),
+            "resolved": result[4],
+            "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+        }
 
     def unlock_all_expired_locks(self, payload: Dict) -> SubmissionResult:
         """Unlock all expired locks for a user."""

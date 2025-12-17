@@ -153,6 +153,24 @@ class WithdrawalRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class ResolveWithdrawalRequest(BaseModel):
+    """Payload for resolving a pending withdrawal."""
+
+    index: int = Field(..., ge=0, description="Index of the withdrawal to resolve")
+
+
+class WithdrawalInfoResponse(BaseModel):
+    """Response containing withdrawal information."""
+
+    index: int
+    user_address: str
+    amount: str
+    block_number: int
+    token_id: str
+    resolved: bool
+    tx_identifier: str
+
+
 class TransactionSubmissionResponse(BaseModel):
     """Generic response for contract transaction submissions."""
 
