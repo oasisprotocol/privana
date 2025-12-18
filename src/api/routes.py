@@ -18,6 +18,8 @@ from src.models.accounting import (
     LockedFundsResponse,
     PendingWithdrawalsResponse,
     ResolveWithdrawalRequest,
+    TokenInfoResponse,
+    TotalLockedBalanceResponse,
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
@@ -275,3 +277,33 @@ async def get_batch_balances(payload: BatchBalancesRequest) -> BatchBalancesResp
     except Exception as exc:
         logger.exception("Failed to get batch balances")
         raise HTTPException(status_code=500, detail="Failed to retrieve balances") from exc
+
+
+@router.get("/funds/locked/total/{user_address}/{token_id}", response_model=TotalLockedBalanceResponse)
+async def get_total_locked_balance(user_address: str, token_id: str) -> TotalLockedBalanceResponse:
+    """Get total locked balance for a specific token across all locks."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_total_locked_balance, user_address, token_id)
+        return TotalLockedBalanceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get total locked balance")
+        raise HTTPException(status_code=500, detail="Failed to retrieve total locked balance") from exc
+
+
+@router.get("/tokens/{token_id}", response_model=TokenInfoResponse)
+async def get_token_info(token_id: str) -> TokenInfoResponse:
+    """Get information about a registered token."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_token_info, token_id)
+        return TokenInfoResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get token info")
+        raise HTTPException(status_code=500, detail="Failed to retrieve token info") from exc
+
+

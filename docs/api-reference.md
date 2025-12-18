@@ -182,3 +182,26 @@ Get balances for multiple tokens for a user in a single call.
     - `balance` (string) – Balance in base units.
     - `token_symbol` (string) – Token symbol.
     - `chain_id` (string) – Chain ID where the token originates.
+
+### GET `/funds/locked/total/{user_address}/{token_id}`
+Get total locked balance for a specific token across all locks.
+- **Path parameters**
+  - `user_address` (string, required) – User's EVM address.
+  - `token_id` (string, required) – Token identifier.
+- **Response body**
+  - `user_address` (string) – Checksummed address.
+  - `token_id` (string) – Token identifier.
+  - `total_locked` (string) – Total locked amount in base units.
+
+### GET `/tokens/{token_id}`
+Get information about a registered token.
+- **Path parameters**
+  - `token_id` (string, required) – Token identifier (bytes32 hex).
+- **Response body**
+  - `token_id` (string) – Token identifier.
+  - `token_type` (integer) – Token type (0 = NativeEVM, 1 = ERC20).
+  - `token_type_name` (string) – Human-readable token type.
+  - `data` (string) – Raw token data (hex).
+  - `chain_id` (integer, optional) – Chain ID for the token.
+  - `chain_name` (string, optional) – Human-readable chain name.
+  - `token_address` (string, optional) – ERC20 contract address (only for ERC20 tokens).

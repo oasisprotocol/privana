@@ -251,3 +251,25 @@ class BatchBalancesResponse(BaseModel):
 
     user_address: str
     balances: list[TokenBalance]
+
+
+class TotalLockedBalanceResponse(BaseModel):
+    """Response containing total locked balance for a token."""
+
+    user_address: str
+    token_id: str
+    total_locked: str
+
+
+class TokenInfoResponse(BaseModel):
+    """Response containing token information."""
+
+    token_id: str
+    token_type: int
+    token_type_name: str
+    data: str
+    chain_id: Optional[int] = None
+    chain_name: Optional[str] = None
+    token_address: Optional[str] = None
+
+
