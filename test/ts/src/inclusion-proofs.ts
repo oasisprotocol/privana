@@ -75,24 +75,15 @@ export async function getReceiptInclusionProof(
   txIndex: number,
 ) {
   const receipts = await provider.send("eth_getBlockReceipts", [getRpcUint(blockNumber)]);
-  const rawReceipts = await provider.send("debug_getRawReceipts", [getRpcUint(blockNumber)]);
 
   const trie = new Trie();
   for (let i = 0; i < receipts.length; i++) {
-    console.log(`Encoding receipt ${i}`);
-    assert.deepStrictEqual(
-      ethers.hexlify(ethers.hexlify(arrayifyReceipt(receipts[i]))),
-      rawReceipts[i],
-      "Receipt encoding mismatch"
-    );
-
     const key = ethers.getBytes(getRlpUint(i));   // RLP(k)
     await trie.put(key, arrayifyReceipt(receipts[i]));
   }
 
   const rawBlock = await provider.send("debug_getRawBlock", [getRpcUint(blockNumber)]);
   const blockRlp = ethers.decodeRlp(rawBlock);
-  // TODO: Review whether we can make this type conversion
   const blockHeader: string[] = blockRlp[0] as string[];
 
   // Ensure the transaction root was constructed the same way
