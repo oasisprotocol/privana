@@ -26,6 +26,12 @@ contract MockEVMSignerAndVerifier is EVMSignerAndVerifier {
         return EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
     }
 
+    function exposedDecodeTxReceipt(
+        bytes memory txReceiptData
+    ) external returns (uint256 status, uint256 gasUsed) {
+        return EVMSignerAndVerifier.decodeEVMTxReceipt(txReceiptData);
+    }
+
     function exposedDecodeTxDataForErc20Transfer(
         bytes memory txData
     ) external returns (address to, uint256 amount) {

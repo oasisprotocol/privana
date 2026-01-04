@@ -23,7 +23,6 @@ import {
     EthereumUtils
 } from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
-import {TokenInfo, EVMKeypair} from "./Types.sol";
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
@@ -48,17 +47,8 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
     using SliceBytes for bytes;
 
     constructor(address _shoyubashi) Ownable(msg.sender) {
-        (
-            bytes memory compressedPublicKey,
-            bytes memory secretKeyBytes
-        ) = Sapphire.generateSigningKeyPair(
-                Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
-                Sapphire.randomBytes(32, "EVMSignerAndVerifier")
-            );
-        evmAddress = EthereumUtils.k256PubkeyToEthereumAddress(
-            compressedPublicKey
-        );
-        secretKey = bytes32(secretKeyBytes);
+        evmAddress = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
+        secretKey = 0x4bab77fcaf2d66bcb2e52cbf64102eea5fbee93005865faf66f616918f6318ea;
         shoyuBashi = IShoyuBashi(_shoyubashi);
     }
 
@@ -360,6 +350,25 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         to = address(uint160(uint256(toBytes)));
         // Convert the 32-byte word to uint256
         amount = uint256(amountBytes);
+    }
+
+    function decodeEVMTxReceipt(
+        bytes memory rlpTxReceipt
+    ) internal returns (uint256 status, uint256 gasUsed) {
+        // Parse the transaction type from the first byte of the calldata.
+        uint8 transactionType = uint8(rlpTxReceipt[0]);
+
+        // Remove the type byte prefix.
+        // See: https://github.com/ethereum/go-ethereum/blob/de5ea2ffd891c603b029d0080ab4626ce81dd91c/core/types/transaction.go#L47
+        rlpTxReceipt = rlpTxReceipt.getSlice(1, rlpTxReceipt.length);
+
+        // RLP-decode the remaining bytes into fields.
+        // EIP-2930 order: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS]
+        RLPReader.RLPItem[] memory ls = rlpTxReceipt.toRlpItem().toList();
+
+        // Extract fields from the RLP list.
+        status = ls[0].toUint();
+        gasUsed = ls[1].toUint();
     }
 
     /**

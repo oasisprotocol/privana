@@ -10,6 +10,7 @@ async function main() {
 
   try {
     const result = await getReceiptInclusionProof(provider, BLOCK_NUMBER, TX_INDEX);
+
     // console.log("RLP Block Header:", result.rlpBlockHeader);
     // console.log("Proof:", result.proof);
   } catch (error) {

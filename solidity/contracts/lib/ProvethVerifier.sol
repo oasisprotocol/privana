@@ -19,7 +19,6 @@ struct EVMTransactionProof {
 }
 
 struct EVMReceiptProof {
-    bytes rlpBlockHeader;
     bytes receiptIndexRlp;
     bytes receiptProofStack;
 }
@@ -152,10 +151,10 @@ contract ProvethVerifier {
     }
 
     function validateReceiptProof(
+        bytes memory rlpBlockHeader,
         EVMReceiptProof calldata receiptProof
     ) public pure returns (bytes memory) {
-        RLPReader.RLPItem[] memory blockHeader = receiptProof
-            .rlpBlockHeader
+        RLPReader.RLPItem[] memory blockHeader = rlpBlockHeader
             .toRlpItem()
             .toList();
         bytes32 receiptRoot = bytes32(

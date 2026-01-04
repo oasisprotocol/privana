@@ -79,7 +79,8 @@ export async function getReceiptInclusionProof(
   const trie = new Trie();
   for (let i = 0; i < receipts.length; i++) {
     const key = ethers.getBytes(getRlpUint(i));   // RLP(k)
-    await trie.put(key, arrayifyReceipt(receipts[i]));
+    // Only log if the receipt doesn't start with 0x02
+    await trie.put(key, encodeReceipt(receipts[i]));
   }
 
   const rawBlock = await provider.send("debug_getRawBlock", [getRpcUint(blockNumber)]);
@@ -103,7 +104,7 @@ export async function getReceiptInclusionProof(
   };
 }
 
-function arrayifyReceipt(receipt: any): any {
+function encodeReceipt(receipt: any): any {
   const status = typeof receipt.status === "string"
     ? parseInt(receipt.status, 16)
     : receipt.status ?? 0;
@@ -133,7 +134,7 @@ function arrayifyReceipt(receipt: any): any {
     ? parseInt(receipt.type, 16)
     : Number(receipt.type ?? 0);
 
-  const isTyped = !Number.isNaN(typeNum) && typeNum !== 0;
+  const isTyped = !Number.isNaN(typeNum);
   const encodedWithType = isTyped
     ? ethers.concat([Uint8Array.of(typeNum), encoded])
     : encoded;
