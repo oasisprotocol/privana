@@ -32,25 +32,25 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: pcHMtpM/04wHJii32InhW6vMvft9uGv4aJth9IsFPb4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: Rm7HysBgPcaQRApYN3Tj8A/pW1VfhHlI56c577lOR0cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: gunPDRiGH6enGwAeevMxVphAX1EkaGOZkFlO/3hlkW8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: nlUdex99wL328m/EGRhWU0KsFGK8yD29jw6NGeOk22wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggGdUalfSdfFR0QXYc+Xxu3z2DONtN+YnEiJUdcTG6SkdkbmFtZVgr8O9gwlPuV+AkVupBzPamIgVi80vwVakMgIzyrpuhsMd1gXnGLjPmAke7pGVub25jZU/6OpQrBnAejqz2QqmzzatldmFsdWVYOvZmyNwoL0V6tZL7LnrumO11t53U/odWhYzr4IynfnsT4G618X7SA9ShjbzWcR/0MclZQFqVJSXyYO4=
+        value: pGJwa1gg6jMbd4uOMDPL2bQQjXCg+vIqYA1hY1ok38yga01bokNkbmFtZVgrhW13NXveuRKS4mbGPt1m3fPn4qT/Bdrk1Dz+qtar2MCkiEJLpBBfP2Qc7mVub25jZU/vYubp+dsC8WG6dL1yyVpldmFsdWVYOhxw1b3mTcf1fJbIQ/+zQMIyi+9cqOBFeLHwXcYZsevlsmbTpZl+XdylPuYfcdYZFBSdjNBXWpFhqMc=
       - name: SAPPHIRE_CHAIN_ID
         value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL
         value: pGJwa1ggHCCMlvc+DNO0ZMnvObabgnN7F6R5bR51qOMA5TA3g2BkbmFtZVggzZEFP55yKak+XU9/bbwplQQr6/ObqWEdSG6uXSuA4d1lbm9uY2VPlC9Z3W6lBA+JwGnSr2x9ZXZhbHVlWDErklv3csBuRaZ8PQzzzMzpIWgfVEjIWdN721xPHadDrQhzDOWd40t1q++ie0HR29fm
       - name: ALCHEMY_API_KEY
-        value: pGJwa1ggCTQ8m1dJg2ROcUEoKo/XpYtJk6Y8blr3x5OFcmvYIxBkbmFtZVgf+lAWNsx3iKhAOrMFaliK7hjZ+xu57Ce1ukz0qJOTbGVub25jZU8X6JR0Kc2iPzrtU9puUvNldmFsdWVYJVsTToI27NXxNNkdL/bQe0p+1tJimaZ2dIC2I7As7WDLWCB2Bw4=
+        value: pGJwa1ggGSMlZSoTXsfbBAk2U8SuIEwsfYK8DuGZKM3//J9H61xkbmFtZVgfZRjsJMsjSKGY6tN0ElFBEDp4hM/sQ4nPF522yGUoPWVub25jZU+o2ndgdwCJUKIYrLoM3PRldmFsdWVYJdYh5B8ric66QTrjdeW6g3yCAeclps0uVRk4QpEYV0NknPs9Jj8=
       - name: DEPOSIT_POLL_INTERVAL
         value: pGJwa1gga2NiNyH+aVAJTgNJSdZPP/be/JQ5Locl6CPllkiMmGRkbmFtZVglYeEHQZrMBUJC2urp48jJ8MQ5gqxSvifn5aCi1t4nd3W90/cP8WVub25jZU/D+6eCsJprwrtVybZWFBxldmFsdWVRd1PygUFg0idNToK3uTigErQ=
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: 00000000000003c6
+        id: 000000000000051d

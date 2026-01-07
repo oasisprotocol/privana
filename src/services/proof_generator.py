@@ -10,6 +10,9 @@ from web3.types import TxReceipt
 
 logger = logging.getLogger(__name__)
 
+BLOCK_HEADER_TX_ROOT_INDEX = 4
+BLOCK_HEADER_RECEIPT_ROOT_INDEX = 5
+
 
 class ProofGeneratorService:
 
@@ -167,6 +170,200 @@ class ProofGeneratorService:
             "rlp_block_header": rlp_block_header,
             "transaction_index_rlp": transaction_index_rlp,
             "transaction_proof_stack": transaction_proof_stack,
+        }
+
+    @staticmethod
+    def _parse_hex_int(value, default=0) -> int:
+        if value is None:
+            return default
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value, 16) if value.startswith("0x") else int(value)
+        return default
+
+    @staticmethod
+    def _parse_hex_bytes(value, default=b"") -> bytes:
+        if value is None:
+            return default
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            hex_str = value[2:] if value.startswith("0x") else value
+            return bytes.fromhex(hex_str) if hex_str else default
+        return default
+
+    @classmethod
+    def _encode_receipt(cls, receipt: dict) -> bytes:
+        status = cls._parse_hex_int(receipt.get("status"), 0)
+        cumulative_gas = cls._parse_hex_int(receipt.get("cumulativeGasUsed"), 0)
+        logs_bloom = cls._parse_hex_bytes(receipt.get("logsBloom"), b"\x00" * 256)
+
+        logs_array = []
+        for log in receipt.get("logs", []):
+            address = cls._parse_hex_bytes(log.get("address"))
+            topics = [cls._parse_hex_bytes(t) for t in log.get("topics", [])]
+            data = cls._parse_hex_bytes(log.get("data"))
+            logs_array.append([address, topics, data])
+
+        receipt_array = [status, cumulative_gas, logs_bloom, logs_array]
+
+        tx_type = cls._parse_hex_int(receipt.get("type"), 0)
+
+        if tx_type == 0x7e:
+            deposit_nonce = receipt.get("depositNonce")
+            if deposit_nonce is not None:
+                receipt_array.append(cls._parse_hex_int(deposit_nonce))
+
+            deposit_version = receipt.get("depositReceiptVersion")
+            if deposit_version is not None:
+                receipt_array.append(cls._parse_hex_int(deposit_version))
+
+        encoded = rlp.encode(receipt_array)
+
+        if tx_type != 0:
+            encoded = bytes([tx_type]) + encoded
+
+        return encoded
+
+    def _generate_receipt_inclusion_proof(
+        self,
+        web3: Web3,
+        block_number: int,
+        tx_index: int,
+        max_retries: int = 3,
+    ) -> Dict[str, str]:
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                receipts_result = web3.provider.make_request(
+                    "eth_getBlockReceipts",
+                    [self._get_rpc_uint(block_number)]
+                )
+
+                if 'error' in receipts_result:
+                    error_msg = receipts_result['error']
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get('message', str(error_msg))
+
+                    last_error = Exception(f"RPC Error calling eth_getBlockReceipts: {error_msg}")
+
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.warning(
+                            f"eth_getBlockReceipts failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time}s: {error_msg}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    raise last_error
+
+                raw_block = web3.provider.make_request(
+                    "debug_getRawBlock",
+                    [self._get_rpc_uint(block_number)]
+                )
+
+                if 'error' in raw_block:
+                    error_msg = raw_block['error']
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get('message', str(error_msg))
+
+                    last_error = Exception(f"RPC Error calling debug_getRawBlock: {error_msg}")
+
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.warning(
+                            f"debug_getRawBlock failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time}s: {error_msg}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    raise last_error
+
+                break
+
+            except ValueError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"Receipt proof generation failed (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time}s: {str(e)}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+        receipts = receipts_result['result']
+        raw_block_hex = raw_block['result']
+        block_rlp = rlp.decode(bytes.fromhex(raw_block_hex[2:]))
+        block_header = block_rlp[0]
+
+        trie = HexaryTrie(db={})
+        for i, receipt in enumerate(receipts):
+            key = self._get_rlp_uint(i)
+            value = self._encode_receipt(receipt)
+            trie.set(key, value)
+
+        receipt_root = Web3.to_hex(trie.root_hash)
+        block_header_receipt_root = Web3.to_hex(block_header[BLOCK_HEADER_RECEIPT_ROOT_INDEX])
+
+        if receipt_root != block_header_receipt_root:
+            raise Exception(
+                f"Constructed receipts Merkle tree has a root inconsistent with the receiptsRoot in the block header. "
+                f"Computed: {receipt_root}, Expected: {block_header_receipt_root}"
+            )
+
+        if tx_index >= len(receipts):
+            raise Exception("Transaction index is outside the range of this block")
+
+        proof = trie.get_proof(self._get_rlp_uint(tx_index))
+        proof_hex = []
+        for node in proof:
+            if isinstance(node, list):
+                proof_hex.append(Web3.to_hex(rlp.encode(node)))
+            else:
+                proof_hex.append(Web3.to_hex(node))
+
+        receipt_index_rlp = Web3.to_hex(self._get_rlp_uint(tx_index))
+        receipt_proof_stack = Web3.to_hex(rlp.encode([bytes.fromhex(p[2:]) for p in proof_hex]))
+
+        return {
+            "receipt_index_rlp": receipt_index_rlp,
+            "receipt_proof_stack": receipt_proof_stack,
+        }
+
+    def generate_deposit_proofs(
+        self,
+        chain_id: int,
+        tx_hash: HexStr,
+    ) -> Dict[str, str]:
+        web3 = self._get_chain_web3(chain_id)
+
+        tx_receipt: TxReceipt = web3.eth.get_transaction_receipt(tx_hash)
+        if not tx_receipt:
+            raise ValueError(f"Transaction {tx_hash} not found on chain {chain_id}")
+
+        if tx_receipt.get("status") != 1:
+            raise ValueError(f"Transaction {tx_hash} failed on chain {chain_id}")
+
+        block_number = tx_receipt["blockNumber"]
+        tx_index = tx_receipt["transactionIndex"]
+
+        tx_proof = self._generate_tx_inclusion_proof(web3, block_number, tx_index)
+        receipt_proof = self._generate_receipt_inclusion_proof(web3, block_number, tx_index)
+
+        return {
+            "rlp_block_header": tx_proof["rlp_block_header"],
+            "transaction_index_rlp": tx_proof["transaction_index_rlp"],
+            "transaction_proof_stack": tx_proof["transaction_proof_stack"],
+            "receipt_index_rlp": receipt_proof["receipt_index_rlp"],
+            "receipt_proof_stack": receipt_proof["receipt_proof_stack"],
         }
 
 
