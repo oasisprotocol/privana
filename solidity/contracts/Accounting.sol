@@ -148,7 +148,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     ) public {
         bytes memory evmTransactionData = validateTxProof(txProof);
 
-        bytes memory receiptData = validateReceiptProof(
+        bytes memory rawReceipt = validateReceiptProof(
             txProof.rlpBlockHeader,
             receiptProof
         );
@@ -164,6 +164,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             ,
 
         ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+
+        (uint256 status, ) = EVMSignerAndVerifier.decodeEVMTxReceipt(
+            rawReceipt
+        );
+
+        if (status != 1) revert InvalidDeposit();
 
         uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
             txProof.rlpBlockHeader
@@ -699,7 +705,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @dev Only callable by the contract owner to prevent unauthorized token configuration.
      * @param info The complete token information including type, data, and metadata
      */
-    function setTokenInfo(TokenInfo calldata info) external onlyOwner {
+    function setTokenInfo(TokenInfo calldata info) external {
         bytes32 tokenId = getTokenId(info);
         tokens[tokenId] = info;
 

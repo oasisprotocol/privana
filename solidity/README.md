@@ -34,7 +34,7 @@ The Accounting module consists of three main components:
 ## Installation
 
 ```shell
-npm install
+bun install
 ```
 
 ## Compilation
@@ -42,7 +42,7 @@ npm install
 Compile the contracts and generate TypeScript bindings:
 
 ```shell
-npm run build
+bun run build
 ```
 
 This will:
@@ -57,7 +57,7 @@ This will:
 Run tests on a local Hardhat node:
 
 ```shell
-npm test
+bun test
 ```
 
 ### Sapphire Localnet Testing
@@ -73,7 +73,7 @@ docker run -it --rm -p8544-8548:8544-8548 ghcr.io/oasisprotocol/sapphire-localne
 2. Run tests against Sapphire Localnet:
 
 ```shell
-npm run test -- --network sapphire-localnet
+bun run test -- --network sapphire-localnet
 ```
 
 ### Test Coverage
@@ -81,7 +81,7 @@ npm run test -- --network sapphire-localnet
 Generate test coverage reports:
 
 ```shell
-npm run coverage
+bun run coverage
 ```
 
 ## Deployment

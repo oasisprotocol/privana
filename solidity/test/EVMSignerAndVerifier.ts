@@ -124,6 +124,11 @@ describe('EVMSignerAndVerifier', function () {
   it("Should correctly decode transaction receipts", async function () {
     for (const txReceiptHex of TX_RECEIPTS) {
       const decodedReceipt = await mockEVMSignerAndVerifier.exposedDecodeTxReceipt.staticCall(txReceiptHex);
+      // Decode txReceiptHex structure using rlp decode, after slicing off two characters after the starting 0x
+      const decoded: any = decode("0x" + txReceiptHex.slice(4));
+
+      expect(decodedReceipt[0]).to.equal(Number(decoded[0].toString('hex')));
+      expect(decodedReceipt[1]).to.equal(BigInt('0x' + decoded[1].toString('hex')));
     }
   });
 });

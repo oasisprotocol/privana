@@ -157,6 +157,7 @@ contract ProvethVerifier {
         RLPReader.RLPItem[] memory blockHeader = rlpBlockHeader
             .toRlpItem()
             .toList();
+
         bytes32 receiptRoot = bytes32(
             blockHeader[BLOCK_HEADER_RECEIPT_ROOT_INDEX].toUint()
         );
@@ -166,15 +167,17 @@ contract ProvethVerifier {
             receiptProof.receiptIndexRlp,
             0
         );
+
         // We must convert the bytes of the keccak256 to nibbles for validateMPTProof
-        bytes memory receiptRlp = validateMPTProof(
+        bytes memory rawReceipt = validateMPTProof(
             receiptRoot,
             receiptKey,
             RLPReader.toList(
                 RLPReader.toRlpItem(receiptProof.receiptProofStack)
             )
         );
-        return receiptRlp;
+
+        return rawReceipt;
     }
 
     function validateStorageProof(

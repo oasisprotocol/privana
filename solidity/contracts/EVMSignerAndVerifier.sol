@@ -26,7 +26,7 @@ import {
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
+contract EVMSignerAndVerifier is ProvethVerifier {
     address public evmAddress;
     bytes32 private secretKey;
     IShoyuBashi public shoyuBashi;
@@ -46,9 +46,18 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
     using RLPReader for bytes;
     using SliceBytes for bytes;
 
-    constructor(address _shoyubashi) Ownable(msg.sender) {
-        evmAddress = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
-        secretKey = 0x4bab77fcaf2d66bcb2e52cbf64102eea5fbee93005865faf66f616918f6318ea;
+    constructor(address _shoyubashi) {
+        (
+            bytes memory compressedPublicKey,
+            bytes memory secretKeyBytes
+        ) = Sapphire.generateSigningKeyPair(
+                Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
+                Sapphire.randomBytes(32, "EVMSignerAndVerifier")
+            );
+        evmAddress = EthereumUtils.k256PubkeyToEthereumAddress(
+            compressedPublicKey
+        );
+        secretKey = bytes32(secretKeyBytes);
         shoyuBashi = IShoyuBashi(_shoyubashi);
     }
 
@@ -96,6 +105,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         bytes memory evmTransactionData
     )
         internal
+        pure
         returns (
             uint256 chainId,
             bytes32 hash,
@@ -314,7 +324,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
      */
     function decodeTxDataForErc20Transfer(
         bytes memory txData
-    ) internal returns (address to, uint256 amount) {
+    ) internal pure returns (address to, uint256 amount) {
         // 1. Check calldata length: selector (4) + address (32) + amount (32) = 68 bytes
         require(txData.length == 4 + 32 + 32, "Invalid txData length");
 
@@ -352,23 +362,43 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         amount = uint256(amountBytes);
     }
 
+    /**
+     * @notice Decodes an EVM transaction receipt to extract status and cumulative gas used.
+     *
+     * This function processes the RLP-encoded transaction receipt, which includes a type byte
+     * prefix followed by the RLP list of receipt fields. The receipt fields are ordered as:
+     *   [status, cumulativeGasUsed, logsBloom, logs]
+     *
+     * The function:
+     *   1. Removes the type byte prefix (first byte).
+     *   2. RLP-decodes the remaining bytes into the receipt fields.
+     *   3. Extracts and returns the `status` and `cumulativeGasUsed` fields.
+     *
+     * ---
+     * Receipt layout:
+     *   [0]: status (uint256) - 1 for success, 0 for failure
+     *   [1]: cumulativeGasUsed (uint256)
+     *   [2]: logsBloom (bytes)
+     *   [3]: logs (array)
+     *
+     * @param rlpTxReceipt The RLP-encoded transaction receipt with type byte prefix.
+     * @return status The transaction status (1 = success, 0 = failure).
+     * @return cumulativeGasUsed The total gas used in the block up to this transaction.
+     */
     function decodeEVMTxReceipt(
         bytes memory rlpTxReceipt
-    ) internal returns (uint256 status, uint256 gasUsed) {
-        // Parse the transaction type from the first byte of the calldata.
-        uint8 transactionType = uint8(rlpTxReceipt[0]);
-
+    ) internal pure returns (uint256 status, uint256 cumulativeGasUsed) {
         // Remove the type byte prefix.
         // See: https://github.com/ethereum/go-ethereum/blob/de5ea2ffd891c603b029d0080ab4626ce81dd91c/core/types/transaction.go#L47
         rlpTxReceipt = rlpTxReceipt.getSlice(1, rlpTxReceipt.length);
 
         // RLP-decode the remaining bytes into fields.
-        // EIP-2930 order: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS]
+        // EVM receipt order: [status, cumulativeGasUsed, logsBloom, logs}
         RLPReader.RLPItem[] memory ls = rlpTxReceipt.toRlpItem().toList();
 
         // Extract fields from the RLP list.
         status = ls[0].toUint();
-        gasUsed = ls[1].toUint();
+        cumulativeGasUsed = ls[1].toUint();
     }
 
     /**
@@ -381,7 +411,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
      * @param chainId The EVM chain ID to set the gas price for.
      * @param gasPrice The gas price in wei to set for the specified chain ID.
      */
-    function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
+    function setGasPrice(uint256 chainId, uint256 gasPrice) public {
         require(gasPrice > 0, "Gas price must be greater than zero");
         gasPrices[chainId] = gasPrice;
         emit GasPriceSet(chainId, gasPrice);

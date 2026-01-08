@@ -153,6 +153,8 @@ export async function getTxInclusionProof(
 	};
 }
 
+
+
 export async function getReceiptInclusionProof(
 	provider: JsonRpcApiProvider,
 	blockNumber: number,
@@ -163,6 +165,7 @@ export async function getReceiptInclusionProof(
 	const trie = new Trie();
 	for (let i = 0; i < receipts.length; i++) {
 		const key = ethers.getBytes(getRlpUint(i));   // RLP(k)
+		// Only log if the receipt doesn't start with 0x02
 		await trie.put(key, encodeReceipt(receipts[i]));
 	}
 
@@ -217,7 +220,7 @@ function encodeReceipt(receipt: any): any {
 		? parseInt(receipt.type, 16)
 		: Number(receipt.type ?? 0);
 
-	const isTyped = !Number.isNaN(typeNum) && typeNum !== 0;
+	const isTyped = !Number.isNaN(typeNum);
 	const encodedWithType = isTyped
 		? ethers.concat([Uint8Array.of(typeNum), encoded])
 		: encoded;
