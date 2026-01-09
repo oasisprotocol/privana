@@ -371,8 +371,36 @@ ACCOUNTING_ABI = [
                 "name": "txProof",
                 "type": "tuple",
             },
+            {
+                "components": [
+                    {
+                        "internalType": "bytes",
+                        "name": "receiptIndexRlp",
+                        "type": "bytes",
+                    },
+                    {
+                        "internalType": "bytes",
+                        "name": "receiptProofStack",
+                        "type": "bytes",
+                    },
+                ],
+                "internalType": "struct EVMReceiptProof",
+                "name": "receiptProof",
+                "type": "tuple",
+            },
         ],
         "name": "creditEVMDeposit",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "userAddress", "type": "address"},
+            {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
+            {"internalType": "uint256", "name": "amount", "type": "uint256"},
+        ],
+        "name": "creditEVMDepositMock",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",

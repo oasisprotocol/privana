@@ -152,21 +152,150 @@ class ProofGeneratorService:
             raise Exception("Transaction index is outside the range of this block")
 
         proof = trie.get_proof(self._get_rlp_uint(tx_index))
-        proof_hex = []
-        for node in proof:
-            if isinstance(node, list):
-                proof_hex.append(Web3.to_hex(rlp.encode(node)))
-            else:
-                proof_hex.append(Web3.to_hex(node))
 
         transaction_index_rlp = Web3.to_hex(self._get_rlp_uint(tx_index))
         rlp_block_header = Web3.to_hex(rlp.encode(block_header))
-        transaction_proof_stack = Web3.to_hex(rlp.encode([bytes.fromhex(p[2:]) for p in proof_hex]))
+        transaction_proof_stack = Web3.to_hex(rlp.encode(proof))
 
         return {
             "rlp_block_header": rlp_block_header,
             "transaction_index_rlp": transaction_index_rlp,
             "transaction_proof_stack": transaction_proof_stack,
+        }
+
+    def _generate_receipt_inclusion_proof(
+        self,
+        web3: Web3,
+        block_number: int,
+        tx_index: int,
+        max_retries: int = 3,
+    ) -> Dict[str, str]:
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                raw_receipts_result = web3.provider.make_request(
+                    "debug_getRawReceipts",
+                    [self._get_rpc_uint(block_number)]
+                )
+
+                if 'error' in raw_receipts_result:
+                    error_msg = raw_receipts_result['error']
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get('message', str(error_msg))
+
+                    last_error = Exception(f"RPC Error calling debug_getRawReceipts: {error_msg}")
+
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.warning(
+                            f"debug_getRawReceipts failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time}s: {error_msg}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    raise last_error
+
+                raw_block = web3.provider.make_request(
+                    "debug_getRawBlock",
+                    [self._get_rpc_uint(block_number)]
+                )
+
+                if 'error' in raw_block:
+                    error_msg = raw_block['error']
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get('message', str(error_msg))
+
+                    last_error = Exception(f"RPC Error calling debug_getRawBlock: {error_msg}")
+
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.warning(
+                            f"debug_getRawBlock failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time}s: {error_msg}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    raise last_error
+
+                break
+
+            except ValueError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"Receipt proof generation failed (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time}s: {str(e)}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+        raw_receipts = raw_receipts_result['result']
+        raw_block_hex = raw_block['result']
+        block_rlp = rlp.decode(bytes.fromhex(raw_block_hex[2:]))
+        block_header = block_rlp[0]
+
+        trie = HexaryTrie(db={})
+        for i, raw_receipt in enumerate(raw_receipts):
+            key = self._get_rlp_uint(i)
+            receipt_hex = raw_receipt[2:] if raw_receipt.startswith('0x') else raw_receipt
+            value = bytes.fromhex(receipt_hex)
+            trie.set(key, value)
+
+        receipt_root = Web3.to_hex(trie.root_hash)
+        block_header_receipt_root = Web3.to_hex(block_header[5])
+
+        if receipt_root != block_header_receipt_root:
+            raise Exception(
+                f"Constructed receipts Merkle tree has a root inconsistent with the receiptsRoot in the block header. "
+                f"Computed: {receipt_root}, Expected: {block_header_receipt_root}"
+            )
+
+        if tx_index >= len(raw_receipts):
+            raise Exception("Transaction index is outside the range of this block")
+
+        proof = trie.get_proof(self._get_rlp_uint(tx_index))
+
+        receipt_index_rlp = Web3.to_hex(self._get_rlp_uint(tx_index))
+        receipt_proof_stack = Web3.to_hex(rlp.encode(proof))
+
+        return {
+            "receipt_index_rlp": receipt_index_rlp,
+            "receipt_proof_stack": receipt_proof_stack,
+        }
+
+    def generate_deposit_proofs(
+        self,
+        chain_id: int,
+        tx_hash: HexStr,
+    ) -> Dict[str, str]:
+        web3 = self._get_chain_web3(chain_id)
+
+        tx_receipt: TxReceipt = web3.eth.get_transaction_receipt(tx_hash)
+        if not tx_receipt:
+            raise ValueError(f"Transaction {tx_hash} not found on chain {chain_id}")
+
+        if tx_receipt.get("status") != 1:
+            raise ValueError(f"Transaction {tx_hash} failed on chain {chain_id}")
+
+        block_number = tx_receipt["blockNumber"]
+        tx_index = tx_receipt["transactionIndex"]
+
+        tx_proof = self._generate_tx_inclusion_proof(web3, block_number, tx_index)
+        receipt_proof = self._generate_receipt_inclusion_proof(web3, block_number, tx_index)
+
+        return {
+            "rlp_block_header": tx_proof["rlp_block_header"],
+            "transaction_index_rlp": tx_proof["transaction_index_rlp"],
+            "transaction_proof_stack": tx_proof["transaction_proof_stack"],
+            "receipt_index_rlp": receipt_proof["receipt_index_rlp"],
+            "receipt_proof_stack": receipt_proof["receipt_proof_stack"],
         }
 
 

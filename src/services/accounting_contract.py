@@ -145,7 +145,13 @@ class AccountingContractService:
         return bytes(self._require_hex(value, field))
 
     def _validate_proof_data(self, request_payload: Dict[str, Optional[str]]) -> None:
-        required_fields = ["rlp_block_header", "transaction_index_rlp", "transaction_proof_stack"]
+        required_fields = [
+            "rlp_block_header",
+            "transaction_index_rlp",
+            "transaction_proof_stack",
+            "receipt_index_rlp",
+            "receipt_proof_stack",
+        ]
         missing_fields = []
 
         for field in required_fields:
@@ -171,6 +177,17 @@ class AccountingContractService:
             self._optional_hex(
                 request_payload.get("transaction_proof_stack"),
                 "transaction_proof_stack",
+            ),
+        )
+
+    def _build_receipt_proof(self, request_payload: Dict[str, Optional[str]]):
+        return (
+            self._optional_hex(
+                request_payload.get("receipt_index_rlp"), "receipt_index_rlp"
+            ),
+            self._optional_hex(
+                request_payload.get("receipt_proof_stack"),
+                "receipt_proof_stack",
             ),
         )
 
@@ -401,19 +418,19 @@ class AccountingContractService:
         return self._submit(fn._encode_transaction_data())
 
     def include_deposit(self, payload: Dict) -> SubmissionResult:
-        """Unified method for including deposits using creditEVMDeposit."""
+        """Include a verified deposit using transaction and receipt proofs."""
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
 
-        # TODO: MOCK TESTING - Verification commented out for testing purposes
-        # self._validate_proof_data(payload)
-        # proof = self._build_tx_proof(payload)
-        proof = (b"", b"", b"")
+        self._validate_proof_data(payload)
+        tx_proof = self._build_tx_proof(payload)
+        receipt_proof = self._build_receipt_proof(payload)
 
         fn = self.contract.functions.creditEVMDeposit(
             user,
             token,
-            proof,
+            tx_proof,
+            receipt_proof,
         )
         return self._submit(fn._encode_transaction_data())
 
