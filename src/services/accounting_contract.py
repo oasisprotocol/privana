@@ -432,7 +432,7 @@ class AccountingContractService:
             tx_proof,
             receipt_proof,
         )
-        return self._submit(fn._encode_transaction_data())
+        return self._submit(fn._encode_transaction_data(), gas=3_000_000) # leave 3m gas limit
 
     def get_balance(self, user_address: str, token_id: str) -> int:
         """Get user balance for a specific token from the contract."""

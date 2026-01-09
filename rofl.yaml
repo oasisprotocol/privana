@@ -40,7 +40,9 @@ deployments:
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1gg6jMbd4uOMDPL2bQQjXCg+vIqYA1hY1ok38yga01bokNkbmFtZVgrhW13NXveuRKS4mbGPt1m3fPn4qT/Bdrk1Dz+qtar2MCkiEJLpBBfP2Qc7mVub25jZU/vYubp+dsC8WG6dL1yyVpldmFsdWVYOhxw1b3mTcf1fJbIQ/+zQMIyi+9cqOBFeLHwXcYZsevlsmbTpZl+XdylPuYfcdYZFBSdjNBXWpFhqMc=
+        value: pGJwa1ggs9cbdKojdP/eNA5ezABhfS6lu0sx2rUQDtlA99DwvR5kbmFtZVgr73oyaI8+Ckn3V0M12RRrTEdQ0DzTNn6KL/6t/heMM/+zAHgA8KyBbRrRwmVub25jZU9mJWZxVvr/nQN672J0a4dldmFsdWVYOp2bU4dHGiQcs19kOEh2zC0GvzHr5rAWv2FHwqIrt2baUDgW0gcYot+DEtOQEw4hgD+sk+GmqvM+vvg=
+      - name: ROFL_ADAPTER_ADDRESS
+        value: pGJwa1gg8+XMxIZFOvhmoO+q2zp5WUSuDSgVruQi1d+/NHfg0xRkbmFtZVgk2tXwQqptmezf4WdsWC4Q6CsWng6d6z+E5iYH7iomYRmcXvmKZW5vbmNlT7Ascx2xxAZeAwndzAV+tGV2YWx1ZVg6si2cXimx1ptJRUw3iRnnuMWFBP9DLobuWxbRCzryup4VNchT21SSCG4pxfF1Wkme77aCmkN4yEQRTQ==
       - name: SAPPHIRE_CHAIN_ID
         value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL

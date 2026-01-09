@@ -8,6 +8,7 @@ from typing import Dict, Optional, Set
 from web3 import Web3
 from web3.types import BlockData
 
+from src.abi.rofl_adapter import ROFL_ADAPTER_ABI
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
 from src.services.proof_generator import get_proof_generator
@@ -36,6 +37,11 @@ class DepositListener:
         self._last_rpc_call: Dict[int, float] = {}
         self._min_rpc_interval = 0.05
         self._proof_generator = get_proof_generator(self.chain_rpc_urls)
+        self._sapphire_web3 = Web3(Web3.HTTPProvider(self.settings.sapphire_rpc_url))
+        self._rofl_adapter_address = Web3.to_checksum_address(self.settings.rofl_adapter_address)
+        self._rofl_adapter_contract = self._sapphire_web3.eth.contract(
+            address=self._rofl_adapter_address, abi=ROFL_ADAPTER_ABI
+        )
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -87,6 +93,52 @@ class DepositListener:
             self._deposit_address = self.accounting_service._get_deposit_address()
             logger.info(f"Monitoring deposit address: {self._deposit_address}")
         return self._deposit_address
+
+    async def _wait_for_block_hash_stored(
+        self,
+        block_number: int,
+        chain_id: int,
+        max_wait_seconds: int = 300,
+        poll_interval: int = 5,
+    ) -> bool:
+        chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
+        logger.info(
+            f"Waiting for HashStored event for block {block_number} on {chain_name}..."
+        )
+
+        start_time = time.time()
+        sapphire_start_block = self._sapphire_web3.eth.block_number - 1000
+
+        while time.time() - start_time < max_wait_seconds:
+            try:
+                current_block = self._sapphire_web3.eth.block_number
+                event_filter = self._rofl_adapter_contract.events.HashStored.create_filter(
+                    from_block=sapphire_start_block,
+                    to_block=current_block,
+                    argument_filters={"id": block_number},
+                )
+                events = await asyncio.to_thread(event_filter.get_all_entries)
+
+                if events:
+                    logger.info(
+                        f"HashStored event found for block {block_number} on {chain_name}"
+                    )
+                    return True
+
+                logger.debug(
+                    f"HashStored not yet available for block {block_number}, "
+                    f"waiting {poll_interval}s... (elapsed: {int(time.time() - start_time)}s)"
+                )
+                await asyncio.sleep(poll_interval)
+
+            except Exception as e:
+                logger.warning(f"Error checking HashStored event: {e}")
+                await asyncio.sleep(poll_interval)
+
+        logger.error(
+            f"Timeout waiting for HashStored event for block {block_number} on {chain_name}"
+        )
+        return False
 
 
     def _get_native_token_id(self, chain_id: int) -> str:
@@ -140,6 +192,13 @@ class DepositListener:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
                 return
 
+            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
+            if not hash_stored:
+                logger.error(
+                    f"Block hash not available for block {block_number}, skipping deposit {tx_hash}"
+                )
+                return
+
             proofs = await asyncio.to_thread(
                 self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
             )
@@ -183,6 +242,13 @@ class DepositListener:
 
             if tx_receipt["status"] != 1:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
+                return
+
+            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
+            if not hash_stored:
+                logger.error(
+                    f"Block hash not available for block {block_number}, skipping ERC20 deposit {tx_hash}"
+                )
                 return
 
             proofs = await asyncio.to_thread(
