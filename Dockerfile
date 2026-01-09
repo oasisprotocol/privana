@@ -1,14 +1,15 @@
-FROM python:alpine3.17
+FROM python:3.11-alpine
 
 WORKDIR /app
 
-RUN pip install --upgrade pip==25.0.1
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --frozen --no-install-project
 
 COPY . .
+RUN uv sync --no-dev --frozen
 
 ENV PYTHONPATH="/app"
 
-CMD ["python", "-m", "src.main"]
+CMD ["uv", "run", "python", "-m", "src.main"]

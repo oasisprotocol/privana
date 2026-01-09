@@ -1,3 +1,27 @@
+.PHONY: install dev run test lint clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage
+
+install:
+	uv sync --no-dev
+
+dev:
+	uv sync
+
+run:
+	uv run python -m src.main
+
+test:
+	uv run pytest
+
+lint:
+	uv run ruff check src
+
+lint-fix:
+	uv run ruff check --fix src
+
+clean:
+	rm -rf .venv __pycache__ .pytest_cache .ruff_cache
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
 solidity: solidity-build solidity-test
 
 solidity-lib:
