@@ -10,9 +10,6 @@ from web3.types import TxReceipt
 
 logger = logging.getLogger(__name__)
 
-BLOCK_HEADER_TX_ROOT_INDEX = 4
-BLOCK_HEADER_RECEIPT_ROOT_INDEX = 5
-
 
 class ProofGeneratorService:
 
@@ -311,7 +308,7 @@ class ProofGeneratorService:
             trie.set(key, value)
 
         receipt_root = Web3.to_hex(trie.root_hash)
-        block_header_receipt_root = Web3.to_hex(block_header[BLOCK_HEADER_RECEIPT_ROOT_INDEX])
+        block_header_receipt_root = Web3.to_hex(block_header[5])
 
         if receipt_root != block_header_receipt_root:
             raise Exception(
