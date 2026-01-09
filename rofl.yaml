@@ -32,8 +32,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: gunPDRiGH6enGwAeevMxVphAX1EkaGOZkFlO/3hlkW8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: nlUdex99wL328m/EGRhWU0KsFGK8yD29jw6NGeOk22wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 8R2qttoR+IeYPM08GXroCUmUe5EglO/Vq+SHYebqG9MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: ZDKqVKHdOLEuIFX1pT5+1NG45XxfHeIy8Zsvh7YhqUUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -42,7 +42,7 @@ deployments:
       - name: ACCOUNTING_CONTRACT_ADDRESS
         value: pGJwa1ggs9cbdKojdP/eNA5ezABhfS6lu0sx2rUQDtlA99DwvR5kbmFtZVgr73oyaI8+Ckn3V0M12RRrTEdQ0DzTNn6KL/6t/heMM/+zAHgA8KyBbRrRwmVub25jZU9mJWZxVvr/nQN672J0a4dldmFsdWVYOp2bU4dHGiQcs19kOEh2zC0GvzHr5rAWv2FHwqIrt2baUDgW0gcYot+DEtOQEw4hgD+sk+GmqvM+vvg=
       - name: ROFL_ADAPTER_ADDRESS
-        value: pGJwa1gg8+XMxIZFOvhmoO+q2zp5WUSuDSgVruQi1d+/NHfg0xRkbmFtZVgk2tXwQqptmezf4WdsWC4Q6CsWng6d6z+E5iYH7iomYRmcXvmKZW5vbmNlT7Ascx2xxAZeAwndzAV+tGV2YWx1ZVg6si2cXimx1ptJRUw3iRnnuMWFBP9DLobuWxbRCzryup4VNchT21SSCG4pxfF1Wkme77aCmkN4yEQRTQ==
+        value: pGJwa1ggTTYy00wS3jlh6+qvvbW9XV4qUB0AaG7ZXeUxZ4FllnxkbmFtZVgkJsKcRIAs2e5y9AynQAq4clzm0PFnv8OkMpuEseRmz0v/BFccZW5vbmNlT1wNaey6h0ee9BvZWEKxyWV2YWx1ZVg6jd4W0AS1SdEL2iRV4PahLpT0jqeptiKt8J/Ues3ovNo7r7XjKh2z7pGfkN7tevXkZj5G2H+CFXFXOw==
       - name: SAPPHIRE_CHAIN_ID
         value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL

@@ -12,7 +12,7 @@ from web3.contract import Contract
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflAppdClient
-from src.config import CHAIN_NAMES, NATIVE_TOKEN_SYMBOLS, ERC20_TOKENS, load_settings
+from src.config import CHAIN_NAMES, ERC20_TOKENS, NATIVE_TOKEN_SYMBOLS, load_settings
 from src.models.types import Settings
 
 

@@ -1,13 +1,14 @@
-"""ROFL Adapter ABI for block hash storage events."""
+"""ROFL Adapter ABI for block hash queries."""
 
 ROFL_ADAPTER_ABI = [
     {
-        "anonymous": False,
         "inputs": [
-            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
-            {"indexed": True, "internalType": "bytes32", "name": "hash", "type": "bytes32"},
+            {"internalType": "uint256", "name": "domain", "type": "uint256"},
+            {"internalType": "uint256", "name": "id", "type": "uint256"},
         ],
-        "name": "HashStored",
-        "type": "event",
+        "name": "getHash",
+        "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
+        "stateMutability": "view",
+        "type": "function",
     }
 ]

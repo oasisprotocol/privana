@@ -30,6 +30,7 @@ class DepositListener:
         self._chain_web3: Dict[int, Web3] = {}
         self._is_running = False
         self._tasks: Set[asyncio.Task] = set()
+        self._deposit_tasks: Set[asyncio.Task] = set()
         self._deposit_address: Optional[str] = None
         self._last_processed_blocks: Dict[int, int] = {}
         self._native_token_ids: Dict[int, str] = {}
@@ -42,6 +43,17 @@ class DepositListener:
         self._rofl_adapter_contract = self._sapphire_web3.eth.contract(
             address=self._rofl_adapter_address, abi=ROFL_ADAPTER_ABI
         )
+        logger.info(f"ROFL Adapter contract: {self._rofl_adapter_address} on {self.settings.sapphire_rpc_url}")
+        try:
+            if self._sapphire_web3.is_connected():
+                sapphire_chain_id = self._sapphire_web3.eth.chain_id
+                logger.info(f"Sapphire connection OK, chain_id={sapphire_chain_id}")
+                test_hash = self._rofl_adapter_contract.functions.getHash(1, 1).call()
+                logger.info(f"ROFL Adapter contract call test OK: getHash(1,1)={Web3.to_hex(test_hash)}")
+            else:
+                logger.warning("Sapphire connection failed on startup")
+        except Exception as e:
+            logger.warning(f"Sapphire/ROFL Adapter startup check failed: {type(e).__name__}: {e}")
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -94,6 +106,15 @@ class DepositListener:
             logger.info(f"Monitoring deposit address: {self._deposit_address}")
         return self._deposit_address
 
+    def _spawn_deposit_task(self, coro, task_name: str) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=task_name)
+        self._deposit_tasks.add(task)
+        task.add_done_callback(self._deposit_tasks.discard)
+        return task
+
+    def _query_block_hash(self, chain_id: int, block_number: int) -> bytes:
+        return self._rofl_adapter_contract.functions.getHash(chain_id, block_number).call()
+
     async def _wait_for_block_hash_stored(
         self,
         block_number: int,
@@ -103,40 +124,40 @@ class DepositListener:
     ) -> bool:
         chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
         logger.info(
-            f"Waiting for HashStored event for block {block_number} on {chain_name}..."
+            f"Waiting for block hash to be stored for block {block_number} on {chain_name}..."
         )
 
         start_time = time.time()
-        sapphire_start_block = self._sapphire_web3.eth.block_number - 1000
+        zero_hash = "0x" + "0" * 64
 
         while time.time() - start_time < max_wait_seconds:
             try:
-                current_block = self._sapphire_web3.eth.block_number
-                event_filter = self._rofl_adapter_contract.events.HashStored.create_filter(
-                    from_block=sapphire_start_block,
-                    to_block=current_block,
-                    argument_filters={"id": block_number},
+                stored_hash = await asyncio.to_thread(
+                    self._query_block_hash, chain_id, block_number
                 )
-                events = await asyncio.to_thread(event_filter.get_all_entries)
+                stored_hash_hex = Web3.to_hex(stored_hash)
 
-                if events:
+                if stored_hash_hex != zero_hash:
                     logger.info(
-                        f"HashStored event found for block {block_number} on {chain_name}"
+                        f"Block hash found for block {block_number} on {chain_name}: {stored_hash_hex}"
                     )
                     return True
 
                 logger.debug(
-                    f"HashStored not yet available for block {block_number}, "
+                    f"Block hash not yet available for block {block_number} on {chain_name}, "
                     f"waiting {poll_interval}s... (elapsed: {int(time.time() - start_time)}s)"
                 )
                 await asyncio.sleep(poll_interval)
 
             except Exception as e:
-                logger.warning(f"Error checking HashStored event: {e}")
+                logger.warning(
+                    f"Error checking block hash for {chain_name} block {block_number} "
+                    f"via adapter {self._rofl_adapter_address}: {type(e).__name__}: {e}"
+                )
                 await asyncio.sleep(poll_interval)
 
         logger.error(
-            f"Timeout waiting for HashStored event for block {block_number} on {chain_name}"
+            f"Timeout waiting for block hash for block {block_number} on {chain_name}"
         )
         return False
 
@@ -334,8 +355,11 @@ class DepositListener:
                                     # Native deposit
                                     if tx_to and tx_to.lower() == deposit_address and tx.get("value", 0) > 0:
                                         logger.info(f"{chain_name}: Native deposit in block {block_num}")
-                                        await self._process_deposit(
-                                            chain_id, tx_hash, tx["from"], tx["value"], block_num
+                                        self._spawn_deposit_task(
+                                            self._process_deposit(
+                                                chain_id, tx_hash, tx["from"], tx["value"], block_num
+                                            ),
+                                            f"deposit-{tx_hash[:10]}",
                                         )
 
                                     # ERC20 deposit
@@ -354,13 +378,16 @@ class DepositListener:
                                                 logger.info(
                                                     f"{chain_name}: {erc20_tokens[log['address'].lower()]} deposit in block {block_num}"
                                                 )
-                                                await self._process_erc20_deposit(
-                                                    chain_id,
-                                                    tx_hash,
-                                                    log["address"].lower(),
-                                                    "0x" + log["topics"][1].hex()[-40:],
-                                                    int.from_bytes(log["data"], byteorder="big"),
-                                                    block_num,
+                                                self._spawn_deposit_task(
+                                                    self._process_erc20_deposit(
+                                                        chain_id,
+                                                        tx_hash,
+                                                        log["address"].lower(),
+                                                        "0x" + log["topics"][1].hex()[-40:],
+                                                        int.from_bytes(log["data"], byteorder="big"),
+                                                        block_num,
+                                                    ),
+                                                    f"erc20-deposit-{tx_hash[:10]}",
                                                 )
 
                             except Exception as e:
@@ -398,6 +425,11 @@ class DepositListener:
 
         for task in self._tasks:
             task.cancel()
+
+        if self._deposit_tasks:
+            logger.info(f"Waiting for {len(self._deposit_tasks)} active deposit tasks to complete...")
+            await asyncio.gather(*self._deposit_tasks, return_exceptions=True)
+            self._deposit_tasks.clear()
 
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
