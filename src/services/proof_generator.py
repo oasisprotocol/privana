@@ -152,76 +152,16 @@ class ProofGeneratorService:
             raise Exception("Transaction index is outside the range of this block")
 
         proof = trie.get_proof(self._get_rlp_uint(tx_index))
-        proof_hex = []
-        for node in proof:
-            if isinstance(node, list):
-                proof_hex.append(Web3.to_hex(rlp.encode(node)))
-            else:
-                proof_hex.append(Web3.to_hex(node))
 
         transaction_index_rlp = Web3.to_hex(self._get_rlp_uint(tx_index))
         rlp_block_header = Web3.to_hex(rlp.encode(block_header))
-        transaction_proof_stack = Web3.to_hex(rlp.encode([bytes.fromhex(p[2:]) for p in proof_hex]))
+        transaction_proof_stack = Web3.to_hex(rlp.encode(proof))
 
         return {
             "rlp_block_header": rlp_block_header,
             "transaction_index_rlp": transaction_index_rlp,
             "transaction_proof_stack": transaction_proof_stack,
         }
-
-    @staticmethod
-    def _parse_hex_int(value, default=0) -> int:
-        if value is None:
-            return default
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            return int(value, 16) if value.startswith("0x") else int(value)
-        return default
-
-    @staticmethod
-    def _parse_hex_bytes(value, default=b"") -> bytes:
-        if value is None:
-            return default
-        if isinstance(value, bytes):
-            return value
-        if isinstance(value, str):
-            hex_str = value[2:] if value.startswith("0x") else value
-            return bytes.fromhex(hex_str) if hex_str else default
-        return default
-
-    @classmethod
-    def _encode_receipt(cls, receipt: dict) -> bytes:
-        status = cls._parse_hex_int(receipt.get("status"), 0)
-        cumulative_gas = cls._parse_hex_int(receipt.get("cumulativeGasUsed"), 0)
-        logs_bloom = cls._parse_hex_bytes(receipt.get("logsBloom"), b"\x00" * 256)
-
-        logs_array = []
-        for log in receipt.get("logs", []):
-            address = cls._parse_hex_bytes(log.get("address"))
-            topics = [cls._parse_hex_bytes(t) for t in log.get("topics", [])]
-            data = cls._parse_hex_bytes(log.get("data"))
-            logs_array.append([address, topics, data])
-
-        receipt_array = [status, cumulative_gas, logs_bloom, logs_array]
-
-        tx_type = cls._parse_hex_int(receipt.get("type"), 0)
-
-        if tx_type == 0x7e:
-            deposit_nonce = receipt.get("depositNonce")
-            if deposit_nonce is not None:
-                receipt_array.append(cls._parse_hex_int(deposit_nonce))
-
-            deposit_version = receipt.get("depositReceiptVersion")
-            if deposit_version is not None:
-                receipt_array.append(cls._parse_hex_int(deposit_version))
-
-        encoded = rlp.encode(receipt_array)
-
-        if tx_type != 0:
-            encoded = bytes([tx_type]) + encoded
-
-        return encoded
 
     def _generate_receipt_inclusion_proof(
         self,
@@ -234,22 +174,22 @@ class ProofGeneratorService:
 
         for attempt in range(max_retries):
             try:
-                receipts_result = web3.provider.make_request(
-                    "eth_getBlockReceipts",
+                raw_receipts_result = web3.provider.make_request(
+                    "debug_getRawReceipts",
                     [self._get_rpc_uint(block_number)]
                 )
 
-                if 'error' in receipts_result:
-                    error_msg = receipts_result['error']
+                if 'error' in raw_receipts_result:
+                    error_msg = raw_receipts_result['error']
                     if isinstance(error_msg, dict):
                         error_msg = error_msg.get('message', str(error_msg))
 
-                    last_error = Exception(f"RPC Error calling eth_getBlockReceipts: {error_msg}")
+                    last_error = Exception(f"RPC Error calling debug_getRawReceipts: {error_msg}")
 
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
                         logger.warning(
-                            f"eth_getBlockReceipts failed (attempt {attempt + 1}/{max_retries}), "
+                            f"debug_getRawReceipts failed (attempt {attempt + 1}/{max_retries}), "
                             f"retrying in {wait_time}s: {error_msg}"
                         )
                         time.sleep(wait_time)
@@ -296,15 +236,16 @@ class ProofGeneratorService:
                     continue
                 raise
 
-        receipts = receipts_result['result']
+        raw_receipts = raw_receipts_result['result']
         raw_block_hex = raw_block['result']
         block_rlp = rlp.decode(bytes.fromhex(raw_block_hex[2:]))
         block_header = block_rlp[0]
 
         trie = HexaryTrie(db={})
-        for i, receipt in enumerate(receipts):
+        for i, raw_receipt in enumerate(raw_receipts):
             key = self._get_rlp_uint(i)
-            value = self._encode_receipt(receipt)
+            receipt_hex = raw_receipt[2:] if raw_receipt.startswith('0x') else raw_receipt
+            value = bytes.fromhex(receipt_hex)
             trie.set(key, value)
 
         receipt_root = Web3.to_hex(trie.root_hash)
@@ -316,19 +257,13 @@ class ProofGeneratorService:
                 f"Computed: {receipt_root}, Expected: {block_header_receipt_root}"
             )
 
-        if tx_index >= len(receipts):
+        if tx_index >= len(raw_receipts):
             raise Exception("Transaction index is outside the range of this block")
 
         proof = trie.get_proof(self._get_rlp_uint(tx_index))
-        proof_hex = []
-        for node in proof:
-            if isinstance(node, list):
-                proof_hex.append(Web3.to_hex(rlp.encode(node)))
-            else:
-                proof_hex.append(Web3.to_hex(node))
 
         receipt_index_rlp = Web3.to_hex(self._get_rlp_uint(tx_index))
-        receipt_proof_stack = Web3.to_hex(rlp.encode([bytes.fromhex(p[2:]) for p in proof_hex]))
+        receipt_proof_stack = Web3.to_hex(rlp.encode(proof))
 
         return {
             "receipt_index_rlp": receipt_index_rlp,
