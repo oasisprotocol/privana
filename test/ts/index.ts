@@ -3,16 +3,16 @@ import { getReceiptInclusionProof, getTxInclusionProof } from "./src/inclusion-p
 
 async function main() {
   const RPC_URL = process.env.RPC_URL || "https://eth1.lava.build";
-  const BLOCK_NUMBER = parseInt(process.env.BLOCK_NUMBER || "23488800");
-  const TX_INDEX = parseInt(process.env.TX_INDEX || "1");
+  const BLOCK_NUMBER = parseInt(process.env.BLOCK_NUMBER || "23488501");
+  const TX_INDEX = parseInt(process.env.TX_INDEX || "10");
 
   const provider = new ethers.JsonRpcProvider(RPC_URL);
 
   try {
     const result = await getReceiptInclusionProof(provider, BLOCK_NUMBER, TX_INDEX);
 
-    // console.log("RLP Block Header:", result.rlpBlockHeader);
-    // console.log("Proof:", result.proof);
+    console.log("RLP Block Header:", result.rlpBlockHeader);
+    console.log("Proof:", result.proof);
   } catch (error) {
     console.error("Error:", error);
     process.exit(1);

@@ -3,6 +3,7 @@
 pragma solidity ^0.8.20;
 
 import {EVMSignerAndVerifier} from "../EVMSignerAndVerifier.sol";
+import {ProvethVerifier} from "../lib/ProvethVerifier.sol";
 
 contract MockEVMSignerAndVerifier is EVMSignerAndVerifier {
     constructor() EVMSignerAndVerifier(address(0)) {}

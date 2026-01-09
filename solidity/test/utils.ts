@@ -2,6 +2,8 @@
 import { ethers } from 'hardhat';
 import { Signer, BigNumberish, Interface, parseUnits, Wallet, type BytesLike, JsonRpcProvider, JsonRpcApiProvider } from 'ethers';
 
+import assert from "assert";
+
 import { Trie } from "@ethereumjs/trie";
 import { encode } from "rlp";
 
@@ -153,20 +155,17 @@ export async function getTxInclusionProof(
 	};
 }
 
-
-
 export async function getReceiptInclusionProof(
 	provider: JsonRpcApiProvider,
 	blockNumber: number,
 	txIndex: number,
 ) {
-	const receipts = await provider.send("eth_getBlockReceipts", [getRpcUint(blockNumber)]);
+	const rawReceipts = await provider.send("debug_getRawReceipts", [getRpcUint(blockNumber)]);
 
 	const trie = new Trie();
-	for (let i = 0; i < receipts.length; i++) {
+	for (let i = 0; i < rawReceipts.length; i++) {
 		const key = ethers.getBytes(getRlpUint(i));   // RLP(k)
-		// Only log if the receipt doesn't start with 0x02
-		await trie.put(key, encodeReceipt(receipts[i]));
+		await trie.put(key, rawReceipts[i]);
 	}
 
 	const rawBlock = await provider.send("debug_getRawBlock", [getRpcUint(blockNumber)]);
@@ -174,8 +173,8 @@ export async function getReceiptInclusionProof(
 	const blockHeader: string[] = blockRlp[0] as string[];
 
 	// Ensure the transaction root was constructed the same way
-	const txRoot = ethers.hexlify(trie.root());
-	if (txRoot != blockHeader[5]) {
+	const receiptRoot = ethers.hexlify(trie.root());
+	if (receiptRoot != blockHeader[5]) {
 		throw new Error(
 			"Constructed receipts Merkle tree has a root inconsistent with the receiptsRoot in the block header",
 		);
@@ -188,42 +187,4 @@ export async function getReceiptInclusionProof(
 		rlpBlockHeader: ethers.encodeRlp(blockHeader),
 		proof: receiptsProofHex,
 	};
-}
-
-function encodeReceipt(receipt: any): any {
-	const status = typeof receipt.status === "string"
-		? parseInt(receipt.status, 16)
-		: receipt.status ?? 0;
-
-	const receiptArray = [
-		status,                                    // Rz
-		ethers.getUint(receipt.cumulativeGasUsed),           // Ru
-		ethers.getBytes(receipt.logsBloom),        // Rb (256 bytes)
-	];
-
-	const logsArray: any[] = [];
-	for (const log of receipt.logs ?? []) {
-		const logArray = [
-			ethers.getAddress(log.address),
-			(log.topics ?? []).map((t: any) => ethers.getBytes(t)),
-			ethers.getBytes(log.data ?? "0x"),
-		];
-		logsArray.push(logArray);                  // dense, in-order
-	}
-
-	receiptArray.push(logsArray);               // Rl
-
-	const encoded = encode(receiptArray);
-
-	// Prepend type byte if typed receipt
-	const typeNum = typeof receipt.type === "string"
-		? parseInt(receipt.type, 16)
-		: Number(receipt.type ?? 0);
-
-	const isTyped = !Number.isNaN(typeNum);
-	const encodedWithType = isTyped
-		? ethers.concat([Uint8Array.of(typeNum), encoded])
-		: encoded;
-
-	return encodedWithType;
 }
