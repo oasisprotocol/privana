@@ -125,10 +125,10 @@ describe('EVMSignerAndVerifier', function () {
     for (const txReceiptHex of TX_RECEIPTS) {
       const decodedReceipt = await mockEVMSignerAndVerifier.exposedDecodeTxReceipt.staticCall(txReceiptHex);
       // Decode txReceiptHex structure using rlp decode, after slicing off two characters after the starting 0x
-      const decoded: any = decode("0x" + txReceiptHex.slice(4));
+      const decoded = decode("0x" + txReceiptHex.slice(4)) as Uint8Array[];
 
-      expect(decodedReceipt[0]).to.equal(Number(decoded[0].toString('hex')));
-      expect(decodedReceipt[1]).to.equal(BigInt('0x' + decoded[1].toString('hex')));
+      expect(decodedReceipt[0]).to.equal(Number(decoded[0].valueOf()));
+      expect(decodedReceipt[1]).to.equal(BigInt('0x' + Buffer.copyBytesFrom(decoded[1]).toString('hex')));
     }
   });
 });
