@@ -379,9 +379,14 @@ contract EVMSignerAndVerifier is ProvethVerifier {
     function decodeEVMTxReceipt(
         bytes memory rlpTxReceipt
     ) internal pure returns (uint256 status, uint256 cumulativeGasUsed) {
-        // Remove the type byte prefix.
-        // See: https://github.com/ethereum/go-ethereum/blob/de5ea2ffd891c603b029d0080ab4626ce81dd91c/core/types/transaction.go#L47
-        rlpTxReceipt = rlpTxReceipt.getSlice(1, rlpTxReceipt.length);
+        // Parse the transaction type from the first byte of the calldata.
+        uint8 transactionType = uint8(rlpTxReceipt[0]);
+
+        if (transactionType < 0xc0) {
+            // Remove the type byte prefix.
+            // See: https://github.com/ethereum/go-ethereum/blob/de5ea2ffd891c603b029d0080ab4626ce81dd91c/core/types/transaction.go#L47
+            rlpTxReceipt = rlpTxReceipt.getSlice(1, rlpTxReceipt.length);
+        }
 
         // RLP-decode the remaining bytes into fields.
         // EVM receipt order: [status, cumulativeGasUsed, logsBloom, logs}
