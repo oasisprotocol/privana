@@ -16,6 +16,7 @@ dependencies = [
     "eth-account>=0.13.0",
     "trie>=3.0.0",
     "rlp>=4.0.0",
+    "oasis-rofl-client>=0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -50,3 +51,8 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["test"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
