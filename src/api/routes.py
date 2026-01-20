@@ -17,7 +17,6 @@ from src.models.accounting import (
     LockFundsRequest,
     LockedFundsResponse,
     PendingWithdrawalsResponse,
-    ResolveWithdrawalRequest,
     TokenInfoResponse,
     TotalLockedBalanceResponse,
     TransactionSubmissionResponse,
@@ -146,20 +145,6 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to submit withdrawal request")
-        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
-
-
-@router.post("/withdraw/resolve", response_model=TransactionSubmissionResponse)
-async def resolve_withdrawal(payload: ResolveWithdrawalRequest) -> TransactionSubmissionResponse:
-    """Resolve a pending withdrawal request to generate the signed transaction."""
-
-    try:
-        submission = await asyncio.to_thread(_service.resolve_withdrawal, payload.model_dump())
-        return _wrap_submission(submission)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover
-        logger.exception("Failed to resolve withdrawal")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 

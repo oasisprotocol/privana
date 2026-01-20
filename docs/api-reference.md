@@ -122,25 +122,16 @@ Request a withdrawal based on the user's EIP-712 signature. This schedules the w
   - `submission_id` (string) – ROFL submission identifier.
   - `status` (string) – Submission status, e.g. `submitted`.
   - `detail` (string, optional) – Metadata such as `chain_id` and `token_address`.
-- **Note:** After this call succeeds, you must call `/withdraw/resolve` in a subsequent block to generate the signed withdrawal transaction.
-
-### POST `/withdraw/resolve`
-Resolve a pending withdrawal request to generate the signed transaction for the origin chain. Must be called at least 1 block after the withdrawal was requested.
-- **Request body**
-  - `index` (integer, required) – Index of the withdrawal request to resolve.
-- **Response body**
-  - `submission_id` (string) – ROFL submission identifier.
-  - `status` (string) – Submission status, e.g. `submitted`.
-  - `detail` (string, optional).
+- **Note:** Withdrawals are automatically resolved by the backend after the required block delay. Frontend clients only need to call this endpoint once. Use `/withdraw/pending/{user_address}` to check withdrawal status.
 
 ### GET `/withdraw/pending/{user_address}`
-Get all pending (unresolved) withdrawal requests for a user. Use this to find the withdrawal index needed to call `/withdraw/resolve`.
+Get all pending (unresolved) withdrawal requests for a user. Use this to display withdrawal status in the UI.
 - **Path parameters**
   - `user_address` (string, required) – User's EVM address.
 - **Response body**
   - `user_address` (string) – Checksummed user address.
   - `pending_withdrawals` (array) – List of pending withdrawal requests:
-    - `index` (integer) – Withdrawal request index (use this for `/withdraw/resolve`).
+    - `index` (integer) – Withdrawal request index.
     - `user_address` (string) – Address of the user who requested the withdrawal.
     - `amount` (string) – Amount requested in base units.
     - `block_number` (integer) – Block number when the withdrawal was requested.

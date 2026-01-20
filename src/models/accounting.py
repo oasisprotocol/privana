@@ -153,12 +153,6 @@ class WithdrawalRequest(BaseModel):
         return _normalise_hex(value)
 
 
-class ResolveWithdrawalRequest(BaseModel):
-    """Payload for resolving a pending withdrawal."""
-
-    index: int = Field(..., ge=0, description="Index of the withdrawal to resolve")
-
-
 class WithdrawalInfo(BaseModel):
     """Information about a single withdrawal request."""
 
