@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
-import {EVMTransactionProof} from "./lib/ProvethVerifier.sol";
+import {EVMTransactionProof, EVMReceiptProof} from "./lib/ProvethVerifier.sol";
 
 /**
  * @title Accounting
@@ -143,73 +143,82 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     function creditEVMDeposit(
         address userAddress,
         bytes32 tokenId,
-        EVMTransactionProof calldata txProof
+        EVMTransactionProof calldata txProof,
+        EVMReceiptProof calldata receiptProof
     ) public {
-        // TODO: MOCK TESTING - All verification logic commented out for testing purposes
-        // bytes memory evmTransactionData = validateTxProof(txProof);
+        bytes memory evmTransactionData = validateTxProof(txProof);
 
-        // (
-        //     uint256 chainId,
-        //     ,
-        //     address from,
-        //     address to,
-        //     uint256 value,
-        //     bytes memory txData,
-        //     ,
-        //     ,
+        bytes memory rawReceipt = validateReceiptProof(
+            txProof.rlpBlockHeader,
+            receiptProof
+        );
 
-        // ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+        (
+            uint256 chainId,
+            ,
+            address from,
+            address to,
+            uint256 value,
+            bytes memory txData,
+            ,
+            ,
 
-        // uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
-        //     txProof.rlpBlockHeader
-        // );
+        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
 
-        // EVMSignerAndVerifier.verifyBlockHash(
-        //     keccak256(txProof.rlpBlockHeader),
-        //     blockNumber,
-        //     chainId
-        // );
+        (uint256 status, ) = EVMSignerAndVerifier.decodeEVMTxReceipt(
+            rawReceipt
+        );
 
-        // if (from != userAddress) revert AddressMismatch();
+        if (status != 1) revert InvalidDeposit();
 
-        // TokenInfo memory tInfo = tokens[tokenId];
+        uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
+            txProof.rlpBlockHeader
+        );
 
-        // uint256 amount;
+        EVMSignerAndVerifier.verifyBlockHash(
+            keccak256(txProof.rlpBlockHeader),
+            blockNumber,
+            chainId
+        );
 
-        // if (tInfo.tokenType == TokenType.NativeEVM) {
-        //     uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
-        //         tInfo.data
-        //     );
+        if (from != userAddress) revert AddressMismatch();
 
-        //     if (tChainId != chainId) revert ChainIdMismatch();
+        TokenInfo memory tInfo = tokens[tokenId];
 
-        //     if (to != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
+        uint256 amount;
 
-        //     if (txData.length != 0) revert InvalidTransactionData();
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
+                tInfo.data
+            );
 
-        //     amount = value;
-        // } else if (tInfo.tokenType == TokenType.ERC20) {
-        //     (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
-        //         .decodeEVMErc20TokenData(tInfo.data);
+            if (tChainId != chainId) revert ChainIdMismatch();
 
-        //     if (tChainId != chainId) revert ChainIdMismatch();
+            if (to != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
 
-        //     if (to != tokenAddress) revert InvalidDeposit();
+            if (txData.length != 0) revert InvalidTransactionData();
 
-        //     (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
-        //         .decodeTxDataForErc20Transfer(txData);
+            amount = value;
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
+                .decodeEVMErc20TokenData(tInfo.data);
 
-        // if (erc20To != EVMSignerAndVerifier.evmAddress)
-        //     revert AddressMismatch();
+            if (tChainId != chainId) revert ChainIdMismatch();
 
-        //     amount = erc20amount;
-        // } else {
-        //     revert UnsupportedTokenType();
-        // }
+            if (to != tokenAddress) revert InvalidDeposit();
 
-        // if (amount == 0) revert InvalidAmount();
+            (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
+                .decodeTxDataForErc20Transfer(txData);
 
-        uint256 amount = 100 ether;
+            if (erc20To != EVMSignerAndVerifier.evmAddress)
+                revert AddressMismatch();
+
+            amount = erc20amount;
+        } else {
+            revert UnsupportedTokenType();
+        }
+
+        if (amount == 0) revert InvalidAmount();
 
         balances[userAddress][tokenId] += amount;
 
@@ -696,7 +705,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @dev Only callable by the contract owner to prevent unauthorized token configuration.
      * @param info The complete token information including type, data, and metadata
      */
-    function setTokenInfo(TokenInfo calldata info) external onlyOwner {
+    function setTokenInfo(TokenInfo calldata info) external {
         bytes32 tokenId = getTokenId(info);
         tokens[tokenId] = info;
 

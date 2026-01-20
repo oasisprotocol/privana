@@ -3,6 +3,7 @@
 pragma solidity ^0.8.20;
 
 import {EVMSignerAndVerifier} from "../EVMSignerAndVerifier.sol";
+import {ProvethVerifier} from "../lib/ProvethVerifier.sol";
 
 contract MockEVMSignerAndVerifier is EVMSignerAndVerifier {
     constructor() EVMSignerAndVerifier(address(0)) {}
@@ -24,6 +25,12 @@ contract MockEVMSignerAndVerifier is EVMSignerAndVerifier {
         )
     {
         return EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+    }
+
+    function exposedDecodeTxReceipt(
+        bytes memory txReceiptData
+    ) external returns (uint256 status, uint256 gasUsed) {
+        return EVMSignerAndVerifier.decodeEVMTxReceipt(txReceiptData);
     }
 
     function exposedDecodeTxDataForErc20Transfer(

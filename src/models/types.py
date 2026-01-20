@@ -14,6 +14,7 @@ class Settings:
     environment: str = "development"
 
     accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
+    rofl_adapter_address: str = "0x0000000000000000000000000000000000000000"
     sapphire_chain_id: int = 23295
     sapphire_rpc_url: str = "https://testnet.sapphire.oasis.io"
     accounting_gas_limit: int = 500_000

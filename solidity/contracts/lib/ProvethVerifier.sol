@@ -18,12 +18,18 @@ struct EVMTransactionProof {
     bytes transactionProofStack;
 }
 
+struct EVMReceiptProof {
+    bytes receiptIndexRlp;
+    bytes receiptProofStack;
+}
+
 contract ProvethVerifier {
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for bytes;
 
     uint256 private constant BLOCK_HEADER_STATE_ROOT_INDEX = 3;
     uint256 private constant BLOCK_HEADER_TX_ROOT_INDEX = 4;
+    uint256 private constant BLOCK_HEADER_RECEIPT_ROOT_INDEX = 5;
     uint256 private constant ACCOUNT_STORAGE_ROOT_INDEX = 2;
 
     function isEmpty(
@@ -142,6 +148,36 @@ contract ProvethVerifier {
             RLPReader.toList(RLPReader.toRlpItem(txProof.transactionProofStack))
         );
         return txRlp;
+    }
+
+    function validateReceiptProof(
+        bytes memory rlpBlockHeader,
+        EVMReceiptProof calldata receiptProof
+    ) public pure returns (bytes memory) {
+        RLPReader.RLPItem[] memory blockHeader = rlpBlockHeader
+            .toRlpItem()
+            .toList();
+
+        bytes32 receiptRoot = bytes32(
+            blockHeader[BLOCK_HEADER_RECEIPT_ROOT_INDEX].toUint()
+        );
+
+        // The key in the trie is the index of the address in RLP
+        bytes memory receiptKey = decodeNibbles(
+            receiptProof.receiptIndexRlp,
+            0
+        );
+
+        // We must convert the bytes of the keccak256 to nibbles for validateMPTProof
+        bytes memory rawReceipt = validateMPTProof(
+            receiptRoot,
+            receiptKey,
+            RLPReader.toList(
+                RLPReader.toRlpItem(receiptProof.receiptProofStack)
+            )
+        );
+
+        return rawReceipt;
     }
 
     function validateStorageProof(

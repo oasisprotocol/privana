@@ -2,6 +2,8 @@
 import { ethers } from 'hardhat';
 import { Signer, BigNumberish, Interface, parseUnits, Wallet, type BytesLike, JsonRpcProvider, JsonRpcApiProvider } from 'ethers';
 
+import assert from "assert";
+
 import { Trie } from "@ethereumjs/trie";
 import { encode } from "rlp";
 
@@ -150,5 +152,39 @@ export async function getTxInclusionProof(
 	return {
 		rlpBlockHeader: ethers.encodeRlp(blockHeader),
 		proof: txProofHex,
+	};
+}
+
+export async function getReceiptInclusionProof(
+	provider: JsonRpcApiProvider,
+	blockNumber: number,
+	txIndex: number,
+) {
+	const rawReceipts = await provider.send("debug_getRawReceipts", [getRpcUint(blockNumber)]);
+
+	const trie = new Trie();
+	for (let i = 0; i < rawReceipts.length; i++) {
+		const key = ethers.getBytes(getRlpUint(i));   // RLP(k)
+		await trie.put(key, rawReceipts[i]);
+	}
+
+	const rawBlock = await provider.send("debug_getRawBlock", [getRpcUint(blockNumber)]);
+	const blockRlp = ethers.decodeRlp(rawBlock);
+	const blockHeader: string[] = blockRlp[0] as string[];
+
+	// Ensure the transaction root was constructed the same way
+	const receiptRoot = ethers.hexlify(trie.root());
+	if (receiptRoot != blockHeader[5]) {
+		throw new Error(
+			"Constructed receipts Merkle tree has a root inconsistent with the receiptsRoot in the block header",
+		);
+	}
+
+	//Generate the proof of the receipt
+	const receiptsProof = await trie.createProof(ethers.getBytes(getRlpUint(txIndex)));
+	const receiptsProofHex = receiptsProof.map((x) => ethers.hexlify(x));
+	return {
+		rlpBlockHeader: ethers.encodeRlp(blockHeader),
+		proof: receiptsProofHex,
 	};
 }

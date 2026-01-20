@@ -2,15 +2,16 @@
 
 import asyncio
 import logging
+import time
 from typing import Dict, Optional, Set
 
 from web3 import Web3
 from web3.types import BlockData
 
+from src.abi.rofl_adapter import ROFL_ADAPTER_ABI
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
-# TODO: MOCK TESTING - Proof generator not needed for testing
-# from src.services.proof_generator import get_proof_generator
+from src.services.proof_generator import get_proof_generator
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +30,30 @@ class DepositListener:
         self._chain_web3: Dict[int, Web3] = {}
         self._is_running = False
         self._tasks: Set[asyncio.Task] = set()
+        self._deposit_tasks: Set[asyncio.Task] = set()
         self._deposit_address: Optional[str] = None
         self._last_processed_blocks: Dict[int, int] = {}
         self._native_token_ids: Dict[int, str] = {}
         self._erc20_token_ids: Dict[tuple, str] = {}
-        # TODO: MOCK TESTING - Proof generator not needed for testing
-        # self._proof_generator = get_proof_generator(self.chain_rpc_urls)
+        self._last_rpc_call: Dict[int, float] = {}
+        self._min_rpc_interval = 0.05
+        self._proof_generator = get_proof_generator(self.chain_rpc_urls)
+        self._sapphire_web3 = Web3(Web3.HTTPProvider(self.settings.sapphire_rpc_url))
+        self._rofl_adapter_address = Web3.to_checksum_address(self.settings.rofl_adapter_address)
+        self._rofl_adapter_contract = self._sapphire_web3.eth.contract(
+            address=self._rofl_adapter_address, abi=ROFL_ADAPTER_ABI
+        )
+        logger.info(f"ROFL Adapter contract: {self._rofl_adapter_address} on {self.settings.sapphire_rpc_url}")
+        try:
+            if self._sapphire_web3.is_connected():
+                sapphire_chain_id = self._sapphire_web3.eth.chain_id
+                logger.info(f"Sapphire connection OK, chain_id={sapphire_chain_id}")
+                test_hash = self._rofl_adapter_contract.functions.getHash(1, 1).call()
+                logger.info(f"ROFL Adapter contract call test OK: getHash(1,1)={Web3.to_hex(test_hash)}")
+            else:
+                logger.warning("Sapphire connection failed on startup")
+        except Exception as e:
+            logger.warning(f"Sapphire/ROFL Adapter startup check failed: {type(e).__name__}: {e}")
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -51,11 +70,96 @@ class DepositListener:
         self._chain_web3[chain_id] = web3
         return web3
 
+    async def _rate_limited_rpc_call(self, chain_id: int, func, *args, **kwargs):
+        """Execute RPC call with rate limiting and exponential backoff."""
+        now = time.time()
+        last_call = self._last_rpc_call.get(chain_id, 0)
+        time_since_last = now - last_call
+
+        if time_since_last < self._min_rpc_interval:
+            await asyncio.sleep(self._min_rpc_interval - time_since_last)
+
+        max_retries = 5
+        base_delay = 1.0
+
+        for attempt in range(max_retries):
+            try:
+                self._last_rpc_call[chain_id] = time.time()
+                result = await asyncio.to_thread(func, *args, **kwargs)
+                return result
+            except Exception as e:
+                error_str = str(e).lower()
+                if "429" in error_str or "too many requests" in error_str or "rate limit" in error_str:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
+                        logger.warning(
+                            f"Rate limit hit on {chain_name}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                raise
+
     def _get_deposit_address(self) -> str:
         if self._deposit_address is None:
             self._deposit_address = self.accounting_service._get_deposit_address()
             logger.info(f"Monitoring deposit address: {self._deposit_address}")
         return self._deposit_address
+
+    def _spawn_deposit_task(self, coro, task_name: str) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=task_name)
+        self._deposit_tasks.add(task)
+        task.add_done_callback(self._deposit_tasks.discard)
+        return task
+
+    def _query_block_hash(self, chain_id: int, block_number: int) -> bytes:
+        return self._rofl_adapter_contract.functions.getHash(chain_id, block_number).call()
+
+    async def _wait_for_block_hash_stored(
+        self,
+        block_number: int,
+        chain_id: int,
+        max_wait_seconds: int = 300,
+        poll_interval: int = 5,
+    ) -> bool:
+        chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
+        logger.info(
+            f"Waiting for block hash to be stored for block {block_number} on {chain_name}..."
+        )
+
+        start_time = time.time()
+        zero_hash = "0x" + "0" * 64
+
+        while time.time() - start_time < max_wait_seconds:
+            try:
+                stored_hash = await asyncio.to_thread(
+                    self._query_block_hash, chain_id, block_number
+                )
+                stored_hash_hex = Web3.to_hex(stored_hash)
+
+                if stored_hash_hex != zero_hash:
+                    logger.info(
+                        f"Block hash found for block {block_number} on {chain_name}: {stored_hash_hex}"
+                    )
+                    return True
+
+                logger.debug(
+                    f"Block hash not yet available for block {block_number} on {chain_name}, "
+                    f"waiting {poll_interval}s... (elapsed: {int(time.time() - start_time)}s)"
+                )
+                await asyncio.sleep(poll_interval)
+
+            except Exception as e:
+                logger.warning(
+                    f"Error checking block hash for {chain_name} block {block_number} "
+                    f"via adapter {self._rofl_adapter_address}: {type(e).__name__}: {e}"
+                )
+                await asyncio.sleep(poll_interval)
+
+        logger.error(
+            f"Timeout waiting for block hash for block {block_number} on {chain_name}"
+        )
+        return False
 
 
     def _get_native_token_id(self, chain_id: int) -> str:
@@ -103,33 +207,29 @@ class DepositListener:
             )
 
             web3 = self._get_chain_web3(chain_id)
-            tx_receipt = await asyncio.to_thread(web3.eth.get_transaction_receipt, tx_hash)
+            tx_receipt = await self._rate_limited_rpc_call(chain_id, web3.eth.get_transaction_receipt, tx_hash)
 
             if tx_receipt["status"] != 1:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
                 return
 
-            # TODO: MOCK TESTING - Verification data commented out for testing purposes
-            # raw_tx = await asyncio.to_thread(web3.eth.get_raw_transaction, tx_hash)
-            # evm_transaction_data = raw_tx.hex()
+            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
+            if not hash_stored:
+                logger.error(
+                    f"Block hash not available for block {block_number}, skipping deposit {tx_hash}"
+                )
+                return
+
+            proofs = await asyncio.to_thread(
+                self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
+            )
 
             token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
-
-            # TODO: MOCK TESTING - Proof generation commented out for testing purposes
-            # proof = await asyncio.to_thread(
-            #     self._proof_generator.generate_tx_proof,
-            #     chain_id,
-            #     tx_hash
-            # )
 
             payload = {
                 "user_address": from_address,
                 "token_id": token_id,
-                # TODO: MOCK TESTING - Verification fields commented out for testing purposes
-                # "evm_transaction_data": evm_transaction_data,
-                # "rlp_block_header": proof["rlp_block_header"],
-                # "transaction_index_rlp": proof["transaction_index_rlp"],
-                # "transaction_proof_stack": proof["transaction_proof_stack"],
+                **proofs,
             }
 
             result = self.accounting_service.include_deposit(payload)
@@ -159,33 +259,29 @@ class DepositListener:
             )
 
             web3 = self._get_chain_web3(chain_id)
-            tx_receipt = await asyncio.to_thread(web3.eth.get_transaction_receipt, tx_hash)
+            tx_receipt = await self._rate_limited_rpc_call(chain_id, web3.eth.get_transaction_receipt, tx_hash)
 
             if tx_receipt["status"] != 1:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
                 return
 
-            # TODO: MOCK TESTING - Verification data commented out for testing purposes
-            # raw_tx = await asyncio.to_thread(web3.eth.get_raw_transaction, tx_hash)
-            # evm_transaction_data = raw_tx.hex()
+            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
+            if not hash_stored:
+                logger.error(
+                    f"Block hash not available for block {block_number}, skipping ERC20 deposit {tx_hash}"
+                )
+                return
+
+            proofs = await asyncio.to_thread(
+                self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
+            )
 
             token_id = await asyncio.to_thread(self._get_erc20_token_id, chain_id, token_address)
-
-            # TODO: MOCK TESTING - Proof generation commented out for testing purposes
-            # proof = await asyncio.to_thread(
-            #     self._proof_generator.generate_tx_proof,
-            #     chain_id,
-            #     tx_hash
-            # )
 
             payload = {
                 "user_address": from_address,
                 "token_id": token_id,
-                # TODO: MOCK TESTING - Verification fields commented out for testing purposes
-                # "evm_transaction_data": evm_transaction_data,
-                # "rlp_block_header": proof["rlp_block_header"],
-                # "transaction_index_rlp": proof["transaction_index_rlp"],
-                # "transaction_proof_stack": proof["transaction_proof_stack"],
+                **proofs,
             }
 
             result = self.accounting_service.include_deposit(payload)
@@ -229,7 +325,7 @@ class DepositListener:
 
                 if chain_id not in self._last_processed_blocks:
                     try:
-                        block_number = await asyncio.to_thread(lambda: web3.eth.block_number)
+                        block_number = await self._rate_limited_rpc_call(chain_id, lambda: web3.eth.block_number)
                         lookback_blocks = 100
                         start_block = max(0, block_number - lookback_blocks)
                         self._last_processed_blocks[chain_id] = start_block
@@ -239,66 +335,68 @@ class DepositListener:
                         await asyncio.sleep(poll_interval)
                         continue
 
-                current_block = await asyncio.to_thread(lambda: web3.eth.block_number)
+                current_block = await self._rate_limited_rpc_call(chain_id, lambda: web3.eth.block_number)
                 last_processed = self._last_processed_blocks[chain_id]
 
                 if current_block > last_processed:
-                    for block_num in range(last_processed + 1, current_block + 1):
-                        try:
-                            block: BlockData = await asyncio.to_thread(
-                                web3.eth.get_block, block_num, True
-                            )
+                    to_block = min(current_block, last_processed + 20)
 
-                            for tx in block["transactions"]:
-                                tx_hash = tx["hash"].hex()
-                                has_native_deposit = False
+                    try:
+                        for block_num in range(last_processed + 1, to_block + 1):
+                            try:
+                                block: BlockData = await self._rate_limited_rpc_call(
+                                    chain_id, web3.eth.get_block, block_num, True
+                                )
 
-                                if (
-                                    tx.get("to")
-                                    and tx["to"].lower() == deposit_address
-                                    and tx.get("value", 0) > 0
-                                ):
-                                    has_native_deposit = True
-                                    logger.info(f"FOUND NATIVE DEPOSIT in tx {tx_hash} at block {block_num}")
-                                    await self._process_deposit(
-                                        chain_id=chain_id,
-                                        tx_hash=tx_hash,
-                                        from_address=tx["from"],
-                                        value=tx["value"],
-                                        block_number=block_num,
-                                    )
+                                for tx in block.get("transactions", []):
+                                    tx_hash = tx["hash"].hex()
+                                    tx_to = tx.get("to")
 
-                                if erc20_tokens or has_native_deposit:
-                                    receipt = await asyncio.to_thread(
-                                        web3.eth.get_transaction_receipt, tx_hash
-                                    )
+                                    # Native deposit
+                                    if tx_to and tx_to.lower() == deposit_address and tx.get("value", 0) > 0:
+                                        logger.info(f"{chain_name}: Native deposit in block {block_num}")
+                                        self._spawn_deposit_task(
+                                            self._process_deposit(
+                                                chain_id, tx_hash, tx["from"], tx["value"], block_num
+                                            ),
+                                            f"deposit-{tx_hash[:10]}",
+                                        )
 
-                                    if erc20_tokens:
+                                    # ERC20 deposit
+                                    if erc20_tokens and tx_to and tx_to.lower() in erc20_tokens:
+                                        receipt = await self._rate_limited_rpc_call(
+                                            chain_id, web3.eth.get_transaction_receipt, tx_hash
+                                        )
+
                                         for log in receipt.get("logs", []):
-                                            if len(log["topics"]) >= 3 and log["topics"][0].hex() == self.TRANSFER_EVENT_SIGNATURE:
-                                                token_address = log["address"].lower()
-                                                if token_address in erc20_tokens:
-                                                    to_address = "0x" + log["topics"][2].hex()[-40:]
-                                                    if to_address.lower() == deposit_address:
-                                                        from_address = "0x" + log["topics"][1].hex()[-40:]
-                                                        value = int.from_bytes(log["data"], byteorder="big")
+                                            if (
+                                                len(log["topics"]) >= 3
+                                                and log["topics"][0].hex() == self.TRANSFER_EVENT_SIGNATURE
+                                                and log["address"].lower() in erc20_tokens
+                                                and "0x" + log["topics"][2].hex()[-40:] == deposit_address
+                                            ):
+                                                logger.info(
+                                                    f"{chain_name}: {erc20_tokens[log['address'].lower()]} deposit in block {block_num}"
+                                                )
+                                                self._spawn_deposit_task(
+                                                    self._process_erc20_deposit(
+                                                        chain_id,
+                                                        tx_hash,
+                                                        log["address"].lower(),
+                                                        "0x" + log["topics"][1].hex()[-40:],
+                                                        int.from_bytes(log["data"], byteorder="big"),
+                                                        block_num,
+                                                    ),
+                                                    f"erc20-deposit-{tx_hash[:10]}",
+                                                )
 
-                                                        logger.info(f"Found ERC20 deposit ({erc20_tokens[token_address]}) in tx {tx_hash} at block {block_num}")
-                                                        await self._process_erc20_deposit(
-                                                            chain_id=chain_id,
-                                                            tx_hash=tx_hash,
-                                                            token_address=token_address,
-                                                            from_address=from_address,
-                                                            value=value,
-                                                            block_number=block_num,
-                                                        )
+                            except Exception as e:
+                                logger.error(f"{chain_name}: Error in block {block_num}: {e}")
 
-                            self._last_processed_blocks[chain_id] = block_num
+                        self._last_processed_blocks[chain_id] = to_block
 
-                        except Exception as e:
-                            logger.error(
-                                f"Error processing block {block_num} on {chain_name}: {str(e)}"
-                            )
+                    except Exception as e:
+                        logger.error(f"{chain_name}: Scan error: {e}")
 
                 await asyncio.sleep(poll_interval)
 
@@ -327,6 +425,11 @@ class DepositListener:
 
         for task in self._tasks:
             task.cancel()
+
+        if self._deposit_tasks:
+            logger.info(f"Waiting for {len(self._deposit_tasks)} active deposit tasks to complete...")
+            await asyncio.gather(*self._deposit_tasks, return_exceptions=True)
+            self._deposit_tasks.clear()
 
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
