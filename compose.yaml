@@ -9,13 +9,19 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - ACCOUNTING_CONTRACT_ADDRESS=${ACCOUNTING_CONTRACT_ADDRESS}
+      - ROFL_ADAPTER_ADDRESS=${ROFL_ADAPTER_ADDRESS}
       - SAPPHIRE_CHAIN_ID=${SAPPHIRE_CHAIN_ID:-23295}
       - SAPPHIRE_RPC_URL=${SAPPHIRE_RPC_URL:-https://testnet.sapphire.oasis.io}
       - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
       - ACCOUNTING_GAS_LIMIT=${ACCOUNTING_GAS_LIMIT:-500000}
       - DEPOSIT_POLL_INTERVAL=${DEPOSIT_POLL_INTERVAL:-1}
+      - BLOCK_STATE_DIR=/data/deposit-listener
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
+      - deposit-listener-data:/data/deposit-listener
     ports:
       - "8000:8000"
     restart: on-failure
+
+volumes:
+  deposit-listener-data:

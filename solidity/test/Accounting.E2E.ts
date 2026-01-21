@@ -2,7 +2,7 @@ import { expect, version } from 'chai';
 import { ethers, config } from 'hardhat';
 import { keccak256, parseEther, Wallet } from 'ethers';
 import { Accounting, MockShoyuBashi } from '../typechain-types';
-import { generateERC20Tx, getRlpUint } from './utils';
+import { generateERC20Tx, getReceiptInclusionProof, getRlpUint } from './utils';
 import { getTxInclusionProof } from './utils';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 // import {
@@ -128,7 +128,13 @@ describe('Accounting', function () {
     const blockNumber = 32680090;
     const transactionIndex = 45;
 
-    const { rlpBlockHeader, proof } = await getTxInclusionProof(
+    const { rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
+    const { proof: receiptProof } = await getReceiptInclusionProof(
       provider,
       blockNumber,
       transactionIndex
@@ -143,7 +149,10 @@ describe('Accounting', function () {
     await accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
       rlpBlockHeader,
       transactionIndexRlp: getRlpUint(transactionIndex),
-      transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+    }, {
+      receiptIndexRlp: getRlpUint(transactionIndex),
+      receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
     });
 
     const balanceAfter = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
@@ -165,6 +174,12 @@ describe('Accounting', function () {
       transactionIndex
     );
 
+    const { proof: receiptProof } = await getReceiptInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
     await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
 
     const invalidProof = proof.slice(0, proof.length - 1);
@@ -174,7 +189,50 @@ describe('Accounting', function () {
         rlpBlockHeader,
         transactionIndexRlp: getRlpUint(transactionIndex),
         transactionProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      })
+      },
+        {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        }
+      )
+    ).to.be.reverted;
+  });
+
+
+  it("Should reject deposit with invalid receipt proof", async function () {
+    const depositAddress = await accounting.evmAddress();
+    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+
+    const blockNumber = 32680090;
+    const transactionIndex = 45;
+
+    const { rlpBlockHeader, proof } = await getTxInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
+    const { proof: receiptProof } = await getReceiptInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
+    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
+
+    const invalidProof = receiptProof.slice(0, proof.length - 1);
+
+    await expect(
+      accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+        rlpBlockHeader,
+        transactionIndexRlp: getRlpUint(transactionIndex),
+        transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      },
+        {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        }
+      )
     ).to.be.reverted;
   });
 
@@ -191,6 +249,12 @@ describe('Accounting', function () {
       transactionIndex
     );
 
+    const { proof: receiptProof } = await getReceiptInclusionProof(
+      provider,
+      blockNumber,
+      transactionIndex
+    );
+
     const wrongBlockHash = "0x1234567890123456789012345678901234567890123456789012345678901234";
     await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, wrongBlockHash);
 
@@ -199,7 +263,11 @@ describe('Accounting', function () {
         rlpBlockHeader,
         transactionIndexRlp: getRlpUint(transactionIndex),
         transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      })
+      },
+        {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        })
     ).to.be.revertedWith("Invalid block hash");
   });
 

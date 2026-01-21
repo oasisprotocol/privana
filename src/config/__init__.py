@@ -75,6 +75,9 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_contract_address=os.getenv(
                 "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
             ),
+            rofl_adapter_address=os.getenv(
+                "ROFL_ADAPTER_ADDRESS", _defaults.rofl_adapter_address
+            ),
             sapphire_chain_id=_get_int(
                 "SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id
             ),

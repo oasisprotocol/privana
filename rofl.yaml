@@ -9,11 +9,12 @@ resources:
     kind: disk-persistent
     size: 8192
 artifacts:
+  builder: ghcr.io/oasisprotocol/rofl-container-builder:0.0.1@sha256:913ef97ab07dde31f08ce873f825bf3d4f32ad4102ff5797d7c3050c121c4dce
   firmware: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/ovmf.tdx.fd#db47100a7d6a0c1f6983be224137c3f8d7cb09b63bb1c7a5ee7829d8e994a42f
   kernel: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage1.bin#e5d4d654ca1fa2c388bf64b23fc6e67815893fc7cb8b7cfee253d87963f54973
   stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage2-podman.tar.bz2#b2ea2a0ca769b6b2d64e3f0c577ee9c08f0bb81a6e33ed5b15b2a7e50ef9a09f
   container:
-    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.1/rofl-containers#993e66f3b037cdc63896216cde4dc91b4976cc82a698c63123a9bba8710852c4
+    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.5/rofl-containers#b63e85b33d37f1c762aef85125617d87d79763c3fe3f30815301f0f9fe57179d
     compose: compose.yaml
 deployments:
   default:
@@ -32,25 +33,29 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: pcHMtpM/04wHJii32InhW6vMvft9uGv4aJth9IsFPb4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: Rm7HysBgPcaQRApYN3Tj8A/pW1VfhHlI56c577lOR0cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 8R2qttoR+IeYPM08GXroCUmUe5EglO/Vq+SHYebqG9MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: ZDKqVKHdOLEuIFX1pT5+1NG45XxfHeIy8Zsvh7YhqUUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggGdUalfSdfFR0QXYc+Xxu3z2DONtN+YnEiJUdcTG6SkdkbmFtZVgr8O9gwlPuV+AkVupBzPamIgVi80vwVakMgIzyrpuhsMd1gXnGLjPmAke7pGVub25jZU/6OpQrBnAejqz2QqmzzatldmFsdWVYOvZmyNwoL0V6tZL7LnrumO11t53U/odWhYzr4IynfnsT4G618X7SA9ShjbzWcR/0MclZQFqVJSXyYO4=
+        value: pGJwa1ggs9cbdKojdP/eNA5ezABhfS6lu0sx2rUQDtlA99DwvR5kbmFtZVgr73oyaI8+Ckn3V0M12RRrTEdQ0DzTNn6KL/6t/heMM/+zAHgA8KyBbRrRwmVub25jZU9mJWZxVvr/nQN672J0a4dldmFsdWVYOp2bU4dHGiQcs19kOEh2zC0GvzHr5rAWv2FHwqIrt2baUDgW0gcYot+DEtOQEw4hgD+sk+GmqvM+vvg=
+      - name: ROFL_ADAPTER_ADDRESS
+        value: pGJwa1ggTTYy00wS3jlh6+qvvbW9XV4qUB0AaG7ZXeUxZ4FllnxkbmFtZVgkJsKcRIAs2e5y9AynQAq4clzm0PFnv8OkMpuEseRmz0v/BFccZW5vbmNlT1wNaey6h0ee9BvZWEKxyWV2YWx1ZVg6jd4W0AS1SdEL2iRV4PahLpT0jqeptiKt8J/Ues3ovNo7r7XjKh2z7pGfkN7tevXkZj5G2H+CFXFXOw==
       - name: SAPPHIRE_CHAIN_ID
         value: pGJwa1ggJ/cg/Hfu7dQ20NGKoxPLAZvq/KHprDn0mJXJRTzFeRpkbmFtZVghe+GZ32XCsQFv9IsIaChko+Y7hK6FuzyjpcqnSwaYsTkCZW5vbmNlT/pV+dG78ClUe8+g6gLUmGV2YWx1ZVUaOVBxGEil/SKR5rxwOP56jx6TnFE=
       - name: SAPPHIRE_RPC_URL
         value: pGJwa1ggHCCMlvc+DNO0ZMnvObabgnN7F6R5bR51qOMA5TA3g2BkbmFtZVggzZEFP55yKak+XU9/bbwplQQr6/ObqWEdSG6uXSuA4d1lbm9uY2VPlC9Z3W6lBA+JwGnSr2x9ZXZhbHVlWDErklv3csBuRaZ8PQzzzMzpIWgfVEjIWdN721xPHadDrQhzDOWd40t1q++ie0HR29fm
       - name: ALCHEMY_API_KEY
-        value: pGJwa1ggCTQ8m1dJg2ROcUEoKo/XpYtJk6Y8blr3x5OFcmvYIxBkbmFtZVgf+lAWNsx3iKhAOrMFaliK7hjZ+xu57Ce1ukz0qJOTbGVub25jZU8X6JR0Kc2iPzrtU9puUvNldmFsdWVYJVsTToI27NXxNNkdL/bQe0p+1tJimaZ2dIC2I7As7WDLWCB2Bw4=
+        value: pGJwa1ggGSMlZSoTXsfbBAk2U8SuIEwsfYK8DuGZKM3//J9H61xkbmFtZVgfZRjsJMsjSKGY6tN0ElFBEDp4hM/sQ4nPF522yGUoPWVub25jZU+o2ndgdwCJUKIYrLoM3PRldmFsdWVYJdYh5B8ric66QTrjdeW6g3yCAeclps0uVRk4QpEYV0NknPs9Jj8=
       - name: DEPOSIT_POLL_INTERVAL
         value: pGJwa1gga2NiNyH+aVAJTgNJSdZPP/be/JQ5Locl6CPllkiMmGRkbmFtZVglYeEHQZrMBUJC2urp48jJ8MQ5gqxSvifn5aCi1t4nd3W90/cP8WVub25jZU/D+6eCsJprwrtVybZWFBxldmFsdWVRd1PygUFg0idNToK3uTigErQ=
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
-        id: 00000000000003c6
+        id: "0000000000000524"
+tooling:
+  version: 0.18.1

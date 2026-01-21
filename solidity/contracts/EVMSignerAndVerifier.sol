@@ -23,11 +23,10 @@ import {
     EthereumUtils
 } from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
-import {TokenInfo, EVMKeypair} from "./Types.sol";
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
+contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     address public evmAddress;
     bytes32 private secretKey;
     IShoyuBashi public shoyuBashi;
@@ -48,17 +47,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
     using SliceBytes for bytes;
 
     constructor(address _shoyubashi) Ownable(msg.sender) {
-        (
-            bytes memory compressedPublicKey,
-            bytes memory secretKeyBytes
-        ) = Sapphire.generateSigningKeyPair(
-                Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
-                Sapphire.randomBytes(32, "EVMSignerAndVerifier")
-            );
-        evmAddress = EthereumUtils.k256PubkeyToEthereumAddress(
-            compressedPublicKey
-        );
-        secretKey = bytes32(secretKeyBytes);
+        (evmAddress, secretKey) = EthereumUtils.generateKeypair();
         shoyuBashi = IShoyuBashi(_shoyubashi);
     }
 
@@ -106,6 +95,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         bytes memory evmTransactionData
     )
         internal
+        pure
         returns (
             uint256 chainId,
             bytes32 hash,
@@ -324,7 +314,7 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
      */
     function decodeTxDataForErc20Transfer(
         bytes memory txData
-    ) internal returns (address to, uint256 amount) {
+    ) internal pure returns (address to, uint256 amount) {
         // 1. Check calldata length: selector (4) + address (32) + amount (32) = 68 bytes
         require(txData.length == 4 + 32 + 32, "Invalid txData length");
 
@@ -360,6 +350,50 @@ contract EVMSignerAndVerifier is Ownable, ProvethVerifier {
         to = address(uint160(uint256(toBytes)));
         // Convert the 32-byte word to uint256
         amount = uint256(amountBytes);
+    }
+
+    /**
+     * @notice Decodes an EVM transaction receipt to extract status and cumulative gas used.
+     *
+     * This function processes the RLP-encoded transaction receipt, which includes a type byte
+     * prefix followed by the RLP list of receipt fields. The receipt fields are ordered as:
+     *   [status, cumulativeGasUsed, logsBloom, logs]
+     *
+     * The function:
+     *   1. Removes the type byte prefix (first byte).
+     *   2. RLP-decodes the remaining bytes into the receipt fields.
+     *   3. Extracts and returns the `status` and `cumulativeGasUsed` fields.
+     *
+     * ---
+     * Receipt layout:
+     *   [0]: status (uint256) - 1 for success, 0 for failure
+     *   [1]: cumulativeGasUsed (uint256)
+     *   [2]: logsBloom (bytes)
+     *   [3]: logs (array)
+     *
+     * @param rlpTxReceipt The RLP-encoded transaction receipt with type byte prefix.
+     * @return status The transaction status (1 = success, 0 = failure).
+     * @return cumulativeGasUsed The total gas used in the block up to this transaction.
+     */
+    function decodeEVMTxReceipt(
+        bytes memory rlpTxReceipt
+    ) internal pure returns (uint256 status, uint256 cumulativeGasUsed) {
+        // Parse the transaction type from the first byte of the calldata.
+        uint8 transactionType = uint8(rlpTxReceipt[0]);
+
+        if (transactionType < 0xc0) {
+            // Remove the type byte prefix.
+            // See: https://github.com/ethereum/go-ethereum/blob/de5ea2ffd891c603b029d0080ab4626ce81dd91c/core/types/transaction.go#L47
+            rlpTxReceipt = rlpTxReceipt.getSlice(1, rlpTxReceipt.length);
+        }
+
+        // RLP-decode the remaining bytes into fields.
+        // EVM receipt order: [status, cumulativeGasUsed, logsBloom, logs}
+        RLPReader.RLPItem[] memory ls = rlpTxReceipt.toRlpItem().toList();
+
+        // Extract fields from the RLP list.
+        status = ls[0].toUint();
+        cumulativeGasUsed = ls[1].toUint();
     }
 
     /**
