@@ -11,6 +11,7 @@ from web3.types import BlockData
 from src.abi.rofl_adapter import ROFL_ADAPTER_ABI
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
+from src.services.block_state import get_block_state_manager
 from src.services.proof_generator import get_proof_generator
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class DepositListener:
         self._last_rpc_call: Dict[int, float] = {}
         self._min_rpc_interval = 0.05
         self._proof_generator = get_proof_generator(self.chain_rpc_urls)
+        self._block_state = get_block_state_manager()
         self._sapphire_web3 = Web3(Web3.HTTPProvider(self.settings.sapphire_rpc_url))
         self._rofl_adapter_address = Web3.to_checksum_address(self.settings.rofl_adapter_address)
         self._rofl_adapter_contract = self._sapphire_web3.eth.contract(
@@ -206,11 +208,14 @@ class DepositListener:
                 f"tx={tx_hash}, from={from_address}, value={value} wei, block={block_number}"
             )
 
+            self._block_state.add_pending_tx(chain_id, tx_hash, block_number)
+
             web3 = self._get_chain_web3(chain_id)
             tx_receipt = await self._rate_limited_rpc_call(chain_id, web3.eth.get_transaction_receipt, tx_hash)
 
             if tx_receipt["status"] != 1:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
+                self._block_state.complete_pending_tx(chain_id, tx_hash)
                 return
 
             hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
@@ -238,6 +243,8 @@ class DepositListener:
                 f"status={result.status}"
             )
 
+            self._block_state.complete_pending_tx(chain_id, tx_hash)
+
         except Exception:
             logger.exception("Failed to process deposit %s on chain %s", tx_hash, chain_id)
 
@@ -258,11 +265,14 @@ class DepositListener:
                 f"tx={tx_hash}, from={from_address}, value={value}, block={block_number}"
             )
 
+            self._block_state.add_pending_tx(chain_id, tx_hash, block_number)
+
             web3 = self._get_chain_web3(chain_id)
             tx_receipt = await self._rate_limited_rpc_call(chain_id, web3.eth.get_transaction_receipt, tx_hash)
 
             if tx_receipt["status"] != 1:
                 logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
+                self._block_state.complete_pending_tx(chain_id, tx_hash)
                 return
 
             hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
@@ -289,6 +299,8 @@ class DepositListener:
                 f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
                 f"status={result.status}"
             )
+
+            self._block_state.complete_pending_tx(chain_id, tx_hash)
 
         except Exception:
             logger.exception("Failed to process ERC20 deposit %s on chain %s", tx_hash, chain_id)
@@ -325,11 +337,34 @@ class DepositListener:
 
                 if chain_id not in self._last_processed_blocks:
                     try:
-                        block_number = await self._rate_limited_rpc_call(chain_id, lambda: web3.eth.block_number)
+                        current_block_number = await self._rate_limited_rpc_call(chain_id, lambda: web3.eth.block_number)
                         lookback_blocks = 100
-                        start_block = max(0, block_number - lookback_blocks)
+
+                        start_block = self._block_state.get_backfill_start_block(
+                            chain_id, current_block_number, lookback_blocks
+                        )
+
+                        persisted_block = self._block_state.get_last_processed_block(chain_id)
+                        if persisted_block is not None:
+                            blocks_behind = current_block_number - start_block
+                            logger.info(
+                                f"Restored {chain_name} from persisted state, starting scan from block {start_block}, "
+                                f"{blocks_behind} blocks to process"
+                            )
+
+                            pending_txs = self._block_state.get_pending_txs(chain_id)
+                            if pending_txs:
+                                logger.warning(
+                                    f"{chain_name}: {len(pending_txs)} pending transactions will be reprocessed: "
+                                    f"{list(pending_txs.keys())[:5]}{'...' if len(pending_txs) > 5 else ''}"
+                                )
+                        else:
+                            logger.info(
+                                f"Initialized {chain_name} at block {start_block}, scanning last {lookback_blocks} blocks"
+                            )
+                            self._block_state.set_last_processed_block(chain_id, start_block)
+
                         self._last_processed_blocks[chain_id] = start_block
-                        logger.info(f"Initialized {chain_name} at block {start_block}, scanning last {lookback_blocks} blocks")
                     except Exception as e:
                         logger.warning(f"Failed to get block number for {chain_name}: {e}. Retrying...")
                         await asyncio.sleep(poll_interval)
@@ -394,6 +429,7 @@ class DepositListener:
                                 logger.error(f"{chain_name}: Error in block {block_num}: {e}")
 
                         self._last_processed_blocks[chain_id] = to_block
+                        self._block_state.set_last_processed_block(chain_id, to_block)
 
                     except Exception as e:
                         logger.error(f"{chain_name}: Scan error: {e}")
