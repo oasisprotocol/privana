@@ -26,7 +26,7 @@ import {
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract EVMSignerAndVerifier is ProvethVerifier {
+contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     address public evmAddress;
     bytes32 private secretKey;
     IShoyuBashi public shoyuBashi;
@@ -46,9 +46,8 @@ contract EVMSignerAndVerifier is ProvethVerifier {
     using RLPReader for bytes;
     using SliceBytes for bytes;
 
-    constructor(address _shoyubashi) {
-        evmAddress = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
-        secretKey = 0x4bab77fcaf2d66bcb2e52cbf64102eea5fbee93005865faf66f616918f6318ea;
+    constructor(address _shoyubashi) Ownable(msg.sender) {
+        (evmAddress, secretKey) = EthereumUtils.generateKeypair();
         shoyuBashi = IShoyuBashi(_shoyubashi);
     }
 
@@ -407,7 +406,7 @@ contract EVMSignerAndVerifier is ProvethVerifier {
      * @param chainId The EVM chain ID to set the gas price for.
      * @param gasPrice The gas price in wei to set for the specified chain ID.
      */
-    function setGasPrice(uint256 chainId, uint256 gasPrice) public {
+    function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
         require(gasPrice > 0, "Gas price must be greater than zero");
         gasPrices[chainId] = gasPrice;
         emit GasPriceSet(chainId, gasPrice);
