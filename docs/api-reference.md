@@ -112,16 +112,45 @@ Get all expired locks for a user.
   - `expired_locks` (array) – List of expired lock information (same structure as locks in `/funds/locked`).
 
 ### POST `/withdraw`
-Initiate a withdrawal based on the user's EIP-712 signature. The service verifies the signature, generates the withdrawal transaction via the contract, and relays it to the chain RPC mapped to the token.
+Request a withdrawal based on the user's EIP-712 signature. This schedules the withdrawal for resolution in a later block (simulation attack protection). The user's balance is debited immediately and a nonce is reserved for the withdrawal transaction.
 - **Request body**
   - `user_address` (string, required).
   - `token_id` (string, required).
   - `amount` (integer, required).
   - `signature` (string, required) – User EIP-712 `Withdraw` signature.
 - **Response body**
-  - `submission_id` (string) – Hash of the relayed transaction.
+  - `submission_id` (string) – ROFL submission identifier.
   - `status` (string) – Submission status, e.g. `submitted`.
   - `detail` (string, optional) – Metadata such as `chain_id` and `token_address`.
+- **Note:** Withdrawals are automatically resolved by the backend after the required block delay. Frontend clients only need to call this endpoint once. Use `/withdraw/pending/{user_address}` to check withdrawal status.
+
+### GET `/withdraw/pending/{user_address}`
+Get all pending (unresolved) withdrawal requests for a user. Use this to display withdrawal status in the UI.
+- **Path parameters**
+  - `user_address` (string, required) – User's EVM address.
+- **Response body**
+  - `user_address` (string) – Checksummed user address.
+  - `pending_withdrawals` (array) – List of pending withdrawal requests:
+    - `index` (integer) – Withdrawal request index.
+    - `user_address` (string) – Address of the user who requested the withdrawal.
+    - `amount` (string) – Amount requested in base units.
+    - `block_number` (integer) – Block number when the withdrawal was requested.
+    - `token_id` (string) – Token identifier.
+    - `resolved` (boolean) – Always `false` for pending withdrawals.
+    - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
+
+### GET `/withdraw/{index}`
+Get information about a specific withdrawal request.
+- **Path parameters**
+  - `index` (integer, required) – Index of the withdrawal request.
+- **Response body**
+  - `index` (integer) – Withdrawal request index.
+  - `user_address` (string) – Address of the user who requested the withdrawal.
+  - `amount` (string) – Amount requested in base units.
+  - `block_number` (integer) – Block number when the withdrawal was requested.
+  - `token_id` (string) – Token identifier.
+  - `resolved` (boolean) – Whether the withdrawal has been resolved.
+  - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
 
 ### GET `/balances/{user_address}/{token_id}`
 Get the user's balance for a specific token from the contract.
@@ -144,3 +173,26 @@ Get balances for multiple tokens for a user in a single call.
     - `balance` (string) – Balance in base units.
     - `token_symbol` (string) – Token symbol.
     - `chain_id` (string) – Chain ID where the token originates.
+
+### GET `/funds/locked/total/{user_address}/{token_id}`
+Get total locked balance for a specific token across all locks.
+- **Path parameters**
+  - `user_address` (string, required) – User's EVM address.
+  - `token_id` (string, required) – Token identifier.
+- **Response body**
+  - `user_address` (string) – Checksummed address.
+  - `token_id` (string) – Token identifier.
+  - `total_locked` (string) – Total locked amount in base units.
+
+### GET `/tokens/{token_id}`
+Get information about a registered token.
+- **Path parameters**
+  - `token_id` (string, required) – Token identifier (bytes32 hex).
+- **Response body**
+  - `token_id` (string) – Token identifier.
+  - `token_type` (integer) – Token type (0 = NativeEVM, 1 = ERC20).
+  - `token_type_name` (string) – Human-readable token type.
+  - `data` (string) – Raw token data (hex).
+  - `chain_id` (integer, optional) – Chain ID for the token.
+  - `chain_name` (string, optional) – Human-readable chain name.
+  - `token_address` (string, optional) – ERC20 contract address (only for ERC20 tokens).

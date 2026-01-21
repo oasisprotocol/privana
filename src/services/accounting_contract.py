@@ -485,13 +485,13 @@ class AccountingContractService:
 
         return response
 
-    def withdraw(self, payload: Dict) -> SubmissionResult:
+    def request_withdrawal(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
 
-        fn = self.contract.functions.withdraw(
+        fn = self.contract.functions.requestWithdrawal(
             user,
             token,
             amount,
@@ -507,6 +507,62 @@ class AccountingContractService:
         detail = "; ".join(detail_parts)
 
         return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
+
+    def resolve_withdrawal(self, payload: Dict) -> SubmissionResult:
+        index = self._require_positive(payload["index"], "index", allow_zero=True)
+
+        fn = self.contract.functions.resolveWithdrawal(index)
+
+        submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
+
+        return SubmissionResult(submission_id=submission_id, status="submitted")
+
+    def get_withdrawal(self, index: int) -> Dict[str, Any]:
+        contract_reader = self._get_reader_contract()
+        result = contract_reader.functions.withdrawals(index).call()
+
+        return {
+            "index": index,
+            "user_address": result[0],
+            "amount": str(result[1]),
+            "block_number": result[2],
+            "token_id": "0x" + result[3].hex(),
+            "resolved": result[4],
+            "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+        }
+
+    def get_pending_withdrawals(self, user_address: str) -> Dict[str, Any]:
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+
+        pending = []
+        index = 0
+        max_iterations = 10000
+
+        while index < max_iterations:
+            try:
+                result = contract_reader.functions.withdrawals(index).call()
+                withdrawal_user = result[0]
+                resolved = result[4]
+
+                if withdrawal_user.lower() == checksum_user.lower() and not resolved:
+                    pending.append({
+                        "index": index,
+                        "user_address": result[0],
+                        "amount": str(result[1]),
+                        "block_number": result[2],
+                        "token_id": "0x" + result[3].hex(),
+                        "resolved": result[4],
+                        "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+                    })
+                index += 1
+            except Exception:
+                break
+
+        return {
+            "user_address": checksum_user,
+            "pending_withdrawals": pending,
+        }
 
     def unlock_all_expired_locks(self, payload: Dict) -> SubmissionResult:
         """Unlock all expired locks for a user."""
@@ -571,8 +627,7 @@ class AccountingContractService:
             "balances": token_balances,
         }
 
-    def get_total_locked_balance(self, user_address: str, token_id: str) -> int:
-        """Get total locked balance for a specific token."""
+    def get_total_locked_balance(self, user_address: str, token_id: str) -> Dict[str, Any]:
         checksum_user = self._require_address(user_address, "user_address")
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
 
@@ -583,7 +638,38 @@ class AccountingContractService:
             bytes(token_hex)
         ).call()
 
-        return total_locked
+        return {
+            "user_address": checksum_user,
+            "token_id": token_id.lower(),
+            "total_locked": str(total_locked),
+        }
+
+    def get_token_info(self, token_id: str) -> Dict[str, Any]:
+        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+        contract_reader = self._get_reader_contract()
+
+        token_type, token_data = contract_reader.functions.tokens(bytes(token_hex)).call()
+
+        result = {
+            "token_id": token_id.lower(),
+            "token_type": token_type,
+            "token_type_name": "NativeEVM" if token_type == 0 else "ERC20" if token_type == 1 else "Unknown",
+            "data": "0x" + token_data.hex() if token_data else "0x",
+        }
+
+        if token_type == 0 and token_data:
+            chain_id = int.from_bytes(token_data[:32], byteorder="big")
+            result["chain_id"] = chain_id
+            result["chain_name"] = self.chain_names.get(chain_id, f"Chain {chain_id}")
+        elif token_type == 1 and len(token_data) >= 52:
+            chain_id = int.from_bytes(token_data[:32], byteorder="big")
+            token_address = "0x" + token_data[32:52].hex()
+            result["chain_id"] = chain_id
+            result["chain_name"] = self.chain_names.get(chain_id, f"Chain {chain_id}")
+            result["token_address"] = Web3.to_checksum_address(token_address)
+
+        return result
+
 
 
 _service_instance: Optional[AccountingContractService] = None

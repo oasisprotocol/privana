@@ -16,11 +16,15 @@ from src.models.accounting import (
     IncludeDepositResponse,
     LockFundsRequest,
     LockedFundsResponse,
+    PendingWithdrawalsResponse,
+    TokenInfoResponse,
+    TotalLockedBalanceResponse,
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
     UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
+    WithdrawalInfoResponse,
     WithdrawalRequest,
 )
 from src.services.accounting_contract import (
@@ -132,16 +136,44 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
 
 @router.post("/withdraw", response_model=TransactionSubmissionResponse)
 async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissionResponse:
-    """Commit a withdrawal request by validating the user's signature."""
+    """Request a withdrawal by validating the user's signature. Must be resolved in a later block."""
 
     try:
-        submission = await asyncio.to_thread(_service.withdraw, payload.model_dump())
+        submission = await asyncio.to_thread(_service.request_withdrawal, payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to submit withdrawal request")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get("/withdraw/pending/{user_address}", response_model=PendingWithdrawalsResponse)
+async def get_pending_withdrawals(user_address: str) -> PendingWithdrawalsResponse:
+    """Get all pending (unresolved) withdrawal requests for a user."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_pending_withdrawals, user_address)
+        return PendingWithdrawalsResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get pending withdrawals")
+        raise HTTPException(status_code=500, detail="Failed to retrieve pending withdrawals") from exc
+
+
+@router.get("/withdraw/{index}", response_model=WithdrawalInfoResponse)
+async def get_withdrawal_info(index: int) -> WithdrawalInfoResponse:
+    """Get information about a specific withdrawal request."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_withdrawal, index)
+        return WithdrawalInfoResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get withdrawal info")
+        raise HTTPException(status_code=500, detail="Failed to retrieve withdrawal info") from exc
 
 
 @router.get("/funds/locked/{user_address}", response_model=LockedFundsResponse)
@@ -230,3 +262,33 @@ async def get_batch_balances(payload: BatchBalancesRequest) -> BatchBalancesResp
     except Exception as exc:
         logger.exception("Failed to get batch balances")
         raise HTTPException(status_code=500, detail="Failed to retrieve balances") from exc
+
+
+@router.get("/funds/locked/total/{user_address}/{token_id}", response_model=TotalLockedBalanceResponse)
+async def get_total_locked_balance(user_address: str, token_id: str) -> TotalLockedBalanceResponse:
+    """Get total locked balance for a specific token across all locks."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_total_locked_balance, user_address, token_id)
+        return TotalLockedBalanceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get total locked balance")
+        raise HTTPException(status_code=500, detail="Failed to retrieve total locked balance") from exc
+
+
+@router.get("/tokens/{token_id}", response_model=TokenInfoResponse)
+async def get_token_info(token_id: str) -> TokenInfoResponse:
+    """Get information about a registered token."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_token_info, token_id)
+        return TokenInfoResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get token info")
+        raise HTTPException(status_code=500, detail="Failed to retrieve token info") from exc
+
+

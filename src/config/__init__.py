@@ -89,6 +89,9 @@ def load_settings(refresh: bool = False) -> Settings:
             deposit_poll_interval=_get_int(
                 "DEPOSIT_POLL_INTERVAL", _defaults.deposit_poll_interval
             ),
+            withdrawal_poll_interval=_get_int(
+                "WITHDRAWAL_POLL_INTERVAL", _defaults.withdrawal_poll_interval
+            ),
         )
     return _settings
 

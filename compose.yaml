@@ -15,6 +15,7 @@ services:
       - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
       - ACCOUNTING_GAS_LIMIT=${ACCOUNTING_GAS_LIMIT:-500000}
       - DEPOSIT_POLL_INTERVAL=${DEPOSIT_POLL_INTERVAL:-1}
+      - WITHDRAWAL_POLL_INTERVAL=${WITHDRAWAL_POLL_INTERVAL:-12}
       - BLOCK_STATE_DIR=/data/deposit-listener
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock

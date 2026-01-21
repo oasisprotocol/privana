@@ -153,6 +153,31 @@ class WithdrawalRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class WithdrawalInfo(BaseModel):
+    """Information about a single withdrawal request."""
+
+    index: int
+    user_address: str
+    amount: str
+    block_number: int
+    token_id: str
+    resolved: bool
+    tx_identifier: str
+
+
+class WithdrawalInfoResponse(WithdrawalInfo):
+    """Response containing withdrawal information."""
+
+    pass
+
+
+class PendingWithdrawalsResponse(BaseModel):
+    """Response containing pending withdrawals for a user."""
+
+    user_address: str
+    pending_withdrawals: list[WithdrawalInfo]
+
+
 class TransactionSubmissionResponse(BaseModel):
     """Generic response for contract transaction submissions."""
 
@@ -220,3 +245,25 @@ class BatchBalancesResponse(BaseModel):
 
     user_address: str
     balances: list[TokenBalance]
+
+
+class TotalLockedBalanceResponse(BaseModel):
+    """Response containing total locked balance for a token."""
+
+    user_address: str
+    token_id: str
+    total_locked: str
+
+
+class TokenInfoResponse(BaseModel):
+    """Response containing token information."""
+
+    token_id: str
+    token_type: int
+    token_type_name: str
+    data: str
+    chain_id: Optional[int] = None
+    chain_name: Optional[str] = None
+    token_address: Optional[str] = None
+
+
