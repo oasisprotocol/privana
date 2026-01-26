@@ -60,10 +60,10 @@ contract EIP712SignatureVerifier is EIP712 {
             "TransferLocked(address userAddress,address toAddress,uint256 lockIndex,uint256 amount)"
         );
 
-    /// @notice EIP-712 type hash for adding funds to an existing lock
-    bytes32 private constant ADD_TO_LOCK_TYPEHASH =
+    /// @notice EIP-712 type hash for modifying an existing lock (add funds and/or extend expiry)
+    bytes32 private constant MODIFY_LOCK_TYPEHASH =
         keccak256(
-            "AddToLock(address userAddress,uint256 lockIndex,uint256 amount,uint256 newExpiry)"
+            "ModifyLock(address userAddress,uint256 lockIndex,uint256 amount,uint256 newExpiry)"
         );
 
     /**
@@ -215,7 +215,7 @@ contract EIP712SignatureVerifier is EIP712 {
         usedSignatures[signature] = true;
     }
 
-    function verifyAddToLockSignature(
+    function verifyModifyLockSignature(
         address userAddress,
         uint256 lockIndex,
         uint256 amount,
@@ -224,7 +224,7 @@ contract EIP712SignatureVerifier is EIP712 {
     ) public {
         bytes32 structHash = keccak256(
             abi.encode(
-                ADD_TO_LOCK_TYPEHASH,
+                MODIFY_LOCK_TYPEHASH,
                 userAddress,
                 lockIndex,
                 amount,

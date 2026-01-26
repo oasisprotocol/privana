@@ -18,7 +18,7 @@ const types = {
     { name: "amount", type: "uint256" },
     { name: "expiry", type: "uint256" },
   ],
-  AddToLock: [
+  ModifyLock: [
     { name: "userAddress", type: "address" },
     { name: "lockIndex", type: "uint256" },
     { name: "amount", type: "uint256" },
@@ -492,7 +492,7 @@ describe('Accounting', function () {
 
 });
 
-describe('AddToLock', function () {
+describe('ModifyLock', function () {
   let accounting: Accounting;
   let mockShoyubashi: MockShoyuBashi;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
@@ -593,9 +593,9 @@ describe('AddToLock', function () {
     expect(locksBefore[0][2]).to.equal(parseUsdt("1"));
 
     const newExpiry = expiry + 7200;
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -604,12 +604,12 @@ describe('AddToLock', function () {
       }
     );
 
-    const tx = await accounting.addToLock(
+    const tx = await accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("2"),
       newExpiry,
-      addToLockSignature
+      modifyLockSignature
     );
     await tx.wait();
 
@@ -625,9 +625,9 @@ describe('AddToLock', function () {
     const locks = await accounting.getUserLocks(userWallet1.address);
     const currentExpiry = locks[0][3];
 
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -638,12 +638,12 @@ describe('AddToLock', function () {
 
     const lockAmountBefore = locks[0][2];
 
-    await accounting.addToLock(
+    await accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("0.5"),
       currentExpiry,
-      addToLockSignature
+      modifyLockSignature
     );
 
     const locksAfter = await accounting.getUserLocks(userWallet1.address);
@@ -651,12 +651,47 @@ describe('AddToLock', function () {
     expect(locksAfter[0][3]).to.equal(currentExpiry);
   });
 
-  it("Should reject addToLock with invalid lock index", async function () {
+  it("User should be able to extend expiry without adding funds", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = Number(locks[0][3]);
+    const newExpiry = currentExpiry + 3600;
+    const lockAmountBefore = locks[0][2];
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: 0,
+        newExpiry
+      }
+    );
+
+    const balanceBefore = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
+
+    await accounting.modifyLock(
+      userWallet1.address,
+      0,
+      0,
+      newExpiry,
+      modifyLockSignature
+    );
+
+    const balanceAfter = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
+    const locksAfter = await accounting.getUserLocks(userWallet1.address);
+
+    expect(balanceAfter).to.equal(balanceBefore);
+    expect(locksAfter[0][2]).to.equal(lockAmountBefore);
+    expect(locksAfter[0][3]).to.equal(newExpiry);
+  });
+
+  it("Should reject modifyLock with invalid lock index", async function () {
     const expiry = Math.floor(Date.now() / 1000) + 3600;
 
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 999,
@@ -665,23 +700,23 @@ describe('AddToLock', function () {
       }
     );
 
-    await expect(accounting.addToLock(
+    await expect(accounting.modifyLock(
       userWallet1.address,
       999,
       parseUsdt("1"),
       expiry,
-      addToLockSignature
+      modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidLockIndex");
   });
 
-  it("Should reject addToLock with expiry earlier than current", async function () {
+  it("Should reject modifyLock with earlier expiry", async function () {
     const locks = await accounting.getUserLocks(userWallet1.address);
     const currentExpiry = Number(locks[0][3]);
     const earlierExpiry = currentExpiry - 1000;
 
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -690,22 +725,22 @@ describe('AddToLock', function () {
       }
     );
 
-    await expect(accounting.addToLock(
+    await expect(accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("1"),
       earlierExpiry,
-      addToLockSignature
+      modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidExpiry");
   });
 
-  it("Should reject addToLock with zero amount", async function () {
+  it("Should reject modifyLock with zero amount and same expiry (no-op)", async function () {
     const locks = await accounting.getUserLocks(userWallet1.address);
     const currentExpiry = locks[0][3];
 
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -714,22 +749,22 @@ describe('AddToLock', function () {
       }
     );
 
-    await expect(accounting.addToLock(
+    await expect(accounting.modifyLock(
       userWallet1.address,
       0,
       0,
       currentExpiry,
-      addToLockSignature
+      modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidAmount");
   });
 
-  it("Should reject addToLock with insufficient balance", async function () {
+  it("Should reject modifyLock with insufficient balance", async function () {
     const locks = await accounting.getUserLocks(userWallet1.address);
     const currentExpiry = locks[0][3];
 
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -738,22 +773,22 @@ describe('AddToLock', function () {
       }
     );
 
-    await expect(accounting.addToLock(
+    await expect(accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("1000000"),
       currentExpiry,
-      addToLockSignature
+      modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InsufficientBalance");
   });
 
-  it("Should reject addToLock with wrong signer", async function () {
+  it("Should reject modifyLock with wrong signer", async function () {
     const locks = await accounting.getUserLocks(userWallet1.address);
     const currentExpiry = locks[0][3];
 
-    const addToLockSignature = await userWallet2.signTypedData(
+    const modifyLockSignature = await userWallet2.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -762,23 +797,23 @@ describe('AddToLock', function () {
       }
     );
 
-    await expect(accounting.addToLock(
+    await expect(accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("0.1"),
       currentExpiry,
-      addToLockSignature
+      modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidSignature");
   });
 
-  it("Should reject replay of addToLock signature", async function () {
+  it("Should reject replay of modifyLock signature", async function () {
     const locks = await accounting.getUserLocks(userWallet1.address);
     const currentExpiry = Number(locks[0][3]);
     const newExpiry = currentExpiry + 100;
 
-    const addToLockSignature = await userWallet1.signTypedData(
+    const modifyLockSignature = await userWallet1.signTypedData(
       domain,
-      { AddToLock: types.AddToLock },
+      { ModifyLock: types.ModifyLock },
       {
         userAddress: userWallet1.address,
         lockIndex: 0,
@@ -787,20 +822,20 @@ describe('AddToLock', function () {
       }
     );
 
-    await accounting.addToLock(
+    await accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("0.1"),
       newExpiry,
-      addToLockSignature
+      modifyLockSignature
     );
 
-    await expect(accounting.addToLock(
+    await expect(accounting.modifyLock(
       userWallet1.address,
       0,
       parseUsdt("0.1"),
       newExpiry,
-      addToLockSignature
+      modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "UsedSignature");
   });
 

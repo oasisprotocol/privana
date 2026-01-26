@@ -52,11 +52,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 lockIndex
     );
 
-    event LockFundsAdded(
+    event LockModified(
         address indexed userAddress,
         address indexed serviceAddress,
         bytes32 indexed tokenId,
-        uint256 amount,
+        uint256 amountAdded,
         uint256 newExpiry,
         uint256 lockIndex
     );
@@ -314,15 +314,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         );
     }
 
-    function addToLock(
+    function modifyLock(
         address userAddress,
         uint256 lockIndex,
         uint256 amount,
         uint256 newExpiry,
         bytes calldata signature
     ) public {
-        if (amount == 0) revert InvalidAmount();
-
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
@@ -332,7 +330,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
         if (newExpiry < lock.expiry) revert InvalidExpiry();
 
-        EIP712SignatureVerifier.verifyAddToLockSignature(
+        if (amount == 0 && newExpiry == lock.expiry) revert InvalidAmount();
+
+        EIP712SignatureVerifier.verifyModifyLockSignature(
             userAddress,
             lockIndex,
             amount,
@@ -340,14 +340,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             signature
         );
 
-        if (balances[userAddress][lock.tokenId] < amount)
-            revert InsufficientBalance();
+        if (amount > 0) {
+            if (balances[userAddress][lock.tokenId] < amount)
+                revert InsufficientBalance();
 
-        balances[userAddress][lock.tokenId] -= amount;
-        lock.amount += amount;
+            balances[userAddress][lock.tokenId] -= amount;
+            lock.amount += amount;
+        }
+
         lock.expiry = newExpiry;
 
-        emit LockFundsAdded(
+        emit LockModified(
             userAddress,
             lock.serviceId,
             lock.tokenId,

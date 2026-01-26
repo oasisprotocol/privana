@@ -204,7 +204,7 @@ ACCOUNTING_ABI = [
             {
                 "indexed": False,
                 "internalType": "uint256",
-                "name": "amount",
+                "name": "amountAdded",
                 "type": "uint256",
             },
             {
@@ -220,7 +220,7 @@ ACCOUNTING_ABI = [
                 "type": "uint256",
             },
         ],
-        "name": "LockFundsAdded",
+        "name": "LockModified",
         "type": "event",
     },
     {
@@ -398,7 +398,7 @@ ACCOUNTING_ABI = [
             {"internalType": "uint256", "name": "newExpiry", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
-        "name": "addToLock",
+        "name": "modifyLock",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
