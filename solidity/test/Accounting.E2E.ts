@@ -18,6 +18,12 @@ const types = {
     { name: "amount", type: "uint256" },
     { name: "expiry", type: "uint256" },
   ],
+  ModifyLock: [
+    { name: "userAddress", type: "address" },
+    { name: "lockIndex", type: "uint256" },
+    { name: "amount", type: "uint256" },
+    { name: "newExpiry", type: "uint256" },
+  ],
   TransferLocked: [
     { name: "userAddress", type: "address" },
     { name: "toAddress", type: "address" },
@@ -484,4 +490,384 @@ describe('Accounting', function () {
 
   });
 
+});
+
+describe('ModifyLock', function () {
+  let accounting: Accounting;
+  let mockShoyubashi: MockShoyuBashi;
+  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let userWallet1: Wallet;
+  let userWallet2: Wallet;
+
+  before(async () => {
+    const provider = ethers.provider;
+
+    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
+    mockShoyubashi = await MockShoyubashiFactory.deploy();
+    await mockShoyubashi.waitForDeployment();
+
+    const AccountingFactory = await ethers.getContractFactory('Accounting');
+    accounting = await AccountingFactory.deploy(await mockShoyubashi.getAddress());
+    await accounting.waitForDeployment();
+
+    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
+      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
+    );
+
+    userWallet1 = hdNodeWallet.connect(provider);
+    userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(provider);
+
+    const domainTuple = await accounting.eip712Domain();
+    domain = {
+      name: domainTuple[1],
+      version: domainTuple[2],
+      chainId: Number(domainTuple[3]),
+      verifyingContract: domainTuple[4],
+    }
+
+    const data = ethers.concat([
+      ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+    ]);
+
+    await accounting.setTokenInfo({
+      tokenType: TEST_TOKEN.tokenType,
+      data: data
+    });
+
+    const depositAddress = await accounting.evmAddress();
+    const baseProvider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+    const blockNumber = 32680090;
+    const transactionIndex = 45;
+
+    const { rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
+      baseProvider,
+      blockNumber,
+      transactionIndex
+    );
+
+    const { proof: receiptProof } = await getReceiptInclusionProof(
+      baseProvider,
+      blockNumber,
+      transactionIndex
+    );
+
+    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
+
+    await accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+      rlpBlockHeader,
+      transactionIndexRlp: getRlpUint(transactionIndex),
+      transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+    }, {
+      receiptIndexRlp: getRlpUint(transactionIndex),
+      receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+    });
+  });
+
+  it("User should be able to add funds to an existing lock", async function () {
+    const expiry = Math.floor(Date.now() / 1000) + 3600;
+
+    const lockSignature = await userWallet1.signTypedData(
+      domain,
+      { Lock: types.Lock },
+      {
+        userAddress: userWallet1.address,
+        serviceAddress: userWallet2.address,
+        tokenId: TEST_TOKEN.tokenId,
+        amount: parseUsdt("1"),
+        expiry
+      }
+    );
+
+    await accounting.createLock(
+      userWallet1.address,
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("1"),
+      expiry,
+      lockSignature
+    );
+
+    const balanceBefore = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
+    const locksBefore = await accounting.getUserLocks(userWallet1.address);
+    expect(locksBefore[0][2]).to.equal(parseUsdt("1"));
+
+    const newExpiry = expiry + 7200;
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: parseUsdt("2"),
+        newExpiry
+      }
+    );
+
+    const tx = await accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("2"),
+      newExpiry,
+      modifyLockSignature
+    );
+    await tx.wait();
+
+    const balanceAfter = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
+    const locksAfter = await accounting.getUserLocks(userWallet1.address);
+
+    expect(balanceAfter).to.equal(balanceBefore - parseUsdt("2"));
+    expect(locksAfter[0][2]).to.equal(parseUsdt("3"));
+    expect(locksAfter[0][3]).to.equal(newExpiry);
+  });
+
+  it("User should be able to add funds while keeping the same expiry", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = locks[0][3];
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: parseUsdt("0.5"),
+        newExpiry: currentExpiry
+      }
+    );
+
+    const lockAmountBefore = locks[0][2];
+
+    await accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("0.5"),
+      currentExpiry,
+      modifyLockSignature
+    );
+
+    const locksAfter = await accounting.getUserLocks(userWallet1.address);
+    expect(locksAfter[0][2]).to.equal(lockAmountBefore + parseUsdt("0.5"));
+    expect(locksAfter[0][3]).to.equal(currentExpiry);
+  });
+
+  it("User should be able to extend expiry without adding funds", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = Number(locks[0][3]);
+    const newExpiry = currentExpiry + 3600;
+    const lockAmountBefore = locks[0][2];
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: 0,
+        newExpiry
+      }
+    );
+
+    const balanceBefore = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
+
+    await accounting.modifyLock(
+      userWallet1.address,
+      0,
+      0,
+      newExpiry,
+      modifyLockSignature
+    );
+
+    const balanceAfter = await accounting.balances(userWallet1.address, TEST_TOKEN.tokenId);
+    const locksAfter = await accounting.getUserLocks(userWallet1.address);
+
+    expect(balanceAfter).to.equal(balanceBefore);
+    expect(locksAfter[0][2]).to.equal(lockAmountBefore);
+    expect(locksAfter[0][3]).to.equal(newExpiry);
+  });
+
+  it("Should reject modifyLock with invalid lock index", async function () {
+    const expiry = Math.floor(Date.now() / 1000) + 3600;
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 999,
+        amount: parseUsdt("1"),
+        newExpiry: expiry
+      }
+    );
+
+    await expect(accounting.modifyLock(
+      userWallet1.address,
+      999,
+      parseUsdt("1"),
+      expiry,
+      modifyLockSignature
+    )).to.be.revertedWithCustomError(accounting, "InvalidLockIndex");
+  });
+
+  it("Should reject modifyLock with earlier expiry", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = Number(locks[0][3]);
+    const earlierExpiry = currentExpiry - 1000;
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: parseUsdt("1"),
+        newExpiry: earlierExpiry
+      }
+    );
+
+    await expect(accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("1"),
+      earlierExpiry,
+      modifyLockSignature
+    )).to.be.revertedWithCustomError(accounting, "InvalidExpiry");
+  });
+
+  it("Should reject modifyLock with zero amount and same expiry (no-op)", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = locks[0][3];
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: 0,
+        newExpiry: currentExpiry
+      }
+    );
+
+    await expect(accounting.modifyLock(
+      userWallet1.address,
+      0,
+      0,
+      currentExpiry,
+      modifyLockSignature
+    )).to.be.revertedWithCustomError(accounting, "InvalidAmount");
+  });
+
+  it("Should reject modifyLock with insufficient balance", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = locks[0][3];
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: parseUsdt("1000000"),
+        newExpiry: currentExpiry
+      }
+    );
+
+    await expect(accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("1000000"),
+      currentExpiry,
+      modifyLockSignature
+    )).to.be.revertedWithCustomError(accounting, "InsufficientBalance");
+  });
+
+  it("Should reject modifyLock with wrong signer", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = locks[0][3];
+
+    const modifyLockSignature = await userWallet2.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: parseUsdt("0.1"),
+        newExpiry: currentExpiry
+      }
+    );
+
+    await expect(accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("0.1"),
+      currentExpiry,
+      modifyLockSignature
+    )).to.be.revertedWithCustomError(accounting, "InvalidSignature");
+  });
+
+  it("Should reject replay of modifyLock signature", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const currentExpiry = Number(locks[0][3]);
+    const newExpiry = currentExpiry + 100;
+
+    const modifyLockSignature = await userWallet1.signTypedData(
+      domain,
+      { ModifyLock: types.ModifyLock },
+      {
+        userAddress: userWallet1.address,
+        lockIndex: 0,
+        amount: parseUsdt("0.1"),
+        newExpiry
+      }
+    );
+
+    await accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("0.1"),
+      newExpiry,
+      modifyLockSignature
+    );
+
+    await expect(accounting.modifyLock(
+      userWallet1.address,
+      0,
+      parseUsdt("0.1"),
+      newExpiry,
+      modifyLockSignature
+    )).to.be.revertedWithCustomError(accounting, "UsedSignature");
+  });
+
+  it("Service should still be able to transfer from lock after funds are added", async function () {
+    const locks = await accounting.getUserLocks(userWallet1.address);
+    const lockAmount = locks[0][2];
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { TransferLocked: types.TransferLocked },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet2.address,
+        lockIndex: 0,
+        amount: parseUsdt("0.5"),
+      }
+    );
+
+    const balance2Before = await accounting.balances(userWallet2.address, TEST_TOKEN.tokenId);
+
+    await accounting.transferFromLock(
+      userWallet1.address,
+      userWallet2.address,
+      0,
+      parseUsdt("0.5"),
+      signature
+    );
+
+    const balance2After = await accounting.balances(userWallet2.address, TEST_TOKEN.tokenId);
+    const locksAfter = await accounting.getUserLocks(userWallet1.address);
+
+    expect(balance2After).to.equal(balance2Before + parseUsdt("0.5"));
+    expect(locksAfter[0][2]).to.equal(lockAmount - parseUsdt("0.5"));
+  });
 });

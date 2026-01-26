@@ -371,6 +371,24 @@ class AccountingContractService:
         )
         return self._submit(fn._encode_transaction_data())
 
+    def modify_lock(self, payload: Dict) -> SubmissionResult:
+        user = self._require_address(payload["user_address"], "user_address")
+        lock_index = self._require_positive(
+            payload["lock_index"], "lock_index", allow_zero=True
+        )
+        amount = self._require_positive(payload["amount"], "amount", allow_zero=True)
+        new_expiry = self._require_positive(payload["new_expiry"], "new_expiry")
+        signature = self._require_hex(payload["signature"], "signature")
+
+        fn = self.contract.functions.modifyLock(
+            user,
+            lock_index,
+            amount,
+            new_expiry,
+            signature,
+        )
+        return self._submit(fn._encode_transaction_data())
+
     def transfer_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
         to_addr = self._require_address(payload["to_address"], "to_address")

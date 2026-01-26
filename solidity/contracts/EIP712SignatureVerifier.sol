@@ -60,6 +60,12 @@ contract EIP712SignatureVerifier is EIP712 {
             "TransferLocked(address userAddress,address toAddress,uint256 lockIndex,uint256 amount)"
         );
 
+    /// @notice EIP-712 type hash for modifying an existing lock (add funds and/or extend expiry)
+    bytes32 private constant MODIFY_LOCK_TYPEHASH =
+        keccak256(
+            "ModifyLock(address userAddress,uint256 lockIndex,uint256 amount,uint256 newExpiry)"
+        );
+
     /**
      * @notice Verifies a user's EIP-712 signature for withdrawing funds.
      *
@@ -199,6 +205,35 @@ contract EIP712SignatureVerifier is EIP712 {
         bytes32 digest = _hashTypedDataV4(structHash);
         address signer = ECDSA.recover(digest, signature);
         if (signer != serviceAddress) {
+            revert InvalidSignature();
+        }
+
+        if (usedSignatures[signature]) {
+            revert UsedSignature();
+        }
+
+        usedSignatures[signature] = true;
+    }
+
+    function verifyModifyLockSignature(
+        address userAddress,
+        uint256 lockIndex,
+        uint256 amount,
+        uint256 newExpiry,
+        bytes calldata signature
+    ) public {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                MODIFY_LOCK_TYPEHASH,
+                userAddress,
+                lockIndex,
+                amount,
+                newExpiry
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != userAddress) {
             revert InvalidSignature();
         }
 

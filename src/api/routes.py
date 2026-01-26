@@ -14,8 +14,9 @@ from src.models.accounting import (
     ExpiredLocksResponse,
     IncludeDepositRequest,
     IncludeDepositResponse,
-    LockFundsRequest,
     LockedFundsResponse,
+    LockFundsRequest,
+    ModifyLockRequest,
     PendingWithdrawalsResponse,
     TokenInfoResponse,
     TotalLockedBalanceResponse,
@@ -31,7 +32,6 @@ from src.services.accounting_contract import (
     SubmissionResult,
     get_accounting_contract_service,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,20 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to lock funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/modify-lock", response_model=TransactionSubmissionResponse)
+async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionResponse:
+    """Modify an existing lock by adding funds and/or extending the expiry."""
+
+    try:
+        submission = await asyncio.to_thread(_service.modify_lock, payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to modify lock")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
@@ -290,5 +304,3 @@ async def get_token_info(token_id: str) -> TokenInfoResponse:
     except Exception as exc:
         logger.exception("Failed to get token info")
         raise HTTPException(status_code=500, detail="Failed to retrieve token info") from exc
-
-
