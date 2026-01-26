@@ -105,6 +105,20 @@ class LockFundsRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class AddToLockRequest(BaseModel):
+    """Payload for adding funds to an existing lock."""
+
+    user_address: str = Field(..., min_length=1)
+    lock_index: int = Field(..., ge=0)
+    amount: int = Field(..., gt=0)
+    new_expiry: int = Field(..., gt=0)
+    signature: str
+
+    @field_validator("signature")
+    def _normalise_atl_signature(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
 class TransferFundsRequest(BaseModel):
     """Payload for transferring funds between users."""
 

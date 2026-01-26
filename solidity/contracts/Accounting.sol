@@ -52,6 +52,15 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         uint256 lockIndex
     );
 
+    event LockFundsAdded(
+        address indexed userAddress,
+        address indexed serviceAddress,
+        bytes32 indexed tokenId,
+        uint256 amount,
+        uint256 newExpiry,
+        uint256 lockIndex
+    );
+
     event BalanceTransferred(
         address indexed fromAddress,
         address indexed toAddress,
@@ -301,6 +310,49 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             tokenId,
             amount,
             expiry,
+            lockIndex
+        );
+    }
+
+    function addToLock(
+        address userAddress,
+        uint256 lockIndex,
+        uint256 amount,
+        uint256 newExpiry,
+        bytes calldata signature
+    ) public {
+        if (amount == 0) revert InvalidAmount();
+
+        UserInfo storage uInfo = userInfo[userAddress];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        if (lockIndex >= locks.length) revert InvalidLockIndex();
+
+        FundLock storage lock = locks[lockIndex];
+
+        if (newExpiry < lock.expiry) revert InvalidExpiry();
+
+        EIP712SignatureVerifier.verifyAddToLockSignature(
+            userAddress,
+            lockIndex,
+            amount,
+            newExpiry,
+            signature
+        );
+
+        if (balances[userAddress][lock.tokenId] < amount)
+            revert InsufficientBalance();
+
+        balances[userAddress][lock.tokenId] -= amount;
+        lock.amount += amount;
+        lock.expiry = newExpiry;
+
+        emit LockFundsAdded(
+            userAddress,
+            lock.serviceId,
+            lock.tokenId,
+            amount,
+            newExpiry,
             lockIndex
         );
     }

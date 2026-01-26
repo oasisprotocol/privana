@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException
 
 from src.models.accounting import (
+    AddToLockRequest,
     BatchBalancesRequest,
     BatchBalancesResponse,
     DepositQuoteRequest,
@@ -14,8 +15,8 @@ from src.models.accounting import (
     ExpiredLocksResponse,
     IncludeDepositRequest,
     IncludeDepositResponse,
-    LockFundsRequest,
     LockedFundsResponse,
+    LockFundsRequest,
     PendingWithdrawalsResponse,
     TokenInfoResponse,
     TotalLockedBalanceResponse,
@@ -31,7 +32,6 @@ from src.services.accounting_contract import (
     SubmissionResult,
     get_accounting_contract_service,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,20 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to lock funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/add-to-lock", response_model=TransactionSubmissionResponse)
+async def add_to_lock(payload: AddToLockRequest) -> TransactionSubmissionResponse:
+    """Add funds to an existing lock with optional expiry extension."""
+
+    try:
+        submission = await asyncio.to_thread(_service.add_to_lock, payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to add to lock")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
@@ -290,5 +304,3 @@ async def get_token_info(token_id: str) -> TokenInfoResponse:
     except Exception as exc:
         logger.exception("Failed to get token info")
         raise HTTPException(status_code=500, detail="Failed to retrieve token info") from exc
-
-

@@ -52,6 +52,19 @@ Lock user funds for a service using the user's EIP-712 signature.
   - `status` (string).
   - `detail` (string, optional).
 
+### POST `/funds/add-to-lock`
+Add funds to an existing lock with optional expiry extension.
+- **Request body**
+  - `user_address` (string, required) – Owner of the lock.
+  - `lock_index` (integer, required) – Index of the lock to add funds to.
+  - `amount` (integer, required) – Amount to add in base units.
+  - `new_expiry` (integer, required) – New expiry timestamp (must be >= current expiry).
+  - `signature` (string, required) – User EIP-712 `AddToLock` signature.
+- **Response body**
+  - `submission_id` (string).
+  - `status` (string).
+  - `detail` (string, optional).
+
 ### GET `/funds/locked/{user_address}`
 Get locked funds for a user, optionally filtered by service address.
 - **Query parameters**
