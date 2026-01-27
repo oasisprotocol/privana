@@ -9,7 +9,7 @@ task("sign")
   .addOptionalParam("to", "Recipient address (required for transfer/transferlocked)")
   .addOptionalParam("service", "Service address (required for lock)")
   .addOptionalParam("expiry", "Lock expiry timestamp (optional for lock, defaults to 1 hour from now)")
-  .addOptionalParam("lockindex", "Lock index (required for transferlocked)")
+  .addOptionalParam("lockid", "Lock ID (required for transferlocked)")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const accounting = await hre.ethers.getContractAt("Accounting", args.contract);
@@ -75,21 +75,21 @@ task("sign")
         break;
 
       case "transferlocked":
-        if (!args.to || args.lockindex === undefined) {
-          throw new Error("TransferLocked requires: to and lockindex");
+        if (!args.to || args.lockid === undefined) {
+          throw new Error("TransferLocked requires: to and lockid");
         }
         types = {
           TransferLocked: [
             { name: "userAddress", type: "address" },
             { name: "toAddress", type: "address" },
-            { name: "lockIndex", type: "uint256" },
+            { name: "lockId", type: "uint256" },
             { name: "amount", type: "uint256" },
           ]
         };
         message = {
           userAddress: args.user,
           toAddress: args.to,
-          lockIndex: args.lockindex,
+          lockId: args.lockid,
           amount: amountWei,
         };
         break;

@@ -35,6 +35,7 @@ ACCOUNTING_ABI = [
     {"inputs": [], "name": "InvalidDeposit", "type": "error"},
     {"inputs": [], "name": "InvalidExpiry", "type": "error"},
     {"inputs": [], "name": "InvalidLockIndex", "type": "error"},
+    {"inputs": [], "name": "InvalidLockId", "type": "error"},
     {"inputs": [], "name": "InvalidShortString", "type": "error"},
     {"inputs": [], "name": "InvalidSignature", "type": "error"},
     {"inputs": [], "name": "InvalidTransactionData", "type": "error"},
@@ -173,7 +174,7 @@ ACCOUNTING_ABI = [
             {
                 "indexed": False,
                 "internalType": "uint256",
-                "name": "lockIndex",
+                "name": "lockId",
                 "type": "uint256",
             },
         ],
@@ -216,7 +217,7 @@ ACCOUNTING_ABI = [
             {
                 "indexed": False,
                 "internalType": "uint256",
-                "name": "lockIndex",
+                "name": "lockId",
                 "type": "uint256",
             },
         ],
@@ -247,7 +248,7 @@ ACCOUNTING_ABI = [
             {
                 "indexed": False,
                 "internalType": "uint256",
-                "name": "lockIndex",
+                "name": "lockId",
                 "type": "uint256",
             },
         ],
@@ -290,7 +291,7 @@ ACCOUNTING_ABI = [
             {
                 "indexed": False,
                 "internalType": "uint256",
-                "name": "lockIndex",
+                "name": "lockId",
                 "type": "uint256",
             },
         ],
@@ -393,7 +394,7 @@ ACCOUNTING_ABI = [
     {
         "inputs": [
             {"internalType": "address", "name": "userAddress", "type": "address"},
-            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
+            {"internalType": "uint256", "name": "lockId", "type": "uint256"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "uint256", "name": "newExpiry", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
@@ -578,6 +579,7 @@ ACCOUNTING_ABI = [
         "outputs": [
             {
                 "components": [
+                    {"internalType": "uint256", "name": "lockId", "type": "uint256"},
                     {"internalType": "address", "name": "serviceId", "type": "address"},
                     {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
                     {"internalType": "uint256", "name": "amount", "type": "uint256"},
@@ -629,6 +631,7 @@ ACCOUNTING_ABI = [
         "outputs": [
             {
                 "components": [
+                    {"internalType": "uint256", "name": "lockId", "type": "uint256"},
                     {"internalType": "address", "name": "serviceId", "type": "address"},
                     {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
                     {"internalType": "uint256", "name": "amount", "type": "uint256"},
@@ -730,7 +733,7 @@ ACCOUNTING_ABI = [
         "inputs": [
             {"internalType": "address", "name": "userAddress", "type": "address"},
             {"internalType": "address", "name": "toAddress", "type": "address"},
-            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
+            {"internalType": "uint256", "name": "lockId", "type": "uint256"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
@@ -760,7 +763,7 @@ ACCOUNTING_ABI = [
     {
         "inputs": [
             {"internalType": "address", "name": "userAddress", "type": "address"},
-            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
+            {"internalType": "uint256", "name": "lockId", "type": "uint256"},
         ],
         "name": "unlockSingleLock",
         "outputs": [],
@@ -889,7 +892,7 @@ ACCOUNTING_ABI = [
             {"internalType": "address", "name": "serviceAddress", "type": "address"},
             {"internalType": "address", "name": "userAddress", "type": "address"},
             {"internalType": "address", "name": "toAddress", "type": "address"},
-            {"internalType": "uint256", "name": "lockIndex", "type": "uint256"},
+            {"internalType": "uint256", "name": "lockId", "type": "uint256"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],

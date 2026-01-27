@@ -373,16 +373,14 @@ class AccountingContractService:
 
     def modify_lock(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
-        lock_index = self._require_positive(
-            payload["lock_index"], "lock_index", allow_zero=True
-        )
+        lock_id = self._require_positive(payload["lock_id"], "lock_id")
         amount = self._require_positive(payload["amount"], "amount", allow_zero=True)
         new_expiry = self._require_positive(payload["new_expiry"], "new_expiry")
         signature = self._require_hex(payload["signature"], "signature")
 
         fn = self.contract.functions.modifyLock(
             user,
-            lock_index,
+            lock_id,
             amount,
             new_expiry,
             signature,
@@ -407,9 +405,7 @@ class AccountingContractService:
 
     def transfer_locked_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
-        lock_index = self._require_positive(
-            payload["lock_index"], "lock_index", allow_zero=True
-        )
+        lock_id = self._require_positive(payload["lock_id"], "lock_id")
         to_addr = self._require_address(payload["to_address"], "to_address")
         amount = self._require_positive(payload["amount"], "amount")
         signature = self._require_hex(payload["signature"], "signature")
@@ -417,7 +413,7 @@ class AccountingContractService:
         fn = self.contract.functions.transferFromLock(
             user,
             to_addr,
-            lock_index,
+            lock_id,
             amount,
             signature,
         )
@@ -425,13 +421,11 @@ class AccountingContractService:
 
     def unlock_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
-        lock_index = self._require_positive(
-            payload["lock_index"], "lock_index", allow_zero=True
-        )
+        lock_id = self._require_positive(payload["lock_id"], "lock_id")
 
         fn = self.contract.functions.unlockSingleLock(
             user,
-            lock_index,
+            lock_id,
         )
         return self._submit(fn._encode_transaction_data())
 
@@ -477,19 +471,18 @@ class AccountingContractService:
             latest_timestamp = latest_block.get("timestamp")
 
         locks = []
-        for i, lock in enumerate(fund_locks):
-            # FundLock struct: (serviceId, tokenId, amount, expiry)
+        for lock in fund_locks:
             lock_info = {
-                "lock_index": i,
+                "lock_id": lock[0],
                 "user_address": checksum_user,
-                "service_address": lock[0],
-                "token_id": "0x" + lock[1].hex(),
-                "amount": lock[2],
-                "expiry": lock[3],
-                "is_expired": bool(latest_timestamp is not None and lock[3] < latest_timestamp),
+                "service_address": lock[1],
+                "token_id": "0x" + lock[2].hex(),
+                "amount": lock[3],
+                "expiry": lock[4],
+                "is_expired": bool(latest_timestamp is not None and lock[4] < latest_timestamp),
             }
 
-            if service_address is None or lock[0].lower() == service_address.lower():
+            if service_address is None or lock[1].lower() == service_address.lower():
                 locks.append(lock_info)
 
         total_locked = sum(lock["amount"] for lock in locks)
@@ -595,17 +588,18 @@ class AccountingContractService:
 
         contract_reader = self._get_reader_contract()
 
-        expired_locks, lock_indices = contract_reader.functions.getExpiredLocks(checksum_user).call()
+        expired_locks, _ = contract_reader.functions.getExpiredLocks(checksum_user).call()
 
         locks = []
-        for i, lock in enumerate(expired_locks):
+        for lock in expired_locks:
             lock_info = {
-                "lock_index": lock_indices[i],
+                "lock_id": lock[0],
                 "user_address": checksum_user,
-                "service_address": lock[0],
-                "token_id": "0x" + lock[1].hex(),
-                "amount": lock[2],
-                "expiry": lock[3],
+                "service_address": lock[1],
+                "token_id": "0x" + lock[2].hex(),
+                "amount": lock[3],
+                "expiry": lock[4],
+                "is_expired": True,
             }
             locks.append(lock_info)
 
