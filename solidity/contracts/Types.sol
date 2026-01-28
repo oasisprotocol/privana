@@ -25,6 +25,7 @@ struct UserInfo {
 }
 
 struct FundLock {
+    uint256 lockId;
     address serviceId;
     bytes32 tokenId;
     uint256 amount;

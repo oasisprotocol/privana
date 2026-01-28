@@ -30,6 +30,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
     WithdrawalRequest[] public withdrawals;
 
+    uint256 private nextLockId = 1;
+
     event Deposit(
         address indexed userAddress,
         bytes32 indexed tokenId,
@@ -42,14 +44,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes32 indexed tokenId,
         uint256 amount,
         uint256 expiry,
-        uint256 lockIndex
+        uint256 lockId
     );
 
     event LockUnlocked(
         address indexed userAddress,
         bytes32 indexed tokenId,
         uint256 amount,
-        uint256 lockIndex
+        uint256 lockId
     );
 
     event LockModified(
@@ -58,7 +60,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes32 indexed tokenId,
         uint256 amountAdded,
         uint256 newExpiry,
-        uint256 lockIndex
+        uint256 lockId
     );
 
     event BalanceTransferred(
@@ -74,7 +76,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         address indexed toAddress,
         bytes32 tokenId,
         uint256 amount,
-        uint256 lockIndex
+        uint256 lockId
     );
 
     event Withdrawal(
@@ -89,7 +91,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error InvalidDeposit();
     error InsufficientBalance();
     error TooManyActiveLocks();
-    error InvalidLockIndex();
+    error InvalidLockId();
     error LockNotExpired();
     error InsufficientLockedAmount();
     error UnsupportedTokenType();
@@ -294,9 +296,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
         balances[userAddress][tokenId] -= amount;
 
-        uint256 lockIndex = locks.length;
+        uint256 lockId = nextLockId++;
         locks.push(
             FundLock({
+                lockId: lockId,
                 serviceId: serviceAddress,
                 tokenId: tokenId,
                 amount: amount,
@@ -310,13 +313,25 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             tokenId,
             amount,
             expiry,
-            lockIndex
+            lockId
         );
+    }
+
+    function _findLockIndex(
+        FundLock[] storage locks,
+        uint256 lockId
+    ) internal view returns (uint256) {
+        for (uint256 i = 0; i < locks.length; i++) {
+            if (locks[i].lockId == lockId) {
+                return i;
+            }
+        }
+        revert InvalidLockId();
     }
 
     function modifyLock(
         address userAddress,
-        uint256 lockIndex,
+        uint256 lockId,
         uint256 amount,
         uint256 newExpiry,
         bytes calldata signature
@@ -324,8 +339,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
-        if (lockIndex >= locks.length) revert InvalidLockIndex();
-
+        uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
 
         if (newExpiry < lock.expiry) revert InvalidExpiry();
@@ -334,7 +348,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
         EIP712SignatureVerifier.verifyModifyLockSignature(
             userAddress,
-            lockIndex,
+            lockId,
             amount,
             newExpiry,
             signature
@@ -356,7 +370,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             lock.tokenId,
             amount,
             newExpiry,
-            lockIndex
+            lockId
         );
     }
 
@@ -385,14 +399,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      *      a service goes down or becomes unresponsive.
      *
      * @param userAddress The address of the user whose lock should be unlocked
-     * @param lockIndex The index of the lock in the user's activeLocks array
+     * @param lockId The unique identifier of the lock to unlock
      */
-    function unlockSingleLock(address userAddress, uint256 lockIndex) public {
+    function unlockSingleLock(address userAddress, uint256 lockId) public {
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
-        if (lockIndex >= locks.length) revert InvalidLockIndex();
-
+        uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock memory lock = locks[lockIndex];
 
         if (lock.amount != 0) {
@@ -403,7 +416,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         locks[lockIndex] = locks[locks.length - 1];
         locks.pop();
 
-        emit LockUnlocked(userAddress, lock.tokenId, lock.amount, lockIndex);
+        emit LockUnlocked(userAddress, lock.tokenId, lock.amount, lockId);
     }
 
     /**
@@ -438,7 +451,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
                 locks[i] = locks[locks.length - 1];
                 locks.pop();
 
-                emit LockUnlocked(userAddress, lock.tokenId, lock.amount, i);
+                emit LockUnlocked(userAddress, lock.tokenId, lock.amount, lock.lockId);
                 unlockedCount++;
             }
         }
@@ -474,14 +487,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      *
      * @param userAddress The address of the user who originally locked the funds
      * @param toAddress The address receiving the transferred locked funds
-     * @param lockIndex The index of the lock in the user's activeLocks array
+     * @param lockId The unique identifier of the lock to transfer from
      * @param amount The amount of locked tokens to transfer
      * @param signature The EIP-712 signature from the service authorizing the transfer
      */
     function transferFromLock(
         address userAddress,
         address toAddress,
-        uint256 lockIndex,
+        uint256 lockId,
         uint256 amount,
         bytes calldata signature
     ) public {
@@ -490,15 +503,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
-        if (lockIndex >= locks.length) revert InvalidLockIndex();
-
+        uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
 
         EIP712SignatureVerifier.verifyTransferLockedSignature(
             lock.serviceId,
             userAddress,
             toAddress,
-            lockIndex,
+            lockId,
             amount,
             signature
         );
@@ -514,7 +526,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             toAddress,
             lock.tokenId,
             amount,
-            lockIndex
+            lockId
         );
 
         if (lock.amount == 0) {

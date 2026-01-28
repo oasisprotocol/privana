@@ -57,13 +57,13 @@ contract EIP712SignatureVerifier is EIP712 {
     /// @notice EIP-712 type hash for locked fund transfer operations
     bytes32 private constant TRANSFER_LOCKED_TYPEHASH =
         keccak256(
-            "TransferLocked(address userAddress,address toAddress,uint256 lockIndex,uint256 amount)"
+            "TransferLocked(address userAddress,address toAddress,uint256 lockId,uint256 amount)"
         );
 
     /// @notice EIP-712 type hash for modifying an existing lock (add funds and/or extend expiry)
     bytes32 private constant MODIFY_LOCK_TYPEHASH =
         keccak256(
-            "ModifyLock(address userAddress,uint256 lockIndex,uint256 amount,uint256 newExpiry)"
+            "ModifyLock(address userAddress,uint256 lockId,uint256 amount,uint256 newExpiry)"
         );
 
     /**
@@ -181,7 +181,7 @@ contract EIP712SignatureVerifier is EIP712 {
      * @param serviceAddress The address of the service authorized to transfer the locked funds
      * @param userAddress The address of the original user who locked the funds
      * @param toAddress The address receiving the transferred locked funds
-     * @param lockIndex The index of the specific lock being transferred from
+     * @param lockId The unique identifier of the lock being transferred from
      * @param amount The amount of locked tokens to transfer
      * @param signature The EIP-712 signature from the service authorizing the transfer
      */
@@ -189,7 +189,7 @@ contract EIP712SignatureVerifier is EIP712 {
         address serviceAddress,
         address userAddress,
         address toAddress,
-        uint256 lockIndex,
+        uint256 lockId,
         uint256 amount,
         bytes calldata signature
     ) public {
@@ -198,7 +198,7 @@ contract EIP712SignatureVerifier is EIP712 {
                 TRANSFER_LOCKED_TYPEHASH,
                 userAddress,
                 toAddress,
-                lockIndex,
+                lockId,
                 amount
             )
         );
@@ -217,7 +217,7 @@ contract EIP712SignatureVerifier is EIP712 {
 
     function verifyModifyLockSignature(
         address userAddress,
-        uint256 lockIndex,
+        uint256 lockId,
         uint256 amount,
         uint256 newExpiry,
         bytes calldata signature
@@ -226,7 +226,7 @@ contract EIP712SignatureVerifier is EIP712 {
             abi.encode(
                 MODIFY_LOCK_TYPEHASH,
                 userAddress,
-                lockIndex,
+                lockId,
                 amount,
                 newExpiry
             )

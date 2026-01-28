@@ -109,7 +109,7 @@ class ModifyLockRequest(BaseModel):
     """Payload for modifying an existing lock (add funds and/or extend expiry)."""
 
     user_address: str = Field(..., min_length=1)
-    lock_index: int = Field(..., ge=0)
+    lock_id: int = Field(..., ge=1)
     amount: int = Field(..., ge=0)
     new_expiry: int = Field(..., gt=0)
     signature: str
@@ -137,7 +137,7 @@ class TransferLockedFundsRequest(BaseModel):
     """Payload for transferring locked funds."""
 
     user_address: str = Field(..., min_length=1)
-    lock_index: int = Field(..., ge=0)
+    lock_id: int = Field(..., ge=1)
     to_address: str = Field(..., min_length=1)
     amount: int = Field(..., gt=0)
     signature: str
@@ -151,7 +151,7 @@ class UnlockFundsRequest(BaseModel):
     """Payload for unlocking funds after expiry."""
 
     user_address: str
-    lock_index: int
+    lock_id: int = Field(..., ge=1)
 
 
 class WithdrawalRequest(BaseModel):
@@ -203,7 +203,7 @@ class TransactionSubmissionResponse(BaseModel):
 class LockInfo(BaseModel):
     """Information about a single fund lock."""
 
-    lock_index: int
+    lock_id: int
     user_address: str
     service_address: str
     token_id: str
