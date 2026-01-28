@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
@@ -519,14 +522,10 @@ class AccountingContractService:
 
         return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
 
-    def resolve_withdrawal(self, payload: Dict) -> SubmissionResult:
-        index = self._require_positive(payload["index"], "index", allow_zero=True)
-
+    def resolve_withdrawal(self, index: int) -> SubmissionResult:
+        """Submit resolveWithdrawal transaction via ROFL."""
         fn = self.contract.functions.resolveWithdrawal(index)
-
-        submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
-
-        return SubmissionResult(submission_id=submission_id, status="submitted")
+        return self._submit(fn._encode_transaction_data())
 
     def get_withdrawal(self, index: int) -> Dict[str, Any]:
         contract_reader = self._get_reader_contract()
@@ -573,6 +572,73 @@ class AccountingContractService:
         return {
             "user_address": checksum_user,
             "pending_withdrawals": pending,
+        }
+
+    def get_all_pending_withdrawals(
+        self, user_address: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get all pending (unresolved) withdrawals.
+
+        Args:
+            user_address: Optional filter by user address
+        """
+        contract_reader = self._get_reader_contract()
+        current_block = self.reader_w3.eth.block_number if self.reader_w3 else 0
+
+        checksum_user = None
+        if user_address:
+            checksum_user = self._require_address(user_address, "user_address")
+
+        pending = []
+        index = 0
+
+        while True:
+            try:
+                result = contract_reader.functions.withdrawals(index).call()
+                current_index = index
+                index += 1
+
+                withdrawal_user = result[0]
+                resolved = result[4]
+
+                # Skip if already resolved
+                if resolved:
+                    continue
+
+                # Apply user filter
+                if checksum_user and withdrawal_user.lower() != checksum_user.lower():
+                    continue
+
+                block_number = result[2]
+                token_id_bytes = result[3]
+
+                # Get chain_id for this token
+                token_hex = HexBytes(token_id_bytes)
+                try:
+                    context = self._get_token_context(token_hex)
+                    chain_id = context.chain_id
+                except Exception as e:
+                    logger.warning(
+                        f"Withdrawal #{current_index}: unknown/invalid token 0x{token_id_bytes.hex()} - {e}"
+                    )
+                    chain_id = None
+
+                pending.append({
+                    "index": current_index,
+                    "user_address": withdrawal_user,
+                    "amount": result[1],
+                    "token_id": "0x" + token_id_bytes.hex(),
+                    "block_number": block_number,
+                    "can_resolve": current_block - block_number >= 1,
+                    "chain_id": chain_id,
+                })
+            except Exception:
+                # Reached end of array
+                break
+
+        return {
+            "pending": pending,
+            "current_block": current_block,
         }
 
     def unlock_all_expired_locks(self, payload: Dict) -> SubmissionResult:

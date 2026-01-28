@@ -14,6 +14,19 @@ def _normalise_hex(value: str) -> str:
     return value
 
 
+def _parse_int_amount(value: int | str | float) -> int:
+    """Parse amount from int, string, or scientific notation."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        value = value.strip()
+        # Handle scientific notation and numeric strings
+        return int(float(value))
+    return int(value)
+
+
 class DepositQuoteRequest(BaseModel):
     """Request parameters for generating a deposit quote."""
 
@@ -26,6 +39,10 @@ class DepositQuoteRequest(BaseModel):
     amount: int = Field(
         ..., description="Amount to deposit in token's base units (e.g. wei for ETH)", gt=0
     )
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("user_address", "token_id")
     def _lowercase(cls, value: str) -> str:  # noqa: D401 - simple normaliser
@@ -100,6 +117,10 @@ class LockFundsRequest(BaseModel):
     expiry: int = Field(..., gt=0)
     signature: str
 
+    @field_validator("amount", "expiry", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
     @field_validator("token_id", "signature")
     def _normalise_hex_fields(cls, value: str) -> str:
         return _normalise_hex(value)
@@ -128,6 +149,10 @@ class TransferFundsRequest(BaseModel):
     amount: int = Field(..., gt=0)
     signature: str
 
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
     @field_validator("token_id", "signature")
     def _normalise_tf_hex_fields(cls, value: str) -> str:
         return _normalise_hex(value)
@@ -141,6 +166,10 @@ class TransferLockedFundsRequest(BaseModel):
     to_address: str = Field(..., min_length=1)
     amount: int = Field(..., gt=0)
     signature: str
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("signature")
     def _normalise_tl_signature(cls, value: str) -> str:
@@ -161,6 +190,10 @@ class WithdrawalRequest(BaseModel):
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
     signature: str
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("token_id", "signature")
     def _normalise_withdraw_hex(cls, value: str) -> str:
