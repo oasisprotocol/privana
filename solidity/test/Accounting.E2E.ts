@@ -355,8 +355,8 @@ describe('Accounting', function () {
 
     expect(userLocks.length).to.equal(1);
     expect(userLocks[0][1]).to.equal(userWallet2.address);
-    expect(userLocks[0][3]).to.equal(TEST_TOKEN.tokenId);
-    expect(userLocks[0][4]).to.equal(parseUsdt("1"));
+    expect(userLocks[0][2]).to.equal(TEST_TOKEN.tokenId);
+    expect(userLocks[0][3]).to.equal(parseUsdt("1"));
     expect(userLocks[0][4]).to.be.equal(expiry);
   });
 

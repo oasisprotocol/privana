@@ -91,7 +91,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error InvalidDeposit();
     error InsufficientBalance();
     error TooManyActiveLocks();
-    error InvalidLockIndex();
     error InvalidLockId();
     error LockNotExpired();
     error InsufficientLockedAmount();
