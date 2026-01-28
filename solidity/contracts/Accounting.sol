@@ -772,7 +772,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @dev Only callable by the contract owner to prevent unauthorized token configuration.
      * @param info The complete token information including type, data, and metadata
      */
-    function setTokenInfo(TokenInfo calldata info) external {
+    function setTokenInfo(TokenInfo calldata info) external onlyOwner {
         bytes32 tokenId = getTokenId(info);
         tokens[tokenId] = info;
 
