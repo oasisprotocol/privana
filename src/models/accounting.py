@@ -189,9 +189,10 @@ class WithdrawalRequest(BaseModel):
     user_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
     signature: str
 
-    @field_validator("amount", mode="before")
+    @field_validator("amount", "nonce", mode="before")
     def _parse_amount(cls, value: int | str | float) -> int:
         return _parse_int_amount(value)
 

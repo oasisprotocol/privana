@@ -611,18 +611,21 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param userAddress The address of the user requesting the withdrawal
      * @param tokenId The identifier of the token to withdraw
      * @param amount The amount of tokens to withdraw
+     * @param nonce The user's current withdrawal nonce for replay protection
      * @param signature The EIP-712 signature from the user authorizing the withdrawal
      */
     function requestWithdrawal(
         address userAddress,
         bytes32 tokenId,
         uint256 amount,
+        uint256 nonce,
         bytes calldata signature
     ) public {
         EIP712SignatureVerifier.verifyWithdrawSignature(
             userAddress,
             tokenId,
             amount,
+            nonce,
             signature
         );
 

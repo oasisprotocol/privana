@@ -84,12 +84,17 @@ task("withdraw")
 
     console.log("\nEIP-712 Domain:", domain);
 
+    // Get the current withdrawal nonce for the user
+    const nonce = await accounting.withdrawalNonces(userAddress);
+    console.log("Withdrawal nonce:", nonce.toString());
+
     // Define Withdraw type
     const types = {
       Withdraw: [
         { name: "userAddress", type: "address" },
         { name: "tokenId", type: "bytes32" },
         { name: "amount", type: "uint256" },
+        { name: "nonce", type: "uint256" },
       ],
     };
 
@@ -98,6 +103,7 @@ task("withdraw")
       userAddress: userAddress,
       tokenId: args.tokenid,
       amount: BigInt(args.amount),
+      nonce: nonce,
     };
 
     console.log("\nSigning withdrawal request...");
@@ -112,6 +118,7 @@ task("withdraw")
       user_address: userAddress,
       token_id: args.tokenid,
       amount: args.amount, // Keep as string to preserve precision for large values
+      nonce: nonce.toString(),
       signature: signature,
     };
 

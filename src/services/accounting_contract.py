@@ -503,12 +503,14 @@ class AccountingContractService:
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
 
         fn = self.contract.functions.requestWithdrawal(
             user,
             token,
             amount,
+            nonce,
             signature,
         )
 
