@@ -36,10 +36,10 @@ function decodeSubmissionResponse(hexString: string): { ok: boolean; error?: str
       return { ok: false, error: message || "Unknown error" };
     }
 
-    return { ok: true };
-  } catch {
-    // If we can't decode, assume it's ok (old format or success)
-    return { ok: true };
+    // Neither ok nor fail - unexpected format
+    return { ok: false, error: `Unexpected response format: ${JSON.stringify(decoded)}` };
+  } catch (e) {
+    return { ok: false, error: `Failed to decode CBOR response: ${e}` };
   }
 }
 

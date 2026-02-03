@@ -779,6 +779,15 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     }
 
     /**
+     * @notice Returns the total number of withdrawal requests.
+     *
+     * @return The length of the withdrawals array
+     */
+    function withdrawalCount() external view returns (uint256) {
+        return withdrawals.length;
+    }
+
+    /**
      * @notice Retrieves all active fund locks for a specific user.
      *
      * @dev Returns a memory copy of the locks array.

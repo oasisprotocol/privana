@@ -315,3 +315,10 @@ class TokenInfoResponse(BaseModel):
     token_address: Optional[str] = None
 
 
+class WithdrawalNonceResponse(BaseModel):
+    """Response containing the current withdrawal nonce for a user."""
+
+    user_address: str
+    nonce: int
+
+

@@ -592,13 +592,17 @@ class AccountingContractService:
             checksum_user = self._require_address(user_address, "user_address")
 
         pending = []
-        index = 0
 
-        while True:
+        # Get total withdrawal count from contract
+        try:
+            total_withdrawals = contract_reader.functions.withdrawalCount().call()
+        except Exception as e:
+            logger.error(f"Failed to get withdrawal count: {e}")
+            return {"pending": [], "current_block": current_block}
+
+        for index in range(total_withdrawals):
             try:
                 result = contract_reader.functions.withdrawals(index).call()
-                current_index = index
-                index += 1
 
                 withdrawal_user = result[0]
                 resolved = result[4]
@@ -621,12 +625,12 @@ class AccountingContractService:
                     chain_id = context.chain_id
                 except Exception as e:
                     logger.warning(
-                        f"Withdrawal #{current_index}: unknown/invalid token 0x{token_id_bytes.hex()} - {e}"
+                        f"Withdrawal #{index}: unknown/invalid token 0x{token_id_bytes.hex()} - {e}"
                     )
                     chain_id = None
 
                 pending.append({
-                    "index": current_index,
+                    "index": index,
                     "user_address": withdrawal_user,
                     "amount": result[1],
                     "token_id": "0x" + token_id_bytes.hex(),
@@ -634,9 +638,8 @@ class AccountingContractService:
                     "can_resolve": current_block - block_number >= 1,
                     "chain_id": chain_id,
                 })
-            except Exception:
-                # Reached end of array
-                break
+            except Exception as e:
+                logger.warning(f"Failed to read withdrawal {index}: {e}")
 
         return {
             "pending": pending,
@@ -750,6 +753,15 @@ class AccountingContractService:
 
         return result
 
+    def get_withdrawal_nonce(self, user_address: str) -> Dict[str, Any]:
+        """Get the current withdrawal nonce for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+        nonce = contract_reader.functions.withdrawalNonces(checksum_user).call()
+        return {
+            "user_address": checksum_user,
+            "nonce": nonce,
+        }
 
 
 _service_instance: Optional[AccountingContractService] = None

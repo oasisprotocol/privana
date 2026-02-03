@@ -65,7 +65,8 @@ class WithdrawalProcessor:
         )
         self._is_running = False
         self._task: Optional[asyncio.Task] = None
-        self._processed_indices: Set[int] = set()
+        # Track highest processed withdrawal index per chain (for sequential processing)
+        self._chain_high_water_mark: Dict[int, int] = {}
         self._min_rpc_interval = 0.1
         self._last_rpc_call: float = 0
         self._destination_web3: Dict[int, Web3] = {}
@@ -110,11 +111,20 @@ class WithdrawalProcessor:
             self._evm_address = self._contract.functions.evmAddress().call()
         return self._evm_address
 
-    async def _catch_up_missing_broadcasts(self):
-        """On startup, find and broadcast any resolved-but-not-broadcast withdrawals."""
-        logger.info("Checking for missing withdrawal broadcasts...")
+    async def _catch_up_missing_broadcasts(self, chain_ids: Optional[List[int]] = None):
+        """Find and broadcast any resolved-but-not-broadcast withdrawals.
 
-        for chain_id in self.settings.chain_rpc_urls.keys():
+        Args:
+            chain_ids: Optional list of chain IDs to check. If None, checks all configured chains.
+        """
+        if chain_ids is None:
+            chain_ids = list(self.settings.chain_rpc_urls.keys())
+            logger.info("Checking for missing withdrawal broadcasts...")
+        else:
+            chain_names = [CHAIN_NAMES.get(c, f"chain {c}") for c in chain_ids]
+            logger.info(f"Checking for missing broadcasts on {', '.join(chain_names)}...")
+
+        for chain_id in chain_ids:
             try:
                 chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
 
@@ -157,61 +167,85 @@ class WithdrawalProcessor:
 
         chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
         contract_reader = self.accounting_service._get_reader_contract()
-        index = 0
         found_nonces: Set[int] = set()
+        max_retries = 3
 
-        logger.info(f"{chain_name}: scanning for {len(target_nonces)} missing nonces")
+        # Get total withdrawal count from contract
+        try:
+            total_withdrawals = await self._rate_limited_call(
+                contract_reader.functions.withdrawalCount().call
+            )
+        except Exception as e:
+            logger.error(f"{chain_name}: failed to get withdrawal count: {e}")
+            return
 
-        while len(found_nonces) < len(target_nonces):
-            try:
-                result = await self._rate_limited_call(
-                    contract_reader.functions.withdrawals(index).call
-                )
-                resolved = result[4]
-                tx_identifier = result[5]
+        logger.info(f"{chain_name}: scanning {total_withdrawals} withdrawals for {len(target_nonces)} missing nonces")
 
-                if resolved and tx_identifier and len(tx_identifier) >= 32:
-                    # Decode nonce from txIdentifier
-                    nonce = int.from_bytes(tx_identifier[-8:], "big")
-
-                    # Get chain_id for this withdrawal
-                    token_id_bytes = result[3]
-                    try:
-                        context = self.accounting_service._get_token_context(HexBytes(token_id_bytes))
-                        withdrawal_chain_id = context.chain_id
-                    except Exception:
-                        withdrawal_chain_id = 0
-
-                    if withdrawal_chain_id == chain_id and nonce in target_nonces:
-                        # Found a missing one - broadcast it
-                        logger.info(f"Withdrawal #{index}: broadcasting missing nonce {nonce}")
-                        signed_tx = await self._rate_limited_call(
-                            contract_reader.functions.resolveWithdrawal(index).call
-                        )
-                        try:
-                            tx_hash = await self._rate_limited_call(
-                                self.accounting_service._send_raw_transaction,
-                                chain_id,
-                                signed_tx,
-                            )
-                            logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
-                        except Exception as exc:
-                            error_str = str(exc).lower()
-                            if "nonce too low" in error_str or "already known" in error_str:
-                                logger.info(f"Withdrawal #{index}: already broadcast")
-                            else:
-                                logger.error(f"Withdrawal #{index}: broadcast failed - {exc}")
-
-                        found_nonces.add(nonce)
-                        self._processed_indices.add(index)
-
-                index += 1
-                if index % 100 == 0:
-                    logger.info(f"{chain_name}: scanned {index} withdrawals, found {len(found_nonces)}/{len(target_nonces)}")
-
-            except Exception:
-                # Reached end of withdrawals array
+        for index in range(total_withdrawals):
+            if len(found_nonces) >= len(target_nonces):
                 break
+
+            # Fetch withdrawal with retries
+            result = None
+            for attempt in range(max_retries + 1):
+                try:
+                    result = await self._rate_limited_call(
+                        contract_reader.functions.withdrawals(index).call
+                    )
+                    break
+                except Exception as exc:
+                    if attempt < max_retries:
+                        logger.warning(f"{chain_name}: error reading withdrawal {index}: {exc}, retry {attempt + 1}/{max_retries}")
+                        await asyncio.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"{chain_name}: giving up on withdrawal {index} after {max_retries} retries: {exc}")
+
+            if result is None:
+                continue  # Skip this withdrawal
+
+            resolved = result[4]
+            tx_identifier = result[5]
+
+            if not (resolved and tx_identifier and len(tx_identifier) >= 32):
+                continue
+
+            # Decode nonce from txIdentifier
+            nonce = int.from_bytes(tx_identifier[-8:], "big")
+
+            # Get chain_id for this withdrawal
+            token_id_bytes = result[3]
+            try:
+                context = self.accounting_service._get_token_context(HexBytes(token_id_bytes))
+                withdrawal_chain_id = context.chain_id
+            except Exception:
+                withdrawal_chain_id = 0
+
+            if withdrawal_chain_id != chain_id or nonce not in target_nonces:
+                continue
+
+            # Found a missing one - broadcast it
+            logger.info(f"Withdrawal #{index}: broadcasting missing nonce {nonce}")
+            signed_tx = await self._rate_limited_call(
+                contract_reader.functions.resolveWithdrawal(index).call
+            )
+            try:
+                tx_hash = await self._rate_limited_call(
+                    self.accounting_service._send_raw_transaction,
+                    chain_id,
+                    signed_tx,
+                )
+                logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
+                found_nonces.add(nonce)
+            except Exception as exc:
+                error_str = str(exc).lower()
+                if "nonce too low" in error_str or "already known" in error_str:
+                    logger.info(f"Withdrawal #{index}: already broadcast")
+                    found_nonces.add(nonce)
+                else:
+                    logger.error(f"Withdrawal #{index}: broadcast failed - {exc}")
+
+            if index > 0 and index % 100 == 0:
+                logger.info(f"{chain_name}: scanned {index}/{total_withdrawals} withdrawals, found {len(found_nonces)}/{len(target_nonces)}")
 
         logger.info(f"{chain_name}: catch-up complete, broadcast {len(found_nonces)}/{len(target_nonces)} missing")
 
@@ -225,11 +259,11 @@ class WithdrawalProcessor:
             pending = result.get("pending", [])
             current_block = result.get("current_block", 0)
 
-            # Filter by block delay and not already processed
+            # Filter by block delay and not already processed (per-chain high water mark)
             eligible = [
                 w for w in pending
                 if (current_block - w["block_number"] >= 1)
-                and w["index"] not in self._processed_indices
+                and w["index"] > self._chain_high_water_mark.get(w.get("chain_id", 0), -1)
             ]
 
             # Group by chain_id and sort by index within each chain
@@ -318,7 +352,9 @@ class WithdrawalProcessor:
             )
             logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
 
-            self._processed_indices.add(index)
+            self._chain_high_water_mark[chain_id] = max(
+                self._chain_high_water_mark.get(chain_id, -1), index
+            )
             return True
 
         except Exception as exc:
@@ -327,11 +363,15 @@ class WithdrawalProcessor:
 
             if "nonce too low" in error_str or "already known" in error_str:
                 logger.info(f"Withdrawal #{index}: already broadcast to {chain_name}")
-                self._processed_indices.add(index)
+                self._chain_high_water_mark[chain_id] = max(
+                    self._chain_high_water_mark.get(chain_id, -1), index
+                )
                 return True
             elif error_name == "WithdrawalAlreadyResolved":
                 logger.info(f"Withdrawal #{index}: already resolved, skipping")
-                self._processed_indices.add(index)
+                self._chain_high_water_mark[chain_id] = max(
+                    self._chain_high_water_mark.get(chain_id, -1), index
+                )
                 return True
             elif selector:
                 logger.error(f"Withdrawal #{index}: contract error - {error_name}")
@@ -375,8 +415,9 @@ class WithdrawalProcessor:
 
                         success = await self._resolve_and_broadcast(withdrawal)
                         if not success:
-                            # Stop processing this chain, will retry on next poll
-                            logger.warning(f"Stopping {chain_name} processing, will retry")
+                            # Broadcast failed - check for nonce gaps and fix them
+                            logger.warning(f"Stopping {chain_name} processing, checking for nonce gaps")
+                            await self._catch_up_missing_broadcasts([chain_id])
                             break
 
             except Exception:
@@ -411,7 +452,7 @@ class WithdrawalProcessor:
             except asyncio.CancelledError:
                 pass
 
-        self._processed_indices.clear()
+        self._chain_high_water_mark.clear()
         logger.info("Withdrawal processor stopped")
 
 
