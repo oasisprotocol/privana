@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Dict, List, Optional, Set
 
+from eth_abi import decode
 from web3 import Web3
 from hexbytes import HexBytes
 
@@ -43,15 +44,17 @@ def decode_contract_error(exc: Exception) -> tuple[str, str]:
     return "", str(exc)
 
 
+_MIN_RPC_INTERVAL = 0.1
+
+
 class WithdrawalProcessor:
-    """Processes pending withdrawals by resolving and broadcasting in a single flow.
+    """Polls the Accounting contract for pending withdrawals, resolves them on
+    Sapphire to obtain signed transactions, and broadcasts those transactions
+    to the appropriate destination chains.
 
-    For each pending withdrawal:
-    1. Call resolveWithdrawal on Sapphire (marks resolved, returns signedTx)
-    2. Broadcast signedTx to destination chain
-    3. If either fails, retry on next poll
-
-    Processes withdrawals in order per destination chain to ensure nonce ordering.
+    Withdrawals are processed sequentially per chain to preserve nonce ordering.
+    A periodic catch-up pass re-broadcasts any resolved withdrawals whose
+    transactions have not yet landed on-chain.
     """
 
     def __init__(self):
@@ -67,17 +70,16 @@ class WithdrawalProcessor:
         self._task: Optional[asyncio.Task] = None
         # Track highest processed withdrawal index per chain (for sequential processing)
         self._chain_high_water_mark: Dict[int, int] = {}
-        self._min_rpc_interval = 0.1
         self._last_rpc_call: float = 0
         self._destination_web3: Dict[int, Web3] = {}
         self._evm_address: Optional[str] = None
 
     async def _rate_limited_call(self, func, *args, **kwargs):
-        """Execute call with rate limiting and retry logic."""
+        """Execute an RPC call with rate limiting and retries."""
         now = time.time()
         time_since_last = now - self._last_rpc_call
-        if time_since_last < self._min_rpc_interval:
-            await asyncio.sleep(self._min_rpc_interval - time_since_last)
+        if time_since_last < _MIN_RPC_INTERVAL:
+            await asyncio.sleep(_MIN_RPC_INTERVAL - time_since_last)
 
         max_retries = 5
         base_delay = 1.0
@@ -87,13 +89,11 @@ class WithdrawalProcessor:
                 self._last_rpc_call = time.time()
                 return await asyncio.to_thread(func, *args, **kwargs)
             except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
-                        await asyncio.sleep(delay)
-                        continue
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"RPC error, retrying in {delay}s (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(delay)
+                    continue
                 raise
 
     def _get_destination_web3(self, chain_id: int) -> Web3:
@@ -168,7 +168,6 @@ class WithdrawalProcessor:
         chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
         contract_reader = self.accounting_service._get_reader_contract()
         found_nonces: Set[int] = set()
-        max_retries = 3
 
         # Get total withdrawal count from contract
         try:
@@ -185,39 +184,34 @@ class WithdrawalProcessor:
             if len(found_nonces) >= len(target_nonces):
                 break
 
-            # Fetch withdrawal with retries
-            result = None
-            for attempt in range(max_retries + 1):
-                try:
-                    result = await self._rate_limited_call(
-                        contract_reader.functions.withdrawals(index).call
-                    )
-                    break
-                except Exception as exc:
-                    if attempt < max_retries:
-                        logger.warning(f"{chain_name}: error reading withdrawal {index}: {exc}, retry {attempt + 1}/{max_retries}")
-                        await asyncio.sleep(2 ** attempt)
-                    else:
-                        logger.error(f"{chain_name}: giving up on withdrawal {index} after {max_retries} retries: {exc}")
-
-            if result is None:
-                continue  # Skip this withdrawal
+            try:
+                result = await self._rate_limited_call(
+                    contract_reader.functions.withdrawals(index).call
+                )
+            except Exception as exc:
+                logger.warning(f"Withdrawal #{index}: failed to read, skipping: {exc}")
+                continue
 
             resolved = result[4]
             tx_identifier = result[5]
 
-            if not (resolved and tx_identifier and len(tx_identifier) >= 32):
+            if not resolved:
+                # Not yet processed by the main polling loop, skip
+                continue
+            if not tx_identifier or len(tx_identifier) < 32:
+                logger.warning(f"Withdrawal #{index}: resolved but has invalid txIdentifier, skipping")
                 continue
 
             # Decode nonce from txIdentifier
-            nonce = int.from_bytes(tx_identifier[-8:], "big")
+            nonce = decode(['uint64'], tx_identifier)[0]
 
             # Get chain_id for this withdrawal
             token_id_bytes = result[3]
             try:
                 context = self.accounting_service._get_token_context(HexBytes(token_id_bytes))
                 withdrawal_chain_id = context.chain_id
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Withdrawal #{index}: failed to get token context - {e}")
                 withdrawal_chain_id = 0
 
             if withdrawal_chain_id != chain_id or nonce not in target_nonces:
@@ -334,6 +328,9 @@ class WithdrawalProcessor:
                         break
 
                 if not is_resolved:
+                    # ROFL hasn't confirmed the resolution yet; returning False
+                    # stops processing this chain and triggers a catch-up pass,
+                    # which will retry on the next poll cycle.
                     logger.warning(f"Withdrawal #{index}: timeout waiting for resolution")
                     return False
 

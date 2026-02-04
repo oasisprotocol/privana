@@ -269,6 +269,26 @@ class AccountingContractService:
             is_native=is_native,
         )
 
+    # Minimum native balance required on destination chain to cover gas fees
+    _MIN_NATIVE_BALANCE = Web3.to_wei(0.001, "ether")
+
+    def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
+        """Check that evmAddress has enough native balance on the destination chain for gas."""
+        chain_w3 = self._get_chain_web3(chain_id)
+        evm_address = self._get_deposit_address()
+        balance = chain_w3.eth.get_balance(evm_address)
+
+        required = self._MIN_NATIVE_BALANCE
+        if is_native:
+            required += amount
+
+        if balance < required:
+            chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+            raise ValueError(
+                f"Insufficient native balance on {chain_name}. "
+                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
+            )
+
     def _get_token_symbol(self, token: HexBytes) -> str:
         context = self._get_token_context(token)
 
@@ -506,6 +526,33 @@ class AccountingContractService:
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
 
+        # Validate withdrawal nonce matches on-chain state
+        contract_reader = self._get_reader_contract()
+        expected_nonce = contract_reader.functions.withdrawalNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"Withdrawal nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
+
+        # Validate token and destination chain before on-chain submission
+        context = self._get_token_context(token)
+        if not context.chain_id:
+            raise ValueError(
+                f"Token {token.hex()} has invalid chain_id (0). "
+                f"Cannot process withdrawal - token not properly registered."
+            )
+
+        # Validate we have RPC configured for destination chain
+        if context.chain_id not in self.settings.chain_rpc_urls:
+            raise ValueError(
+                f"No RPC URL configured for chain_id {context.chain_id}. "
+                f"Cannot process withdrawal - destination chain not supported."
+            )
+
+        # Verify the broadcaster has enough native balance on the destination chain
+        self._check_destination_balance(context.chain_id, context.is_native, amount)
+
         fn = self.contract.functions.requestWithdrawal(
             user,
             token,
@@ -516,7 +563,6 @@ class AccountingContractService:
 
         submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
 
-        context = self._get_token_context(token)
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:
             detail_parts.append(f"token_address={context.token_address}")
