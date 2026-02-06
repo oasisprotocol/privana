@@ -269,16 +269,13 @@ class AccountingContractService:
             is_native=is_native,
         )
 
-    # Minimum native balance required on destination chain to cover gas fees
-    _MIN_NATIVE_BALANCE = Web3.to_wei(0.001, "ether")
-
     def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
         """Check that evmAddress has enough native balance on the destination chain for gas."""
         chain_w3 = self._get_chain_web3(chain_id)
         evm_address = self._get_deposit_address()
         balance = chain_w3.eth.get_balance(evm_address)
 
-        required = self._MIN_NATIVE_BALANCE
+        required = self.settings.min_withdrawal_gas_balance
         if is_native:
             required += amount
 

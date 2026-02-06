@@ -95,6 +95,9 @@ def load_settings(refresh: bool = False) -> Settings:
             withdrawal_resolution_timeout=_get_int(
                 "WITHDRAWAL_RESOLUTION_TIMEOUT", _defaults.withdrawal_resolution_timeout
             ),
+            min_withdrawal_gas_balance=_get_int(
+                "MIN_WITHDRAWAL_GAS_BALANCE", _defaults.min_withdrawal_gas_balance
+            ),
         )
     return _settings
 
