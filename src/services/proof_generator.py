@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 class ProofGeneratorService:
-
     def __init__(self, chain_rpc_urls: Dict[int, str]):
         self.chain_rpc_urls = chain_rpc_urls
         self._chain_web3: Dict[int, Web3] = {}
@@ -39,11 +38,11 @@ class ProofGeneratorService:
     @staticmethod
     def _get_rlp_uint(number: int) -> bytes:
         if number == 0:
-            return b'\x80'
+            return b"\x80"
 
         hex_value = hex(number)[2:]
         if len(hex_value) % 2 != 0:
-            hex_value = '0' + hex_value
+            hex_value = "0" + hex_value
 
         value_bytes = bytes.fromhex(hex_value)
         return rlp.encode(value_bytes)
@@ -79,16 +78,18 @@ class ProofGeneratorService:
         for attempt in range(max_retries):
             try:
                 raw_block = web3.provider.make_request(
-                    "debug_getRawBlock",
-                    [self._get_rpc_uint(block_number)]
+                    "debug_getRawBlock", [self._get_rpc_uint(block_number)]
                 )
 
-                if 'error' in raw_block:
-                    error_msg = raw_block['error']
+                if "error" in raw_block:
+                    error_msg = raw_block["error"]
                     if isinstance(error_msg, dict):
-                        error_msg = error_msg.get('message', str(error_msg))
+                        error_msg = error_msg.get("message", str(error_msg))
 
-                    if 'method not found' in str(error_msg).lower() or 'not supported' in str(error_msg).lower():
+                    if (
+                        "method not found" in str(error_msg).lower()
+                        or "not supported" in str(error_msg).lower()
+                    ):
                         raise ValueError(
                             f"RPC endpoint does not support debug_getRawBlock API. "
                             f"Archive node with debug API is required. "
@@ -98,7 +99,7 @@ class ProofGeneratorService:
                     last_error = Exception(f"RPC Error calling debug_getRawBlock: {error_msg}")
 
                     if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt
+                        wait_time = 2**attempt
                         logger.warning(
                             f"debug_getRawBlock failed (attempt {attempt + 1}/{max_retries}), "
                             f"retrying in {wait_time}s: {error_msg}"
@@ -115,7 +116,7 @@ class ProofGeneratorService:
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
+                    wait_time = 2**attempt
                     logger.warning(
                         f"Proof generation failed (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {wait_time}s: {str(e)}"
@@ -124,7 +125,7 @@ class ProofGeneratorService:
                     continue
                 raise
 
-        raw_block_hex = raw_block['result']
+        raw_block_hex = raw_block["result"]
         block_rlp = rlp.decode(bytes.fromhex(raw_block_hex[2:]))
 
         block_header = block_rlp[0]
@@ -175,19 +176,18 @@ class ProofGeneratorService:
         for attempt in range(max_retries):
             try:
                 raw_receipts_result = web3.provider.make_request(
-                    "debug_getRawReceipts",
-                    [self._get_rpc_uint(block_number)]
+                    "debug_getRawReceipts", [self._get_rpc_uint(block_number)]
                 )
 
-                if 'error' in raw_receipts_result:
-                    error_msg = raw_receipts_result['error']
+                if "error" in raw_receipts_result:
+                    error_msg = raw_receipts_result["error"]
                     if isinstance(error_msg, dict):
-                        error_msg = error_msg.get('message', str(error_msg))
+                        error_msg = error_msg.get("message", str(error_msg))
 
                     last_error = Exception(f"RPC Error calling debug_getRawReceipts: {error_msg}")
 
                     if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt
+                        wait_time = 2**attempt
                         logger.warning(
                             f"debug_getRawReceipts failed (attempt {attempt + 1}/{max_retries}), "
                             f"retrying in {wait_time}s: {error_msg}"
@@ -198,19 +198,18 @@ class ProofGeneratorService:
                     raise last_error
 
                 raw_block = web3.provider.make_request(
-                    "debug_getRawBlock",
-                    [self._get_rpc_uint(block_number)]
+                    "debug_getRawBlock", [self._get_rpc_uint(block_number)]
                 )
 
-                if 'error' in raw_block:
-                    error_msg = raw_block['error']
+                if "error" in raw_block:
+                    error_msg = raw_block["error"]
                     if isinstance(error_msg, dict):
-                        error_msg = error_msg.get('message', str(error_msg))
+                        error_msg = error_msg.get("message", str(error_msg))
 
                     last_error = Exception(f"RPC Error calling debug_getRawBlock: {error_msg}")
 
                     if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt
+                        wait_time = 2**attempt
                         logger.warning(
                             f"debug_getRawBlock failed (attempt {attempt + 1}/{max_retries}), "
                             f"retrying in {wait_time}s: {error_msg}"
@@ -227,7 +226,7 @@ class ProofGeneratorService:
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
+                    wait_time = 2**attempt
                     logger.warning(
                         f"Receipt proof generation failed (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {wait_time}s: {str(e)}"
@@ -236,15 +235,15 @@ class ProofGeneratorService:
                     continue
                 raise
 
-        raw_receipts = raw_receipts_result['result']
-        raw_block_hex = raw_block['result']
+        raw_receipts = raw_receipts_result["result"]
+        raw_block_hex = raw_block["result"]
         block_rlp = rlp.decode(bytes.fromhex(raw_block_hex[2:]))
         block_header = block_rlp[0]
 
         trie = HexaryTrie(db={})
         for i, raw_receipt in enumerate(raw_receipts):
             key = self._get_rlp_uint(i)
-            receipt_hex = raw_receipt[2:] if raw_receipt.startswith('0x') else raw_receipt
+            receipt_hex = raw_receipt[2:] if raw_receipt.startswith("0x") else raw_receipt
             value = bytes.fromhex(receipt_hex)
             trie.set(key, value)
 
@@ -308,6 +307,7 @@ def get_proof_generator(chain_rpc_urls: Optional[Dict[int, str]] = None) -> Proo
     if _proof_generator_instance is None:
         if chain_rpc_urls is None:
             from src.config import load_settings
+
             settings = load_settings()
             chain_rpc_urls = dict(settings.chain_rpc_urls)
 

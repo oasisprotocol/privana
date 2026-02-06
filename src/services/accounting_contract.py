@@ -6,8 +6,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
-
 from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
 from web3 import Web3
@@ -17,6 +15,8 @@ from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflAppdClient
 from src.config import CHAIN_NAMES, ERC20_TOKENS, NATIVE_TOKEN_SYMBOLS, load_settings
 from src.models.types import Settings
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_hex(value: str) -> str:
@@ -61,14 +61,10 @@ class AccountingContractService:
         )
         self.sapphire_rpc_url = self.settings.sapphire_rpc_url
         self.reader_w3: Optional[Web3] = (
-            Web3(Web3.HTTPProvider(self.sapphire_rpc_url))
-            if self.sapphire_rpc_url
-            else None
+            Web3(Web3.HTTPProvider(self.sapphire_rpc_url)) if self.sapphire_rpc_url else None
         )
         self.contract_reader: Optional[Contract] = (
-            self.reader_w3.eth.contract(
-                address=self.contract_address, abi=ACCOUNTING_ABI
-            )
+            self.reader_w3.eth.contract(address=self.contract_address, abi=ACCOUNTING_ABI)
             if self.reader_w3
             else None
         )
@@ -102,9 +98,7 @@ class AccountingContractService:
         }
         return tx
 
-    def _submit(
-        self, data: bytes, value: int = 0, gas: Optional[int] = None
-    ) -> SubmissionResult:
+    def _submit(self, data: bytes, value: int = 0, gas: Optional[int] = None) -> SubmissionResult:
         tx = self._build_tx(data, value=value, gas=gas)
         submission_id = self.rofl_client.submit_tx(tx)
         return SubmissionResult(submission_id=submission_id, status="submitted")
@@ -114,9 +108,7 @@ class AccountingContractService:
             raise ValueError(f"Invalid {field} provided")
         return _to_checksum(value)
 
-    def _require_positive(
-        self, value: Any, field: str, allow_zero: bool = False
-    ) -> int:
+    def _require_positive(self, value: Any, field: str, allow_zero: bool = False) -> int:
         try:
             parsed = int(value)
         except (TypeError, ValueError) as exc:
@@ -130,9 +122,7 @@ class AccountingContractService:
                 raise ValueError(f"{field} must be positive")
         return parsed
 
-    def _require_hex(
-        self, value: str, field: str, expected_len: Optional[int] = None
-    ) -> HexBytes:
+    def _require_hex(self, value: str, field: str, expected_len: Optional[int] = None) -> HexBytes:
         try:
             data = HexBytes(_ensure_hex(value))
         except Exception as exc:
@@ -171,9 +161,7 @@ class AccountingContractService:
 
     def _build_tx_proof(self, request_payload: Dict[str, Optional[str]]):
         return (
-            self._optional_hex(
-                request_payload.get("rlp_block_header"), "rlp_block_header"
-            ),
+            self._optional_hex(request_payload.get("rlp_block_header"), "rlp_block_header"),
             self._optional_hex(
                 request_payload.get("transaction_index_rlp"), "transaction_index_rlp"
             ),
@@ -185,9 +173,7 @@ class AccountingContractService:
 
     def _build_receipt_proof(self, request_payload: Dict[str, Optional[str]]):
         return (
-            self._optional_hex(
-                request_payload.get("receipt_index_rlp"), "receipt_index_rlp"
-            ),
+            self._optional_hex(request_payload.get("receipt_index_rlp"), "receipt_index_rlp"),
             self._optional_hex(
                 request_payload.get("receipt_proof_stack"),
                 "receipt_proof_stack",
@@ -201,9 +187,7 @@ class AccountingContractService:
 
     def _get_reader_contract(self) -> Contract:
         if self.contract_reader is None:
-            raise ValueError(
-                "SAPPHIRE_RPC_URL must be configured to perform withdrawal operations"
-            )
+            raise ValueError("SAPPHIRE_RPC_URL must be configured to perform withdrawal operations")
         return self.contract_reader
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
@@ -308,13 +292,10 @@ class AccountingContractService:
                         "inputs": [],
                         "name": "symbol",
                         "outputs": [{"name": "", "type": "string"}],
-                        "type": "function"
+                        "type": "function",
                     }
                 ]
-                token_contract = chain_w3.eth.contract(
-                    address=context.token_address,
-                    abi=erc20_abi
-                )
+                token_contract = chain_w3.eth.contract(address=context.token_address, abi=erc20_abi)
                 return token_contract.functions.symbol().call()
             except Exception:
                 return "UNKNOWN"
@@ -352,9 +333,7 @@ class AccountingContractService:
             function_selector = "a9059cbb"
             padded_address = deposit_address[2:].lower().rjust(64, "0")
             padded_amount = hex(amount)[2:].rjust(64, "0")
-            transaction_data["data"] = (
-                "0x" + function_selector + padded_address + padded_amount
-            )
+            transaction_data["data"] = "0x" + function_selector + padded_address + padded_amount
             instructions = (
                 "Call the token contract's transfer function sending funds to the ROFL deposit address. "
                 "Use the provided transaction data to construct your transaction."
@@ -464,7 +443,7 @@ class AccountingContractService:
             tx_proof,
             receipt_proof,
         )
-        return self._submit(fn._encode_transaction_data(), gas=3_000_000) # leave 3m gas limit
+        return self._submit(fn._encode_transaction_data(), gas=3_000_000)  # leave 3m gas limit
 
     def get_balance(self, user_address: str, token_id: str) -> int:
         """Get user balance for a specific token from the contract."""
@@ -511,7 +490,7 @@ class AccountingContractService:
             "user_address": checksum_user,
             "service_address": service_address,
             "locks": locks,
-            "total_locked": total_locked
+            "total_locked": total_locked,
         }
 
         return response
@@ -601,15 +580,17 @@ class AccountingContractService:
                 resolved = result[4]
 
                 if withdrawal_user.lower() == checksum_user.lower() and not resolved:
-                    pending.append({
-                        "index": index,
-                        "user_address": result[0],
-                        "amount": str(result[1]),
-                        "block_number": result[2],
-                        "token_id": "0x" + result[3].hex(),
-                        "resolved": result[4],
-                        "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
-                    })
+                    pending.append(
+                        {
+                            "index": index,
+                            "user_address": result[0],
+                            "amount": str(result[1]),
+                            "block_number": result[2],
+                            "token_id": "0x" + result[3].hex(),
+                            "resolved": result[4],
+                            "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+                        }
+                    )
                 index += 1
             except Exception:
                 break
@@ -619,9 +600,7 @@ class AccountingContractService:
             "pending_withdrawals": pending,
         }
 
-    def get_all_pending_withdrawals(
-        self, user_address: Optional[str] = None
-    ) -> Dict[str, Any]:
+    def get_all_pending_withdrawals(self, user_address: Optional[str] = None) -> Dict[str, Any]:
         """Get all pending (unresolved) withdrawals.
 
         Args:
@@ -672,15 +651,17 @@ class AccountingContractService:
                     )
                     chain_id = None
 
-                pending.append({
-                    "index": index,
-                    "user_address": withdrawal_user,
-                    "amount": result[1],
-                    "token_id": "0x" + token_id_bytes.hex(),
-                    "block_number": block_number,
-                    "can_resolve": current_block - block_number >= 1,
-                    "chain_id": chain_id,
-                })
+                pending.append(
+                    {
+                        "index": index,
+                        "user_address": withdrawal_user,
+                        "amount": result[1],
+                        "token_id": "0x" + token_id_bytes.hex(),
+                        "block_number": block_number,
+                        "can_resolve": current_block - block_number >= 1,
+                        "chain_id": chain_id,
+                    }
+                )
             except Exception as e:
                 logger.warning(f"Failed to read withdrawal {index}: {e}")
 
@@ -726,13 +707,14 @@ class AccountingContractService:
         """Get balances for multiple tokens for a user."""
         checksum_user = self._require_address(user_address, "user_address")
 
-        token_hex_list = [self._require_hex(token_id, "token_id", expected_len=32) for token_id in token_ids]
+        token_hex_list = [
+            self._require_hex(token_id, "token_id", expected_len=32) for token_id in token_ids
+        ]
 
         contract_reader = self._get_reader_contract()
 
         balances = contract_reader.functions.getBalances(
-            checksum_user,
-            [bytes(token) for token in token_hex_list]
+            checksum_user, [bytes(token) for token in token_hex_list]
         ).call()
 
         token_balances = []
@@ -741,12 +723,14 @@ class AccountingContractService:
             token_symbol = self._get_token_symbol(token_hex)
             token_context = self._get_token_context(token_hex)
 
-            token_balances.append({
-                "token_id": token_id.lower(),
-                "balance": str(balances[i]),
-                "token_symbol": token_symbol,
-                "chain_id": str(token_context.chain_id),
-            })
+            token_balances.append(
+                {
+                    "token_id": token_id.lower(),
+                    "balance": str(balances[i]),
+                    "token_symbol": token_symbol,
+                    "chain_id": str(token_context.chain_id),
+                }
+            )
 
         return {
             "user_address": checksum_user,
@@ -760,8 +744,7 @@ class AccountingContractService:
         contract_reader = self._get_reader_contract()
 
         total_locked = contract_reader.functions.getTotalLockedBalance(
-            checksum_user,
-            bytes(token_hex)
+            checksum_user, bytes(token_hex)
         ).call()
 
         return {
@@ -779,7 +762,11 @@ class AccountingContractService:
         result = {
             "token_id": token_id.lower(),
             "token_type": token_type,
-            "token_type_name": "NativeEVM" if token_type == 0 else "ERC20" if token_type == 1 else "Unknown",
+            "token_type_name": "NativeEVM"
+            if token_type == 0
+            else "ERC20"
+            if token_type == 1
+            else "Unknown",
             "data": "0x" + token_data.hex() if token_data else "0x",
         }
 

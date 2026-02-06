@@ -39,12 +39,8 @@ def _parse_int_amount(value: int | str | float) -> int:
 class DepositQuoteRequest(BaseModel):
     """Request parameters for generating a deposit quote."""
 
-    user_address: str = Field(
-        ..., description="User wallet address on source chain", min_length=1
-    )
-    token_id: str = Field(
-        ..., description="Bytes32 token identifier (hex string)", min_length=4
-    )
+    user_address: str = Field(..., description="User wallet address on source chain", min_length=1)
+    token_id: str = Field(..., description="Bytes32 token identifier (hex string)", min_length=4)
     amount: int = Field(
         ..., description="Amount to deposit in token's base units (e.g. wei for ETH)", gt=0
     )
@@ -259,7 +255,9 @@ class LockedFundsResponse(BaseModel):
     """Response containing user's locked funds information."""
 
     user_address: str
-    service_address: Optional[str] = Field(None, description="Filter by service address if provided")
+    service_address: Optional[str] = Field(
+        None, description="Filter by service address if provided"
+    )
     locks: list[LockInfo]
     total_locked: int
 
@@ -329,5 +327,3 @@ class WithdrawalNonceResponse(BaseModel):
 
     user_address: str
     nonce: int
-
-

@@ -6,12 +6,12 @@ import time
 from typing import Dict, List, Optional, Set
 
 from eth_abi import decode
-from web3 import Web3
 from hexbytes import HexBytes
+from web3 import Web3
 
+from src.abi.accounting import ACCOUNTING_ABI
 from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import AccountingContractService
-from src.abi.accounting import ACCOUNTING_ABI
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class WithdrawalProcessor:
                 return await asyncio.to_thread(func, *args, **kwargs)
             except Exception as e:
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
+                    delay = base_delay * (2**attempt)
                     logger.warning(f"RPC error, retrying in {delay}s (attempt {attempt + 1}): {e}")
                     await asyncio.sleep(delay)
                     continue
@@ -178,7 +178,9 @@ class WithdrawalProcessor:
             logger.error(f"{chain_name}: failed to get withdrawal count: {e}")
             return
 
-        logger.info(f"{chain_name}: scanning {total_withdrawals} withdrawals for {len(target_nonces)} missing nonces")
+        logger.info(
+            f"{chain_name}: scanning {total_withdrawals} withdrawals for {len(target_nonces)} missing nonces"
+        )
 
         # Scan in reverse - missing broadcasts are likely recent
         for index in range(total_withdrawals - 1, -1, -1):
@@ -200,11 +202,13 @@ class WithdrawalProcessor:
                 # Not yet processed by the main polling loop, skip
                 continue
             if not tx_identifier or len(tx_identifier) < 32:
-                logger.warning(f"Withdrawal #{index}: resolved but has invalid txIdentifier, skipping")
+                logger.warning(
+                    f"Withdrawal #{index}: resolved but has invalid txIdentifier, skipping"
+                )
                 continue
 
             # Decode nonce from txIdentifier
-            nonce = decode(['uint64'], tx_identifier)[0]
+            nonce = decode(["uint64"], tx_identifier)[0]
 
             # Get chain_id for this withdrawal
             token_id_bytes = result[3]
@@ -240,9 +244,13 @@ class WithdrawalProcessor:
                     logger.error(f"Withdrawal #{index}: broadcast failed - {exc}")
 
             if index > 0 and index % 100 == 0:
-                logger.info(f"{chain_name}: scanned {index}/{total_withdrawals} withdrawals, found {len(found_nonces)}/{len(target_nonces)}")
+                logger.info(
+                    f"{chain_name}: scanned {index}/{total_withdrawals} withdrawals, found {len(found_nonces)}/{len(target_nonces)}"
+                )
 
-        logger.info(f"{chain_name}: catch-up complete, broadcast {len(found_nonces)}/{len(target_nonces)} missing")
+        logger.info(
+            f"{chain_name}: catch-up complete, broadcast {len(found_nonces)}/{len(target_nonces)} missing"
+        )
 
     async def _get_pending_withdrawals(self) -> Dict[int, List[Dict]]:
         """Get pending withdrawals grouped by chain for ordered processing."""
@@ -256,7 +264,8 @@ class WithdrawalProcessor:
 
             # Filter by block delay and not already processed (per-chain high water mark)
             eligible = [
-                w for w in pending
+                w
+                for w in pending
                 if (current_block - w["block_number"] >= 1)
                 and w["index"] > self._chain_high_water_mark.get(w.get("chain_id", 0), -1)
             ]

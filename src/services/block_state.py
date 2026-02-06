@@ -110,8 +110,7 @@ class BlockStateManager:
             try:
                 self._load_state()
                 logger.info(
-                    f"Loaded block state from {self._state_file}: "
-                    f"{len(self._state.chains)} chains"
+                    f"Loaded block state from {self._state_file}: {len(self._state.chains)} chains"
                 )
                 for chain_id, chain_state in self._state.chains.items():
                     logger.info(

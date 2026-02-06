@@ -75,16 +75,10 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_contract_address=os.getenv(
                 "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
             ),
-            rofl_adapter_address=os.getenv(
-                "ROFL_ADAPTER_ADDRESS", _defaults.rofl_adapter_address
-            ),
-            sapphire_chain_id=_get_int(
-                "SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id
-            ),
+            rofl_adapter_address=os.getenv("ROFL_ADAPTER_ADDRESS", _defaults.rofl_adapter_address),
+            sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
-            accounting_gas_limit=_get_int(
-                "ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit
-            ),
+            accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit),
             chain_rpc_urls=chain_rpc_urls,
             deposit_poll_interval=_get_int(
                 "DEPOSIT_POLL_INTERVAL", _defaults.deposit_poll_interval
