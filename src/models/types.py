@@ -21,3 +21,5 @@ class Settings:
     chain_rpc_urls: Dict[int, str] = field(default_factory=dict)
     deposit_poll_interval: int = 1
     withdrawal_poll_interval: int = 12
+    withdrawal_resolution_timeout: int = 60
+    min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei

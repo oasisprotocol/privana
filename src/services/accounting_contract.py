@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
@@ -266,6 +269,23 @@ class AccountingContractService:
             is_native=is_native,
         )
 
+    def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
+        """Check that evmAddress has enough native balance on the destination chain for gas."""
+        chain_w3 = self._get_chain_web3(chain_id)
+        evm_address = self._get_deposit_address()
+        balance = chain_w3.eth.get_balance(evm_address)
+
+        required = self.settings.min_withdrawal_gas_balance
+        if is_native:
+            required += amount
+
+        if balance < required:
+            chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+            raise ValueError(
+                f"Insufficient native balance on {chain_name}. "
+                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
+            )
+
     def _get_token_symbol(self, token: HexBytes) -> str:
         context = self._get_token_context(token)
 
@@ -500,18 +520,46 @@ class AccountingContractService:
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
+
+        # Validate withdrawal nonce matches on-chain state
+        contract_reader = self._get_reader_contract()
+        expected_nonce = contract_reader.functions.withdrawalNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"Withdrawal nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
+
+        # Validate token and destination chain before on-chain submission
+        context = self._get_token_context(token)
+        if not context.chain_id:
+            raise ValueError(
+                f"Token {token.hex()} has invalid chain_id (0). "
+                f"Cannot process withdrawal - token not properly registered."
+            )
+
+        # Validate we have RPC configured for destination chain
+        if context.chain_id not in self.settings.chain_rpc_urls:
+            raise ValueError(
+                f"No RPC URL configured for chain_id {context.chain_id}. "
+                f"Cannot process withdrawal - destination chain not supported."
+            )
+
+        # Verify the broadcaster has enough native balance on the destination chain
+        self._check_destination_balance(context.chain_id, context.is_native, amount)
 
         fn = self.contract.functions.requestWithdrawal(
             user,
             token,
             amount,
+            nonce,
             signature,
         )
 
         submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
 
-        context = self._get_token_context(token)
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:
             detail_parts.append(f"token_address={context.token_address}")
@@ -519,14 +567,10 @@ class AccountingContractService:
 
         return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
 
-    def resolve_withdrawal(self, payload: Dict) -> SubmissionResult:
-        index = self._require_positive(payload["index"], "index", allow_zero=True)
-
+    def resolve_withdrawal(self, index: int) -> SubmissionResult:
+        """Submit resolveWithdrawal transaction via ROFL."""
         fn = self.contract.functions.resolveWithdrawal(index)
-
-        submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
-
-        return SubmissionResult(submission_id=submission_id, status="submitted")
+        return self._submit(fn._encode_transaction_data())
 
     def get_withdrawal(self, index: int) -> Dict[str, Any]:
         contract_reader = self._get_reader_contract()
@@ -573,6 +617,76 @@ class AccountingContractService:
         return {
             "user_address": checksum_user,
             "pending_withdrawals": pending,
+        }
+
+    def get_all_pending_withdrawals(
+        self, user_address: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get all pending (unresolved) withdrawals.
+
+        Args:
+            user_address: Optional filter by user address
+        """
+        contract_reader = self._get_reader_contract()
+        current_block = self.reader_w3.eth.block_number if self.reader_w3 else 0
+
+        checksum_user = None
+        if user_address:
+            checksum_user = self._require_address(user_address, "user_address")
+
+        pending = []
+
+        # Get total withdrawal count from contract
+        try:
+            total_withdrawals = contract_reader.functions.withdrawalCount().call()
+        except Exception as e:
+            logger.error(f"Failed to get withdrawal count: {e}")
+            return {"pending": [], "current_block": current_block}
+
+        for index in range(total_withdrawals):
+            try:
+                result = contract_reader.functions.withdrawals(index).call()
+
+                withdrawal_user = result[0]
+                resolved = result[4]
+
+                # Skip if already resolved
+                if resolved:
+                    continue
+
+                # Apply user filter
+                if checksum_user and withdrawal_user.lower() != checksum_user.lower():
+                    continue
+
+                block_number = result[2]
+                token_id_bytes = result[3]
+
+                # Get chain_id for this token
+                token_hex = HexBytes(token_id_bytes)
+                try:
+                    context = self._get_token_context(token_hex)
+                    chain_id = context.chain_id
+                except Exception as e:
+                    logger.warning(
+                        f"Withdrawal #{index}: unknown/invalid token 0x{token_id_bytes.hex()} - {e}"
+                    )
+                    chain_id = None
+
+                pending.append({
+                    "index": index,
+                    "user_address": withdrawal_user,
+                    "amount": result[1],
+                    "token_id": "0x" + token_id_bytes.hex(),
+                    "block_number": block_number,
+                    "can_resolve": current_block - block_number >= 1,
+                    "chain_id": chain_id,
+                })
+            except Exception as e:
+                logger.warning(f"Failed to read withdrawal {index}: {e}")
+
+        return {
+            "pending": pending,
+            "current_block": current_block,
         }
 
     def unlock_all_expired_locks(self, payload: Dict) -> SubmissionResult:
@@ -682,6 +796,15 @@ class AccountingContractService:
 
         return result
 
+    def get_withdrawal_nonce(self, user_address: str) -> Dict[str, Any]:
+        """Get the current withdrawal nonce for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+        nonce = contract_reader.functions.withdrawalNonces(checksum_user).call()
+        return {
+            "user_address": checksum_user,
+            "nonce": nonce,
+        }
 
 
 _service_instance: Optional[AccountingContractService] = None

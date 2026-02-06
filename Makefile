@@ -1,4 +1,4 @@
-.PHONY: install dev run test lint clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage
+.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage
 
 install:
 	uv sync --no-dev
@@ -14,6 +14,9 @@ test:
 
 lint:
 	uv run ruff check src
+
+typecheck:
+	uv run mypy src
 
 lint-fix:
 	uv run ruff check --fix src

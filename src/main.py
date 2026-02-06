@@ -28,7 +28,7 @@ async def lifespan(_app: FastAPI):
         app: FastAPI application instance
     """
     from src.services.deposit_listener import get_deposit_listener
-    from src.services.withdrawal_resolver import get_withdrawal_resolver
+    from src.services.withdrawal_processor import get_withdrawal_processor
 
     logger.info("Accounting Module API starting...")
 
@@ -36,13 +36,13 @@ async def lifespan(_app: FastAPI):
     await deposit_listener.start()
     logger.info("Deposit listener started")
 
-    withdrawal_resolver = get_withdrawal_resolver()
-    await withdrawal_resolver.start()
-    logger.info("Withdrawal resolver started")
+    withdrawal_processor = get_withdrawal_processor()
+    await withdrawal_processor.start()
+    logger.info("Withdrawal processor started")
 
     yield
 
-    await withdrawal_resolver.stop()
+    await withdrawal_processor.stop()
     await deposit_listener.stop()
     logger.info("Accounting Module API shutting down...")
 

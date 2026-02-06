@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -12,6 +13,27 @@ def _normalise_hex(value: str) -> str:
     if not value.startswith("0x"):
         value = "0x" + value
     return value
+
+
+def _parse_int_amount(value: int | str | float) -> int:
+    """Parse amount from int, string, or scientific notation.
+
+    For string inputs, tries direct int conversion first to preserve precision
+    for large integers. Uses Decimal for scientific notation or decimal strings
+    to avoid float precision loss.
+    """
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        value = value.strip()
+        # Try direct int conversion first (preserves precision for large ints)
+        # Use Decimal for scientific notation or decimals to preserve precision
+        if "e" in value.lower() or "." in value:
+            return int(Decimal(value))
+        return int(value)
+    return int(value)
 
 
 class DepositQuoteRequest(BaseModel):
@@ -26,6 +48,10 @@ class DepositQuoteRequest(BaseModel):
     amount: int = Field(
         ..., description="Amount to deposit in token's base units (e.g. wei for ETH)", gt=0
     )
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("user_address", "token_id")
     def _lowercase(cls, value: str) -> str:  # noqa: D401 - simple normaliser
@@ -100,6 +126,10 @@ class LockFundsRequest(BaseModel):
     expiry: int = Field(..., gt=0)
     signature: str
 
+    @field_validator("amount", "expiry", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
     @field_validator("token_id", "signature")
     def _normalise_hex_fields(cls, value: str) -> str:
         return _normalise_hex(value)
@@ -128,6 +158,10 @@ class TransferFundsRequest(BaseModel):
     amount: int = Field(..., gt=0)
     signature: str
 
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
     @field_validator("token_id", "signature")
     def _normalise_tf_hex_fields(cls, value: str) -> str:
         return _normalise_hex(value)
@@ -141,6 +175,10 @@ class TransferLockedFundsRequest(BaseModel):
     to_address: str = Field(..., min_length=1)
     amount: int = Field(..., gt=0)
     signature: str
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("signature")
     def _normalise_tl_signature(cls, value: str) -> str:
@@ -160,7 +198,12 @@ class WithdrawalRequest(BaseModel):
     user_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
     signature: str
+
+    @field_validator("amount", "nonce", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("token_id", "signature")
     def _normalise_withdraw_hex(cls, value: str) -> str:
@@ -279,5 +322,12 @@ class TokenInfoResponse(BaseModel):
     chain_id: Optional[int] = None
     chain_name: Optional[str] = None
     token_address: Optional[str] = None
+
+
+class WithdrawalNonceResponse(BaseModel):
+    """Response containing the current withdrawal nonce for a user."""
+
+    user_address: str
+    nonce: int
 
 

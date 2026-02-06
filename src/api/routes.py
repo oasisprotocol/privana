@@ -26,6 +26,7 @@ from src.models.accounting import (
     UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
     WithdrawalInfoResponse,
+    WithdrawalNonceResponse,
     WithdrawalRequest,
 )
 from src.services.accounting_contract import (
@@ -174,6 +175,20 @@ async def get_pending_withdrawals(user_address: str) -> PendingWithdrawalsRespon
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get pending withdrawals")
         raise HTTPException(status_code=500, detail="Failed to retrieve pending withdrawals") from exc
+
+
+@router.get("/withdraw/nonce/{user_address}", response_model=WithdrawalNonceResponse)
+async def get_withdrawal_nonce(user_address: str) -> WithdrawalNonceResponse:
+    """Get the current withdrawal nonce for a user."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_withdrawal_nonce, user_address)
+        return WithdrawalNonceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get withdrawal nonce")
+        raise HTTPException(status_code=500, detail="Failed to retrieve withdrawal nonce") from exc
 
 
 @router.get("/withdraw/{index}", response_model=WithdrawalInfoResponse)
