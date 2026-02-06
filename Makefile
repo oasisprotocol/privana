@@ -1,4 +1,4 @@
-.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage
+.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage format format-check
 
 install:
 	uv sync --no-dev
@@ -13,13 +13,19 @@ test:
 	uv run pytest
 
 lint:
-	uv run ruff check src
+	uv run ruff check src test
 
 typecheck:
 	uv run mypy src
 
 lint-fix:
-	uv run ruff check --fix src
+	uv run ruff check --fix src test
+
+format:
+	uv run ruff format src test
+
+format-check:
+	uv run ruff format --check src test
 
 clean:
 	rm -rf .venv __pycache__ .pytest_cache .ruff_cache

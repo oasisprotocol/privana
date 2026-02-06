@@ -1,11 +1,11 @@
 """Tests for withdrawal processing service."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
 from eth_abi import encode
 
 from src.services.withdrawal_processor import WithdrawalProcessor
-
 
 TEST_USER_ADDRESS = "0x1234567890123456789012345678901234567890"
 TEST_CHAIN_ID = 84532
@@ -20,10 +20,12 @@ class TestWithdrawalProcessor:
     def mock_accounting_service(self):
         """Create a mock accounting service."""
         service = MagicMock()
-        service.get_all_pending_withdrawals = MagicMock(return_value={
-            "pending": [],
-            "current_block": 100,
-        })
+        service.get_all_pending_withdrawals = MagicMock(
+            return_value={
+                "pending": [],
+                "current_block": 100,
+            }
+        )
         service.resolve_withdrawal = MagicMock(return_value=MagicMock(submission_id="test-123"))
         service._send_raw_transaction = MagicMock(return_value="0x" + "ab" * 32)
         service._get_reader_contract = MagicMock()
@@ -38,7 +40,10 @@ class TestWithdrawalProcessor:
                 sapphire_rpc_url="https://testnet.sapphire.oasis.io",
                 accounting_contract_address="0x" + "ab" * 20,
             )
-            with patch("src.services.withdrawal_processor.AccountingContractService", return_value=mock_accounting_service):
+            with patch(
+                "src.services.withdrawal_processor.AccountingContractService",
+                return_value=mock_accounting_service,
+            ):
                 with patch("src.services.withdrawal_processor.Web3") as mock_web3:
                     mock_web3.return_value.eth.block_number = 100
                     mock_web3.to_checksum_address.return_value = "0x" + "Ab" * 20
@@ -162,7 +167,12 @@ class TestWithdrawalProcessor:
         # withdrawals(index).call returns: (user, amount, block, tokenId, resolved, txId)
         # Already resolved on first check
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [0])
+            TEST_USER_ADDRESS,
+            100,
+            50,
+            b"\x00" * 32,
+            True,
+            encode(["uint64"], [0]),
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
         processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
@@ -181,7 +191,12 @@ class TestWithdrawalProcessor:
         """Test that an already-resolved withdrawal is broadcast without re-submitting."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [0])
+            TEST_USER_ADDRESS,
+            100,
+            50,
+            b"\x00" * 32,
+            True,
+            encode(["uint64"], [0]),
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
         processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
@@ -199,9 +214,16 @@ class TestWithdrawalProcessor:
         contract_reader = processor.accounting_service._get_reader_contract()
         # Never becomes resolved
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, False, b""
+            TEST_USER_ADDRESS,
+            100,
+            50,
+            b"\x00" * 32,
+            False,
+            b"",
         )
-        processor.accounting_service.resolve_withdrawal.return_value = MagicMock(submission_id="test-123")
+        processor.accounting_service.resolve_withdrawal.return_value = MagicMock(
+            submission_id="test-123"
+        )
 
         withdrawal = {"index": 0, "chain_id": TEST_CHAIN_ID}
 
@@ -218,7 +240,12 @@ class TestWithdrawalProcessor:
         """Test that 'nonce too low' error is treated as success."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [0])
+            TEST_USER_ADDRESS,
+            100,
+            50,
+            b"\x00" * 32,
+            True,
+            encode(["uint64"], [0]),
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
         processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
@@ -286,7 +313,12 @@ class TestWithdrawalProcessor:
         contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
         # Withdrawal: resolved=True, txIdentifier encodes nonce=1
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [1])
+            TEST_USER_ADDRESS,
+            100,
+            50,
+            b"\x00" * 32,
+            True,
+            encode(["uint64"], [1]),
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
 
@@ -316,7 +348,12 @@ class TestWithdrawalProcessor:
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [1])
+            TEST_USER_ADDRESS,
+            100,
+            50,
+            b"\x00" * 32,
+            True,
+            encode(["uint64"], [1]),
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
 

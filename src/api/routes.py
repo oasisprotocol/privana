@@ -55,10 +55,7 @@ async def create_deposit_quote(payload: DepositQuoteRequest) -> DepositQuoteResp
 
     try:
         quote: Dict = await asyncio.to_thread(
-            _service.deposit_quote,
-            payload.user_address,
-            payload.token_id,
-            payload.amount
+            _service.deposit_quote, payload.user_address, payload.token_id, payload.amount
         )
         return DepositQuoteResponse(**quote)
     except ValueError as exc:
@@ -122,7 +119,9 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
 
 
 @router.post("/funds/transfer-locked", response_model=TransactionSubmissionResponse)
-async def transfer_locked_funds(payload: TransferLockedFundsRequest) -> TransactionSubmissionResponse:
+async def transfer_locked_funds(
+    payload: TransferLockedFundsRequest,
+) -> TransactionSubmissionResponse:
     """Transfer locked funds based on a casino service signature."""
 
     try:
@@ -174,7 +173,9 @@ async def get_pending_withdrawals(user_address: str) -> PendingWithdrawalsRespon
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get pending withdrawals")
-        raise HTTPException(status_code=500, detail="Failed to retrieve pending withdrawals") from exc
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve pending withdrawals"
+        ) from exc
 
 
 @router.get("/withdraw/nonce/{user_address}", response_model=WithdrawalNonceResponse)
@@ -207,8 +208,7 @@ async def get_withdrawal_info(index: int) -> WithdrawalInfoResponse:
 
 @router.get("/funds/locked/{user_address}", response_model=LockedFundsResponse)
 async def get_locked_funds(
-    user_address: str,
-    service_address: Optional[str] = None
+    user_address: str, service_address: Optional[str] = None
 ) -> LockedFundsResponse:
     """Get locked funds for a user, optionally filtered by service address."""
 
@@ -252,11 +252,15 @@ async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
 
 
 @router.post("/funds/unlock-all-expired", response_model=TransactionSubmissionResponse)
-async def unlock_all_expired_locks(payload: UnlockAllExpiredLocksRequest) -> TransactionSubmissionResponse:
+async def unlock_all_expired_locks(
+    payload: UnlockAllExpiredLocksRequest,
+) -> TransactionSubmissionResponse:
     """Unlock all expired locks for a user."""
 
     try:
-        submission = await asyncio.to_thread(_service.unlock_all_expired_locks, payload.model_dump())
+        submission = await asyncio.to_thread(
+            _service.unlock_all_expired_locks, payload.model_dump()
+        )
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -284,7 +288,9 @@ async def get_batch_balances(payload: BatchBalancesRequest) -> BatchBalancesResp
     """Get balances for multiple tokens for a user."""
 
     try:
-        result = await asyncio.to_thread(_service.get_balances, payload.user_address, payload.token_ids)
+        result = await asyncio.to_thread(
+            _service.get_balances, payload.user_address, payload.token_ids
+        )
         return BatchBalancesResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -293,7 +299,9 @@ async def get_batch_balances(payload: BatchBalancesRequest) -> BatchBalancesResp
         raise HTTPException(status_code=500, detail="Failed to retrieve balances") from exc
 
 
-@router.get("/funds/locked/total/{user_address}/{token_id}", response_model=TotalLockedBalanceResponse)
+@router.get(
+    "/funds/locked/total/{user_address}/{token_id}", response_model=TotalLockedBalanceResponse
+)
 async def get_total_locked_balance(user_address: str, token_id: str) -> TotalLockedBalanceResponse:
     """Get total locked balance for a specific token across all locks."""
 
@@ -304,7 +312,9 @@ async def get_total_locked_balance(user_address: str, token_id: str) -> TotalLoc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to get total locked balance")
-        raise HTTPException(status_code=500, detail="Failed to retrieve total locked balance") from exc
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve total locked balance"
+        ) from exc
 
 
 @router.get("/tokens/{token_id}", response_model=TokenInfoResponse)

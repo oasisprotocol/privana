@@ -1,7 +1,8 @@
 import os
 import traceback
-from web3 import Web3
+
 from inclusion_proofs import get_tx_inclusion_proof
+from web3 import Web3
 
 
 def main():
