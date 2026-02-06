@@ -1,20 +1,37 @@
 import { task } from "hardhat/config";
 import * as cbor from "cbor";
 import { Interface } from "ethers";
-import AccountingArtifact from "../artifacts/contracts/Accounting.sol/Accounting.json";
 
-// Build error selectors from the ABI
-function buildErrorSelectors(): Record<string, string> {
-  const iface = new Interface(AccountingArtifact.abi);
-  const selectors: Record<string, string> = {};
-  iface.forEachError((error) => {
-    // selector is 0x prefixed, we want just the hex part
-    selectors[error.selector.slice(2)] = error.name;
-  });
-  return selectors;
+// Build error selectors from the ABI (lazy loaded)
+let ERROR_SELECTORS: Record<string, string> | null = null;
+
+function getErrorSelectors(): Record<string, string> {
+  if (ERROR_SELECTORS === null) {
+    // Dynamic require to avoid loading before artifacts exist
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const AccountingArtifact = require("../artifacts/contracts/Accounting.sol/Accounting.json");
+    const iface = new Interface(AccountingArtifact.abi);
+    ERROR_SELECTORS = {};
+    iface.forEachError((error) => {
+      // selector is 0x prefixed, we want just the hex part
+      ERROR_SELECTORS![error.selector.slice(2)] = error.name;
+    });
+  }
+  return ERROR_SELECTORS;
 }
 
-const ERROR_SELECTORS = buildErrorSelectors();
+// Chain ID to block explorer URL mapping
+const CHAIN_EXPLORERS: Record<number, string> = {
+  84532: "https://sepolia.basescan.org",
+};
+
+// Extract chain ID from token ID (first 32 bytes after token type)
+function getChainIdFromTokenId(tokenId: string): number | null {
+  // Token ID format: keccak256(abi.encode(tokenType, abi.encodePacked(chainId, tokenAddress)))
+  // We can't reverse the hash, so we check against known chain IDs
+  // For now, default to Base Sepolia
+  return 84532;
+}
 
 function decodeSubmissionResponse(hexString: string): { ok: boolean; error?: string } {
   try {
@@ -30,7 +47,7 @@ function decodeSubmissionResponse(hexString: string): { ok: boolean; error?: str
       if (typeof message === "string" && message.startsWith("reverted: ")) {
         const base64Error = message.substring("reverted: ".length);
         const errorBytes = Buffer.from(base64Error, "base64").toString("hex");
-        const errorName = ERROR_SELECTORS[errorBytes] || `Unknown(0x${errorBytes})`;
+        const errorName = getErrorSelectors()[errorBytes] || `Unknown(0x${errorBytes})`;
         return { ok: false, error: `Contract reverted: ${errorName}` };
       }
       return { ok: false, error: message || "Unknown error" };
@@ -168,19 +185,28 @@ task("withdraw")
         .then((d) => BigInt(d.balance || "0"))
         .catch(() => BigInt(0));
 
+      const chainId = getChainIdFromTokenId(args.tokenid);
+      const explorerUrl = chainId ? CHAIN_EXPLORERS[chainId] : null;
+      const depositAddress = await accounting.evmAddress();
+
       const expectedBalance = balanceBefore - BigInt(args.amount);
       if (balanceAfter === expectedBalance) {
         console.log("\n=== Withdrawal Complete ===");
         console.log("Balance before:", balanceBefore.toString());
         console.log("Balance after:", balanceAfter.toString());
         console.log("Withdrawal was processed quickly and has been broadcast to the destination chain.");
-        console.log("\nCheck the destination chain explorer for your funds.");
+        if (explorerUrl) {
+          console.log(`\nView transactions: ${explorerUrl}/address/${depositAddress}#tokentxns`);
+        }
         return { ...result, resolved: true };
       } else if (balanceAfter < balanceBefore) {
         console.log("\n=== Withdrawal Likely Complete ===");
         console.log("Balance before:", balanceBefore.toString());
         console.log("Balance after:", balanceAfter.toString());
         console.log("Balance decreased - withdrawal appears to have been processed.");
+        if (explorerUrl) {
+          console.log(`\nView transactions: ${explorerUrl}/address/${depositAddress}#tokentxns`);
+        }
         return { ...result, resolved: true };
       } else {
         console.log("No pending withdrawals found and balance unchanged.");
@@ -204,10 +230,16 @@ task("withdraw")
       const resolved = withdrawalInfo[4];
 
       if (resolved) {
+        const chainId = getChainIdFromTokenId(args.tokenid);
+        const explorerUrl = chainId ? CHAIN_EXPLORERS[chainId] : null;
+        const depositAddress = await accounting.evmAddress();
+
         console.log("\n=== Withdrawal Complete ===");
         console.log(`Withdrawal #${withdrawalIndex} has been resolved on Sapphire`);
         console.log("The backend has broadcast the transaction to the destination chain.");
-        console.log("\nCheck the destination chain explorer for your funds.");
+        if (explorerUrl) {
+          console.log(`\nView transactions: ${explorerUrl}/address/${depositAddress}#tokentxns`);
+        }
         return { ...result, withdrawalIndex, resolved: true };
       }
 
