@@ -19,6 +19,19 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Solidity dependencies
+        run: cd solidity && bun install
+
+      - name: Compile Solidity contracts
+        run: make solidity-build
+
+      - name: Verify ABI artifacts exist
+        run: |
+          test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json || (echo "Solidity artifacts not found!" && exit 1)
+
       - name: Install dependencies
         run: make dev
 
