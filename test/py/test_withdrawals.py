@@ -250,3 +250,82 @@ class TestWithdrawalProcessor:
 
         await processor.stop()
         assert processor._is_running is False
+
+    @pytest.mark.asyncio
+    async def test_catch_up_no_missing_broadcasts(self, processor):
+        """Test catch-up when there are no missing broadcasts."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+
+        # Contract nonce <= chain nonce means nothing missing
+        processor._contract.functions.nonces.return_value.call.return_value = 5
+        processor._get_evm_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = MagicMock(return_value=5)
+        processor._get_destination_web3 = MagicMock(return_value=mock_dest_web3)
+
+        await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        # Should not try to broadcast anything
+        processor.accounting_service._send_raw_transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_catch_up_finds_and_broadcasts_missing(self, processor):
+        """Test catch-up finds and broadcasts missing withdrawals."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+
+        # Contract has nonce 2, chain has nonce 1 -> 1 missing
+        processor._contract.functions.nonces.return_value.call.return_value = 2
+        processor._get_evm_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = MagicMock(return_value=1)
+        processor._get_destination_web3 = MagicMock(return_value=mock_dest_web3)
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
+        # Withdrawal: resolved=True, txIdentifier encodes nonce=1
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [1])
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+
+        # Mock token context
+        mock_context = MagicMock()
+        mock_context.chain_id = TEST_CHAIN_ID
+        processor.accounting_service._get_token_context = MagicMock(return_value=mock_context)
+
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        processor.accounting_service._send_raw_transaction.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_catch_up_handles_already_broadcast(self, processor):
+        """Test catch-up handles 'nonce too low' gracefully."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+
+        processor._contract.functions.nonces.return_value.call.return_value = 2
+        processor._get_evm_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = MagicMock(return_value=1)
+        processor._get_destination_web3 = MagicMock(return_value=mock_dest_web3)
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            TEST_USER_ADDRESS, 100, 50, b"\x00" * 32, True, encode(["uint64"], [1])
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+
+        mock_context = MagicMock()
+        mock_context.chain_id = TEST_CHAIN_ID
+        processor.accounting_service._get_token_context = MagicMock(return_value=mock_context)
+
+        # Simulate already broadcast
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
+
+        # Should not raise, just log and continue
+        await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])

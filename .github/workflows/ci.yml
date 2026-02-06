@@ -22,5 +22,8 @@ jobs:
       - name: Install dependencies
         run: make dev
 
+      - name: Typecheck
+        run: make typecheck
+
       - name: Test
         run: make test

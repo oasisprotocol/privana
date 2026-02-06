@@ -30,7 +30,6 @@ ACCOUNTING_ABI = [
     {"inputs": [], "name": "InsufficientBalance", "type": "error"},
     {"inputs": [], "name": "InsufficientLockedAmount", "type": "error"},
     {"inputs": [], "name": "InvalidAmount", "type": "error"},
-    {"inputs": [], "name": "WithdrawalAlreadyResolved", "type": "error"},
     {"inputs": [], "name": "WithdrawalTooSoon", "type": "error"},
     {"inputs": [], "name": "InvalidDeposit", "type": "error"},
     {"inputs": [], "name": "InvalidExpiry", "type": "error"},

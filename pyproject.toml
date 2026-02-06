@@ -24,6 +24,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
+    "mypy>=1.0.0",
 ]
 test = [
     "eth-utils>=5.0.0",
@@ -52,8 +53,20 @@ ignore = ["E501"]
 asyncio_mode = "auto"
 testpaths = ["test"]
 
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+ignore_missing_imports = true
+mypy_path = "."
+explicit_package_bases = true
+# Relax strictness for now - incrementally enable as errors are fixed
+warn_return_any = false
+check_untyped_defs = false
+disable_error_code = ["assignment", "arg-type", "call-overload", "union-attr", "attr-defined"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=0.21.0",
+    "mypy>=1.0.0",
 ]

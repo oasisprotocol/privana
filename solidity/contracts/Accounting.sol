@@ -108,7 +108,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error InvalidTransactionData();
     error InvalidExpiry();
     error InvalidAmount();
-    error WithdrawalAlreadyResolved();
     error WithdrawalTooSoon();
 
     struct WithdrawalRequest {

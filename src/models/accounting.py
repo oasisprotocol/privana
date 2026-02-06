@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -15,15 +16,23 @@ def _normalise_hex(value: str) -> str:
 
 
 def _parse_int_amount(value: int | str | float) -> int:
-    """Parse amount from int, string, or scientific notation."""
+    """Parse amount from int, string, or scientific notation.
+
+    For string inputs, tries direct int conversion first to preserve precision
+    for large integers. Uses Decimal for scientific notation or decimal strings
+    to avoid float precision loss.
+    """
     if isinstance(value, int):
         return value
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str):
         value = value.strip()
-        # Handle scientific notation and numeric strings
-        return int(float(value))
+        # Try direct int conversion first (preserves precision for large ints)
+        # Use Decimal for scientific notation or decimals to preserve precision
+        if "e" in value.lower() or "." in value:
+            return int(Decimal(value))
+        return int(value)
     return int(value)
 
 

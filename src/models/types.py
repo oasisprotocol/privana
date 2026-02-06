@@ -21,3 +21,4 @@ class Settings:
     chain_rpc_urls: Dict[int, str] = field(default_factory=dict)
     deposit_poll_interval: int = 1
     withdrawal_poll_interval: int = 12
+    withdrawal_resolution_timeout: int = 60

@@ -180,7 +180,8 @@ class WithdrawalProcessor:
 
         logger.info(f"{chain_name}: scanning {total_withdrawals} withdrawals for {len(target_nonces)} missing nonces")
 
-        for index in range(total_withdrawals):
+        # Scan in reverse - missing broadcasts are likely recent
+        for index in range(total_withdrawals - 1, -1, -1):
             if len(found_nonces) >= len(target_nonces):
                 break
 
@@ -243,7 +244,7 @@ class WithdrawalProcessor:
 
         logger.info(f"{chain_name}: catch-up complete, broadcast {len(found_nonces)}/{len(target_nonces)} missing")
 
-    async def _get_pending_withdrawals(self) -> List[Dict]:
+    async def _get_pending_withdrawals(self) -> Dict[int, List[Dict]]:
         """Get pending withdrawals grouped by chain for ordered processing."""
         try:
             result = await self._rate_limited_call(
@@ -318,7 +319,7 @@ class WithdrawalProcessor:
                 logger.info(f"Withdrawal #{index}: submitted ({result.submission_id})")
 
                 # Wait for resolution (poll until resolved)
-                for _ in range(60):  # Max ~60 seconds
+                for _ in range(self.settings.withdrawal_resolution_timeout):
                     await asyncio.sleep(1)
                     withdrawal_data = await self._rate_limited_call(
                         contract_reader.functions.withdrawals(index).call
@@ -360,12 +361,6 @@ class WithdrawalProcessor:
 
             if "nonce too low" in error_str or "already known" in error_str:
                 logger.info(f"Withdrawal #{index}: already broadcast to {chain_name}")
-                self._chain_high_water_mark[chain_id] = max(
-                    self._chain_high_water_mark.get(chain_id, -1), index
-                )
-                return True
-            elif error_name == "WithdrawalAlreadyResolved":
-                logger.info(f"Withdrawal #{index}: already resolved, skipping")
                 self._chain_high_water_mark[chain_id] = max(
                     self._chain_high_water_mark.get(chain_id, -1), index
                 )

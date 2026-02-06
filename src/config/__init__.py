@@ -92,6 +92,9 @@ def load_settings(refresh: bool = False) -> Settings:
             withdrawal_poll_interval=_get_int(
                 "WITHDRAWAL_POLL_INTERVAL", _defaults.withdrawal_poll_interval
             ),
+            withdrawal_resolution_timeout=_get_int(
+                "WITHDRAWAL_RESOLUTION_TIMEOUT", _defaults.withdrawal_resolution_timeout
+            ),
         )
     return _settings
 
