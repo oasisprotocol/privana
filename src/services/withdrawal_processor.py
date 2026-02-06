@@ -407,8 +407,9 @@ class WithdrawalProcessor:
 
                         success = await self._resolve_and_broadcast(withdrawal)
                         if not success:
-                            # Broadcast failed - check for nonce gaps and fix them
-                            logger.warning(f"Stopping {chain_name} processing, checking for nonce gaps")
+                            # Withdrawal failed - run catch-up to handle any nonce gaps,
+                            # then retry on next poll cycle
+                            logger.warning(f"Withdrawal failed, pausing {chain_name} processing")
                             await self._catch_up_missing_broadcasts([chain_id])
                             break
 
