@@ -1,12 +1,62 @@
 """ROFL client helpers for key management and transaction submission."""
 
+import base64
 import logging
 
+import cbor2
 from eth_account import Account
 from oasis_rofl_client import RoflClient
 from web3.types import TxParams
 
+from src.abi.accounting import get_error_name
+
 logger = logging.getLogger(__name__)
+
+
+class TransactionRevertedError(Exception):
+    """Raised when an on-chain transaction reverts."""
+
+    def __init__(
+        self,
+        message: str,
+        code: int | None = None,
+        module: str | None = None,
+        error_name: str | None = None,
+    ):
+        self.code = code
+        self.module = module
+        self.error_name = error_name
+        super().__init__(message)
+
+
+def _decode_revert_reason(raw_message: str | None) -> str:
+    """Try to decode a revert reason from base64-encoded error selector.
+
+    The raw_message typically looks like "reverted: <base64>" where <base64>
+    contains the error selector and any additional data.
+    """
+    if not raw_message:
+        return "unknown"
+
+    # Strip common prefixes
+    message = raw_message
+    if message.startswith("reverted: "):
+        message = message[len("reverted: ") :]
+    elif message.startswith("reverted:"):
+        message = message[len("reverted:") :]
+
+    try:
+        decoded = base64.b64decode(message)
+        if len(decoded) >= 4:
+            selector = bytes(decoded[:4])
+            error_name = get_error_name(selector)
+            if error_name:
+                return error_name
+            return f"unknown (selector: 0x{selector.hex()})"
+        return "unknown (no selector)"
+    except Exception:
+        return raw_message
+
 
 ACCOUNTING_SERVICE_KEY = "accounting_service.key"
 
@@ -80,6 +130,7 @@ class RoflAppdClient:
 
         Raises:
             ValueError: If required transaction fields are missing
+            TransactionRevertedError: If the on-chain transaction reverted
             Exception: If submission fails
         """
         from oasis_rofl_client.common import ENDPOINT_TX_SIGN_SUBMIT, get_tx_payload
@@ -97,16 +148,54 @@ class RoflAppdClient:
             payload = get_tx_payload(tx, encrypt)
             response = self._client._appd_request("POST", ENDPOINT_TX_SIGN_SUBMIT, payload)
             result = response.json()
-            # Use hex-encoded CBOR data as submission_id for backwards compatibility.
-            # ROFL sign_submit returns {"ok": b''} when decoded - no real tx hash.
             submission_id = result.get("data")
 
             if not submission_id:
                 raise ValueError(f"Unexpected ROFL response payload: {result}")
 
+            # Decode CBOR to check for transaction failure
+            try:
+                decoded = cbor2.loads(bytes.fromhex(submission_id))
+                if isinstance(decoded, dict):
+                    if "fail" in decoded:
+                        fail_info = decoded["fail"]
+                        code = fail_info.get("code")
+                        module = fail_info.get("module")
+                        raw_message = fail_info.get("message")
+
+                        # Decode the revert reason from the message
+                        error_name = _decode_revert_reason(raw_message)
+
+                        error_msg = f"Transaction reverted: {error_name}"
+                        if module:
+                            error_msg += f" (module: {module}, code: {code})"
+
+                        logger.error(
+                            "Transaction reverted on-chain: error=%s, module=%s, code=%s, raw=%s",
+                            error_name,
+                            module,
+                            code,
+                            raw_message,
+                        )
+                        raise TransactionRevertedError(
+                            error_msg, code=code, module=module, error_name=error_name
+                        )
+                    elif "ok" not in decoded:
+                        # Unknown response format - could be an error in a different format
+                        logger.warning(
+                            "Unexpected CBOR response structure (keys: %s): %s",
+                            list(decoded.keys()),
+                            decoded,
+                        )
+            except cbor2.CBORDecodeError:
+                # Not valid CBOR, treat as opaque submission ID
+                pass
+
             logger.info("ROFL submission id: %s", submission_id)
             return submission_id
 
+        except TransactionRevertedError:
+            raise
         except Exception as e:
             logger.error("ROFL submission exception: %s", str(e), exc_info=True)
             raise
