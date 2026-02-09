@@ -6,6 +6,7 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 
+from src.clients.rofl import TransactionRevertedError
 from src.models.accounting import (
     BatchBalancesRequest,
     BatchBalancesResponse,
@@ -71,6 +72,9 @@ async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositRespo
         return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Deposit inclusion transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - network errors
         logger.exception("Failed to submit deposit inclusion")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -85,6 +89,9 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Lock funds transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to lock funds")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -99,6 +106,9 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Modify lock transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to modify lock")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -113,6 +123,9 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Transfer funds transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer funds")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -129,6 +142,9 @@ async def transfer_locked_funds(
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Transfer locked funds transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer locked funds")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -143,6 +159,9 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Unlock funds transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to unlock funds")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -157,6 +176,9 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Withdrawal request transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to submit withdrawal request")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
@@ -264,6 +286,9 @@ async def unlock_all_expired_locks(
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Unlock all expired locks transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to unlock all expired locks")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc

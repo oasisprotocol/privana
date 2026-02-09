@@ -9,30 +9,17 @@ from eth_abi import decode
 from hexbytes import HexBytes
 from web3 import Web3
 
-from src.abi.accounting import ACCOUNTING_ABI
+from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
 from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import AccountingContractService
 
 logger = logging.getLogger(__name__)
 
 
-def _build_error_selectors(abi: list) -> dict[str, str]:
-    """Build a mapping of error selectors to names from the ABI."""
-    selectors = {}
-    for item in abi:
-        if item.get("type") == "error":
-            name = item["name"]
-            inputs = item.get("inputs", [])
-            # Build signature: ErrorName(type1,type2,...)
-            types = ",".join(inp["type"] for inp in inputs)
-            signature = f"{name}({types})"
-            # Compute selector (first 4 bytes of keccak256)
-            selector = Web3.keccak(text=signature)[:4].hex()
-            selectors[selector] = name
-    return selectors
-
-
-ERROR_SELECTORS = _build_error_selectors(ACCOUNTING_ABI)
+# Convert bytes selectors to hex strings for substring matching in error messages
+ERROR_SELECTORS: dict[str, str] = {
+    selector.hex(): name for selector, name in _ERROR_SELECTORS_BYTES.items()
+}
 
 
 def decode_contract_error(exc: Exception) -> tuple[str, str]:
