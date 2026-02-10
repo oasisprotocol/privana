@@ -125,7 +125,7 @@ contract EIP712SignatureVerifier is EIP712 {
         uint256 amount,
         uint256 expiry,
         bytes calldata signature
-    ) public {
+    ) internal {
         bytes32 structHash = keccak256(
             abi.encode(
                 LOCK_TYPEHASH,
@@ -151,6 +151,8 @@ contract EIP712SignatureVerifier is EIP712 {
 
     /**
      * @notice Verifies a user's EIP-712 signature for transferring funds to another address.
+     * @dev Internal function to prevent front-running attacks where an attacker
+     *      could call this directly to consume the nonce before transferBalance.
      *
      * @param userAddress The address of the user initiating the transfer (sender)
      * @param toAddress The address receiving the funds
@@ -207,7 +209,7 @@ contract EIP712SignatureVerifier is EIP712 {
         uint256 lockId,
         uint256 amount,
         bytes calldata signature
-    ) public {
+    ) internal {
         bytes32 structHash = keccak256(
             abi.encode(
                 TRANSFER_LOCKED_TYPEHASH,
@@ -236,7 +238,7 @@ contract EIP712SignatureVerifier is EIP712 {
         uint256 amount,
         uint256 newExpiry,
         bytes calldata signature
-    ) public {
+    ) internal {
         bytes32 structHash = keccak256(
             abi.encode(
                 MODIFY_LOCK_TYPEHASH,

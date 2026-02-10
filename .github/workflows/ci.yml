@@ -69,6 +69,11 @@ jobs:
         run: |
           test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json || (echo "Solidity artifacts not found!" && exit 1)
 
+      - name: Run Solidity tests
+        run: make solidity-test
+        env:
+          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+
       - name: Install dependencies
         run: make dev
 

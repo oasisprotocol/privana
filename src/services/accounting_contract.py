@@ -394,6 +394,15 @@ class AccountingContractService:
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
 
+        # Validate transfer nonce matches on-chain state
+        contract_reader = self._get_reader_contract()
+        expected_nonce = contract_reader.functions.transferNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"Transfer nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
+
         fn = self.contract.functions.transferBalance(
             user,
             to_addr,
