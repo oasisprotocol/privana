@@ -566,6 +566,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
      * @param toAddress The address of the user receiving the funds
      * @param tokenId The identifier of the token being transferred
      * @param amount The amount of tokens to transfer
+     * @param nonce The nonce for replay protection (must match user's current transfer nonce)
      * @param signature The EIP-712 signature from the sender authorizing the transfer
      */
     function transferBalance(
@@ -573,6 +574,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         address toAddress,
         bytes32 tokenId,
         uint256 amount,
+        uint256 nonce,
         bytes calldata signature
     ) public {
         if (amount == 0) revert InvalidAmount();
@@ -582,6 +584,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             toAddress,
             tokenId,
             amount,
+            nonce,
             signature
         );
 

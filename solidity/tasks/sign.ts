@@ -58,12 +58,14 @@ task("sign")
         if (!args.tokenid || !args.to) {
           throw new Error("Transfer requires: tokenid and to");
         }
+        const transferNonce = await accounting.transferNonces(args.user);
         types = {
           Transfer: [
             { name: "userAddress", type: "address" },
             { name: "toAddress", type: "address" },
             { name: "tokenId", type: "bytes32" },
             { name: "amount", type: "uint256" },
+            { name: "nonce", type: "uint256" },
           ]
         };
         message = {
@@ -71,7 +73,9 @@ task("sign")
           toAddress: args.to,
           tokenId: args.tokenid,
           amount: amountWei,
+          nonce: transferNonce,
         };
+        console.log(`Transfer nonce: ${transferNonce}`);
         break;
 
       case "transferlocked":
