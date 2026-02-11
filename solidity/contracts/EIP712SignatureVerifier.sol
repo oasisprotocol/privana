@@ -34,6 +34,9 @@ contract EIP712SignatureVerifier is EIP712 {
     /// @notice Mapping to track withdrawal nonces per user for replay protection
     mapping(address user => uint256 nonce) public withdrawalNonces;
 
+    /// @notice Mapping to track transfer nonces per user for replay protection
+    mapping(address user => uint256 nonce) public transferNonces;
+
     /// @notice Thrown when signature recovery fails or signer doesn't match expected address
     error InvalidSignature();
     /// @notice Thrown when attempting to reuse a previously used signature
@@ -56,7 +59,7 @@ contract EIP712SignatureVerifier is EIP712 {
     /// @notice EIP-712 type hash for transfer operations
     bytes32 private constant TRANSFER_TYPEHASH =
         keccak256(
-            "Transfer(address userAddress,address toAddress,bytes32 tokenId,uint256 amount)"
+            "Transfer(address userAddress,address toAddress,bytes32 tokenId,uint256 amount,uint256 nonce)"
         );
 
     /// @notice EIP-712 type hash for locked fund transfer operations
@@ -122,7 +125,7 @@ contract EIP712SignatureVerifier is EIP712 {
         uint256 amount,
         uint256 expiry,
         bytes calldata signature
-    ) public {
+    ) internal {
         bytes32 structHash = keccak256(
             abi.encode(
                 LOCK_TYPEHASH,
@@ -148,11 +151,14 @@ contract EIP712SignatureVerifier is EIP712 {
 
     /**
      * @notice Verifies a user's EIP-712 signature for transferring funds to another address.
+     * @dev Internal function to prevent front-running attacks where an attacker
+     *      could call this directly to consume the nonce before transferBalance.
      *
      * @param userAddress The address of the user initiating the transfer (sender)
      * @param toAddress The address receiving the funds
      * @param tokenId The identifier of the token to transfer
      * @param amount The amount of tokens to transfer
+     * @param nonce The nonce for replay protection (must match user's current transfer nonce)
      * @param signature The EIP-712 signature authorizing the transfer
      */
     function verifyTransferSignature(
@@ -160,15 +166,21 @@ contract EIP712SignatureVerifier is EIP712 {
         address toAddress,
         bytes32 tokenId,
         uint256 amount,
+        uint256 nonce,
         bytes calldata signature
-    ) public {
+    ) internal {
+        if (nonce != transferNonces[userAddress]) {
+            revert InvalidNonce();
+        }
+
         bytes32 structHash = keccak256(
             abi.encode(
                 TRANSFER_TYPEHASH,
                 userAddress,
                 toAddress,
                 tokenId,
-                amount
+                amount,
+                nonce
             )
         );
         bytes32 digest = _hashTypedDataV4(structHash);
@@ -177,11 +189,7 @@ contract EIP712SignatureVerifier is EIP712 {
             revert InvalidSignature();
         }
 
-        if (usedSignatures[signature]) {
-            revert UsedSignature();
-        }
-
-        usedSignatures[signature] = true;
+        transferNonces[userAddress]++;
     }
 
     /**
@@ -201,7 +209,7 @@ contract EIP712SignatureVerifier is EIP712 {
         uint256 lockId,
         uint256 amount,
         bytes calldata signature
-    ) public {
+    ) internal {
         bytes32 structHash = keccak256(
             abi.encode(
                 TRANSFER_LOCKED_TYPEHASH,
@@ -230,7 +238,7 @@ contract EIP712SignatureVerifier is EIP712 {
         uint256 amount,
         uint256 newExpiry,
         bytes calldata signature
-    ) public {
+    ) internal {
         bytes32 structHash = keccak256(
             abi.encode(
                 MODIFY_LOCK_TYPEHASH,

@@ -24,6 +24,7 @@ from src.models.accounting import (
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
+    TransferNonceResponse,
     UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
     WithdrawalInfoResponse,
@@ -129,6 +130,20 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer funds")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get("/funds/transfer/nonce/{user_address}", response_model=TransferNonceResponse)
+async def get_transfer_nonce(user_address: str) -> TransferNonceResponse:
+    """Get the current transfer nonce for a user."""
+
+    try:
+        result = await asyncio.to_thread(_service.get_transfer_nonce, user_address)
+        return TransferNonceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get transfer nonce")
+        raise HTTPException(status_code=500, detail="Failed to retrieve transfer nonce") from exc
 
 
 @router.post("/funds/transfer-locked", response_model=TransactionSubmissionResponse)

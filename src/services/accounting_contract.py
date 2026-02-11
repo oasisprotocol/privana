@@ -391,13 +391,24 @@ class AccountingContractService:
         to_addr = self._require_address(payload["to_address"], "to_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
+
+        # Validate transfer nonce matches on-chain state
+        contract_reader = self._get_reader_contract()
+        expected_nonce = contract_reader.functions.transferNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"Transfer nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
 
         fn = self.contract.functions.transferBalance(
             user,
             to_addr,
             token,
             amount,
+            nonce,
             signature,
         )
         return self._submit(fn._encode_transaction_data())
@@ -788,6 +799,16 @@ class AccountingContractService:
         checksum_user = self._require_address(user_address, "user_address")
         contract_reader = self._get_reader_contract()
         nonce = contract_reader.functions.withdrawalNonces(checksum_user).call()
+        return {
+            "user_address": checksum_user,
+            "nonce": nonce,
+        }
+
+    def get_transfer_nonce(self, user_address: str) -> Dict[str, Any]:
+        """Get the current transfer nonce for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+        nonce = contract_reader.functions.transferNonces(checksum_user).call()
         return {
             "user_address": checksum_user,
             "nonce": nonce,

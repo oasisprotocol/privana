@@ -4,3 +4,4 @@ import "./sign";
 import "./accounts";
 import "./admin";
 import "./withdraw";
+import "./transfer";

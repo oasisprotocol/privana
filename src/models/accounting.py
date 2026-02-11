@@ -152,6 +152,7 @@ class TransferFundsRequest(BaseModel):
     to_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
     signature: str
 
     @field_validator("amount", mode="before")
@@ -324,6 +325,13 @@ class TokenInfoResponse(BaseModel):
 
 class WithdrawalNonceResponse(BaseModel):
     """Response containing the current withdrawal nonce for a user."""
+
+    user_address: str
+    nonce: int
+
+
+class TransferNonceResponse(BaseModel):
+    """Response containing the current transfer nonce for a user."""
 
     user_address: str
     nonce: int

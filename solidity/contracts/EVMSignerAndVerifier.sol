@@ -47,8 +47,17 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     using SliceBytes for bytes;
 
     constructor(address _shoyubashi) Ownable(msg.sender) {
-        (evmAddress, secretKey) = EthereumUtils.generateKeypair();
+        (evmAddress, secretKey) = _generateKeypair();
         shoyuBashi = IShoyuBashi(_shoyubashi);
+    }
+
+    /**
+     * @notice Generates a new keypair for signing EVM transactions.
+     * @dev This function is virtual to allow mocking in tests.
+     *      In production, this calls the Sapphire EthereumUtils precompile.
+     */
+    function _generateKeypair() internal virtual returns (address, bytes32) {
+        return EthereumUtils.generateKeypair();
     }
 
     /**

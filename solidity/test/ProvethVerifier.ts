@@ -2,13 +2,16 @@ import { ethers } from 'hardhat';
 import { ProvethVerifier } from '../typechain-types';
 import { getReceiptInclusionProof, getRlpUint, getTxInclusionProof } from './utils';
 
-const RPC_URL = "https://base-sepolia.g.alchemy.com/v2/<api-key>";
+const RPC_URL = process.env.BASE_SEPOLIA_RPC_URL || "";
 
 
 describe('ProvethVerifier', function () {
   let provethVerifier: ProvethVerifier;
 
   before(async () => {
+    if (!RPC_URL) {
+      throw new Error("BASE_SEPOLIA_RPC_URL environment variable is not set. Please set it to run ProvethVerifier tests.");
+    }
     // Any eth passed to constructor will be sent to the random wallet
     const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
     provethVerifier = await ProvethVerifierFactory.deploy();

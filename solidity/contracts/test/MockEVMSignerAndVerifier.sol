@@ -6,7 +6,15 @@ import {EVMSignerAndVerifier} from "../EVMSignerAndVerifier.sol";
 import {ProvethVerifier} from "../lib/ProvethVerifier.sol";
 
 contract MockEVMSignerAndVerifier is EVMSignerAndVerifier {
+    // Test keypair - NOT for production use
+    address private constant TEST_ADDRESS = 0x1234567890123456789012345678901234567890;
+    bytes32 private constant TEST_SECRET = bytes32(uint256(1));
+
     constructor() EVMSignerAndVerifier(address(0)) {}
+
+    function _generateKeypair() internal pure override returns (address, bytes32) {
+        return (TEST_ADDRESS, TEST_SECRET);
+    }
 
     function exposedDecodeEVMTransaction(
         bytes memory evmTransactionData
