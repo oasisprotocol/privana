@@ -13,7 +13,12 @@ contract MockAccounting is Accounting {
     address private constant TEST_ADDRESS = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
     bytes32 private constant TEST_SECRET = bytes32(uint256(1));
 
-    constructor(address _shoyubashi) Accounting(_shoyubashi) {}
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() Accounting() {}
+
+    function initialize(address _shoyubashi, address _provethVerifier, address _owner) external override initializer {
+        __Accounting_init(_shoyubashi, _provethVerifier, _owner);
+    }
 
     function _generateKeypair() internal pure override returns (address, bytes32) {
         return (TEST_ADDRESS, TEST_SECRET);

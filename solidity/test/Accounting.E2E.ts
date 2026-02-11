@@ -1,7 +1,7 @@
 import { expect, version } from 'chai';
-import { ethers, config } from 'hardhat';
+import { ethers, config, upgrades } from 'hardhat';
 import { keccak256, parseEther, Wallet } from 'ethers';
-import { MockAccounting, MockShoyuBashi } from '../typechain-types';
+import { MockAccounting, MockShoyuBashi, ProvethVerifier } from '../typechain-types';
 import { generateERC20Tx, getReceiptInclusionProof, getRlpUint } from './utils';
 import { getTxInclusionProof } from './utils';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
@@ -73,19 +73,30 @@ async function getBlockTimestamp(): Promise<number> {
 describe('Accounting', function () {
   let accounting: MockAccounting;
   let mockShoyubashi: MockShoyuBashi;
+  let provethVerifier: ProvethVerifier;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
 
   before(async () => {
     const provider = ethers.provider;
+    const [deployer] = await ethers.getSigners();
 
     const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
     mockShoyubashi = await MockShoyubashiFactory.deploy();
     await mockShoyubashi.waitForDeployment();
 
+    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
+    provethVerifier = await ProvethVerifierFactory.deploy();
+    await provethVerifier.waitForDeployment();
+
     const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    accounting = await AccountingFactory.deploy(await mockShoyubashi.getAddress());
+    // Deploy as UUPS proxy
+    accounting = await upgrades.deployProxy(
+      AccountingFactory,
+      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      { kind: 'uups', initializer: 'initialize' }
+    ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
 
     const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
@@ -212,12 +223,22 @@ describe('Accounting', function () {
     });
 
     beforeEach(async () => {
+      const [deployer] = await ethers.getSigners();
+
       const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
       isolatedShoyubashi = await MockShoyubashiFactory.deploy();
       await isolatedShoyubashi.waitForDeployment();
 
+      const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
+      const isolatedProvethVerifier = await ProvethVerifierFactory.deploy();
+      await isolatedProvethVerifier.waitForDeployment();
+
       const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-      isolatedAccounting = await AccountingFactory.deploy(await isolatedShoyubashi.getAddress());
+      isolatedAccounting = await upgrades.deployProxy(
+        AccountingFactory,
+        [await isolatedShoyubashi.getAddress(), await isolatedProvethVerifier.getAddress(), deployer.address],
+        { kind: 'uups', initializer: 'initialize' }
+      ) as unknown as MockAccounting;
       await isolatedAccounting.waitForDeployment();
 
       const data = ethers.concat([
@@ -340,7 +361,7 @@ describe('Accounting', function () {
           receiptIndexRlp: getRlpUint(transactionIndex),
           receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
         })
-      ).to.be.revertedWith("Invalid block hash");
+      ).to.be.revertedWithCustomError(isolatedAccounting, "InvalidBlockHash");
     });
   });
 
@@ -570,19 +591,30 @@ describe('Accounting', function () {
 describe('ModifyLock', function () {
   let accounting: MockAccounting;
   let mockShoyubashi: MockShoyuBashi;
+  let provethVerifier: ProvethVerifier;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
 
   before(async () => {
     const provider = ethers.provider;
+    const [deployer] = await ethers.getSigners();
 
     const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
     mockShoyubashi = await MockShoyubashiFactory.deploy();
     await mockShoyubashi.waitForDeployment();
 
+    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
+    provethVerifier = await ProvethVerifierFactory.deploy();
+    await provethVerifier.waitForDeployment();
+
     const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    accounting = await AccountingFactory.deploy(await mockShoyubashi.getAddress());
+    // Deploy as UUPS proxy
+    accounting = await upgrades.deployProxy(
+      AccountingFactory,
+      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      { kind: 'uups', initializer: 'initialize' }
+    ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
 
     const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
@@ -952,5 +984,114 @@ describe('ModifyLock', function () {
 
     expect(balance2After).to.equal(balance2Before + parseUsdt("0.5"));
     expect(locksAfter[0][3]).to.equal(lockAmount - parseUsdt("0.5"));
+  });
+});
+
+describe('Upgradability', function () {
+  let accounting: MockAccounting;
+  let mockShoyubashi: MockShoyuBashi;
+  let provethVerifier: ProvethVerifier;
+  let proxyAddress: string;
+
+  before(async () => {
+    const [deployer] = await ethers.getSigners();
+
+    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
+    mockShoyubashi = await MockShoyubashiFactory.deploy();
+    await mockShoyubashi.waitForDeployment();
+
+    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
+    provethVerifier = await ProvethVerifierFactory.deploy();
+    await provethVerifier.waitForDeployment();
+
+    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
+    accounting = await upgrades.deployProxy(
+      AccountingFactory,
+      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      { kind: 'uups', initializer: 'initialize' }
+    ) as unknown as MockAccounting;
+    await accounting.waitForDeployment();
+
+    proxyAddress = await accounting.getAddress();
+  });
+
+  it("Should preserve state after upgrade", async function () {
+    const [deployer, user] = await ethers.getSigners();
+
+    // Set up initial state
+    const data = ethers.concat([
+      ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+    ]);
+    await accounting.setTokenInfo({
+      tokenType: TEST_TOKEN.tokenType,
+      data: data
+    });
+
+    // Set a balance using the test helper
+    const initialBalance = parseUsdt("100");
+    await accounting.setBalance(user.address, TEST_TOKEN.tokenId, initialBalance);
+
+    // Set gas price for a chain
+    const testChainId = 84532n; // Base Sepolia
+    const testGasPrice = 1000000000n; // 1 gwei
+    await accounting.setGasPrice(testChainId, testGasPrice);
+
+    // Verify initial state
+    const balanceBefore = await accounting.balances(user.address, TEST_TOKEN.tokenId);
+    const evmAddressBefore = await accounting.evmAddress();
+    const ownerBefore = await accounting.owner();
+    const transferNonceBefore = await accounting.transferNonces(user.address);
+    const withdrawalNonceBefore = await accounting.withdrawalNonces(user.address);
+    const gasPriceBefore = await accounting.gasPrices(testChainId);
+    const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
+    expect(balanceBefore).to.equal(initialBalance);
+
+    // Upgrade to the same implementation (simulates an upgrade)
+    const AccountingV2Factory = await ethers.getContractFactory('MockAccounting');
+    const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
+      kind: 'uups'
+    }) as unknown as MockAccounting;
+
+    // Verify state is preserved after upgrade
+    const balanceAfter = await upgraded.balances(user.address, TEST_TOKEN.tokenId);
+    const evmAddressAfter = await upgraded.evmAddress();
+    const ownerAfter = await upgraded.owner();
+    const transferNonceAfter = await upgraded.transferNonces(user.address);
+    const withdrawalNonceAfter = await upgraded.withdrawalNonces(user.address);
+    const gasPriceAfter = await upgraded.gasPrices(testChainId);
+    const tokenInfoAfter = await upgraded.tokens(TEST_TOKEN.tokenId);
+
+    expect(balanceAfter).to.equal(initialBalance, "Balance should be preserved after upgrade");
+    expect(evmAddressAfter).to.equal(evmAddressBefore, "EVM address should be preserved after upgrade");
+    expect(ownerAfter).to.equal(ownerBefore, "Owner should be preserved after upgrade");
+    expect(transferNonceAfter).to.equal(transferNonceBefore, "Transfer nonce should be preserved after upgrade");
+    expect(withdrawalNonceAfter).to.equal(withdrawalNonceBefore, "Withdrawal nonce should be preserved after upgrade");
+    expect(gasPriceAfter).to.equal(gasPriceBefore, "Gas price should be preserved after upgrade");
+    expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
+    expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");
+
+    // Verify the proxy address is the same
+    expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
+  });
+
+  it("Should only allow owner to upgrade", async function () {
+    const [deployer, attacker] = await ethers.getSigners();
+
+    const AccountingV2Factory = await ethers.getContractFactory('MockAccounting', attacker);
+
+    await expect(
+      upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
+        kind: 'uups'
+      })
+    ).to.be.revertedWithCustomError(accounting, "OwnableUnauthorizedAccount");
+  });
+
+  it("Should prevent re-initialization", async function () {
+    const [deployer] = await ethers.getSigners();
+
+    await expect(
+      accounting.initialize(await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address)
+    ).to.be.revertedWithCustomError(accounting, "InvalidInitialization");
   });
 });

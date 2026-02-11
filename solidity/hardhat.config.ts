@@ -6,6 +6,7 @@ import {
 } from '@oasisprotocol/sapphire-hardhat';
 import '@nomicfoundation/hardhat-ignition-ethers';
 import '@nomicfoundation/hardhat-toolbox';
+import '@openzeppelin/hardhat-upgrades';
 import { HardhatUserConfig } from 'hardhat/config';
 import { HDAccountsUserConfig } from 'hardhat/types';
 import 'solidity-coverage';
@@ -43,11 +44,11 @@ const config: HardhatUserConfig = {
     enabled: true
   },
   solidity: {
-    version: '0.8.20',
+    version: '0.8.24',
     settings: {
       optimizer: {
         enabled: true,
-        runs: (1 << 32) - 1,
+        runs: 200,
       },
       viaIR: true,
     },

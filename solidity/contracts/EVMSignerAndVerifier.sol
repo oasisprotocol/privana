@@ -13,7 +13,8 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {
     EIP155Signer
 } from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
-import {ProvethVerifier, EVMTransactionProof} from "./lib/ProvethVerifier.sol";
+import {EVMTransactionProof, EVMReceiptProof} from "./lib/ProvethVerifier.sol";
+import {IProvethVerifier} from "./interfaces/IProvethVerifier.sol";
 
 import {SliceBytes} from "./lib/SliceBytes.sol";
 import {
@@ -24,12 +25,14 @@ import {
 } from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
 import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
-contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
+abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     address public evmAddress;
-    bytes32 private secretKey;
+    bytes32 internal secretKey;
     IShoyuBashi public shoyuBashi;
+    IProvethVerifier public provethVerifier;
 
     mapping(uint256 chainId => uint64) public nonces;
     mapping(uint256 chainId => uint256) public gasPrices;
@@ -38,6 +41,14 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     uint64 public constant gasLimitERC20 = 100000;
 
     error GasPriceNotSet(uint256 chainId);
+    error UnknownTransactionType();
+    error InvalidTxDataLength();
+    error InvalidTransferSelector();
+    error InvalidGasPrice();
+    error InvalidNativeTokenDataLength();
+    error InvalidERC20TokenDataLength();
+    error InvalidBlockHash();
+    error InvalidAddress();
 
     event GasPriceSet(uint256 indexed chainId, uint256 gasPrice);
 
@@ -46,9 +57,26 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     using RLPReader for bytes;
     using SliceBytes for bytes;
 
-    constructor(address _shoyubashi) Ownable(msg.sender) {
+    /**
+     * @notice Initializes the EVMSignerAndVerifier contract.
+     * @dev This replaces the constructor for upgradeable contracts.
+     *      Generates a secure keypair using Sapphire's EthereumUtils.
+     * @param _shoyubashi The address of the ShoyuBashi oracle
+     * @param _provethVerifier The address of the ProvethVerifier contract
+     * @param _owner The address that will own this contract
+     */
+    function __EVMSignerAndVerifier_init(
+        address _shoyubashi,
+        address _provethVerifier,
+        address _owner
+    ) internal onlyInitializing {
+        if (_shoyubashi == address(0)) revert InvalidAddress();
+        if (_provethVerifier == address(0)) revert InvalidAddress();
+        if (_owner == address(0)) revert InvalidAddress();
+        __Ownable_init(_owner);
         (evmAddress, secretKey) = _generateKeypair();
         shoyuBashi = IShoyuBashi(_shoyubashi);
+        provethVerifier = IProvethVerifier(_provethVerifier);
     }
 
     /**
@@ -289,7 +317,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
                 bytes32(s)
             );
         } else {
-            revert("Unknown transaction type");
+            revert UnknownTransactionType();
         }
     }
 
@@ -325,7 +353,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
         bytes memory txData
     ) internal pure returns (address to, uint256 amount) {
         // 1. Check calldata length: selector (4) + address (32) + amount (32) = 68 bytes
-        require(txData.length == 4 + 32 + 32, "Invalid txData length");
+        if (txData.length != 4 + 32 + 32) revert InvalidTxDataLength();
 
         // 2. Compute the ERC-20 transfer selector: bytes4(keccak256("transfer(address,uint256)"))
         bytes4 selector = bytes4(keccak256("transfer(address,uint256)"));
@@ -339,10 +367,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
         }
 
         // 4. Check that the selector matches the expected transfer selector
-        require(
-            selectorFromTx == selector,
-            "txData does not start with transfer selector"
-        );
+        if (selectorFromTx != selector) revert InvalidTransferSelector();
 
         // 5. Extract the recipient address and amount
         //    - Address is in bytes 4..36 (32 bytes, right-aligned)
@@ -416,7 +441,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
      * @param gasPrice The gas price in wei to set for the specified chain ID.
      */
     function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
-        require(gasPrice > 0, "Gas price must be greater than zero");
+        if (gasPrice == 0) revert InvalidGasPrice();
         gasPrices[chainId] = gasPrice;
         emit GasPriceSet(chainId, gasPrice);
     }
@@ -542,7 +567,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     function decodeEVMNativeTokenData(
         bytes memory data
     ) public pure returns (uint256 chainId) {
-        require(data.length == 32, "Invalid data length for EVM native token");
+        if (data.length != 32) revert InvalidNativeTokenDataLength();
         assembly {
             chainId := mload(add(data, 32))
         }
@@ -600,7 +625,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     function decodeEVMErc20TokenData(
         bytes memory data
     ) public pure returns (uint256 chainId, address tokenAddress) {
-        require(data.length == 52, "Invalid data length for EVM ERC20 token");
+        if (data.length != 52) revert InvalidERC20TokenDataLength();
         assembly {
             chainId := mload(add(data, 32))
             tokenAddress := mload(add(data, 52))
@@ -651,8 +676,8 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     function validateEVMTxProof(
         EVMTransactionProof calldata txProof
     ) internal view returns (bytes memory) {
-        // Validate the transaction proof using the ProvethVerifier
-        return validateTxProof(txProof);
+        // Validate the transaction proof using the external ProvethVerifier
+        return provethVerifier.validateTxProof(txProof);
     }
 
     function verifyBlockHash(
@@ -667,7 +692,7 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
         );
         // @ahmed needs to call Shoyubashi before submitting the includeEVMDeposit to update the blockhash oracle
         // Call this function https://github.com/rube-de/hashi/blob/b43726b27eedddf15e48e65e0175aba4b2a8096e/packages/evm/contracts/ownable/ShoyuBashi.sol#L28
-        require(actualBlockHash == expectedBlockHash, "Invalid block hash");
+        if (actualBlockHash != expectedBlockHash) revert InvalidBlockHash();
     }
 
     function getEVMNonceAndIncrement(
@@ -675,4 +700,10 @@ contract EVMSignerAndVerifier is ProvethVerifier, Ownable {
     ) internal returns (uint64 nonce) {
         return uint64(nonces[chainId]++);
     }
+
+    /**
+     * @dev Reserved storage gap for future upgrades.
+     * This allows adding new state variables without shifting storage layout.
+     */
+    uint256[44] private __gap;
 }

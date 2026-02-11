@@ -65,6 +65,9 @@ jobs:
       - name: Compile Solidity contracts
         run: make solidity-build
 
+      - name: Validate upgrade safety
+        run: cd solidity && npx hardhat run scripts/validate-upgrade.ts
+
       - name: Verify ABI artifacts exist
         run: |
           test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json || (echo "Solidity artifacts not found!" && exit 1)
