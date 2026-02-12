@@ -14,7 +14,7 @@ contract MockAccounting is Accounting {
     bytes32 private constant TEST_SECRET = bytes32(uint256(1));
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() Accounting() {}
+    constructor(address siweAuthAddress) Accounting(siweAuthAddress) {}
 
     function initialize(address _shoyubashi, address _provethVerifier, address _owner) external override initializer {
         __Accounting_init(_shoyubashi, _provethVerifier, _owner);
@@ -22,6 +22,14 @@ contract MockAccounting is Accounting {
 
     function _generateKeypair() internal pure override returns (address, bytes32) {
         return (TEST_ADDRESS, TEST_SECRET);
+    }
+
+    /**
+     * @notice Test helper to read user balance directly (bypassing privacy checks)
+     * @dev Only for testing purposes - NOT for production use
+     */
+    function getBalance(address user, bytes32 tokenId) external view returns (uint256) {
+        return balances[user][tokenId];
     }
 
     /**

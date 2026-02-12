@@ -5,6 +5,7 @@ import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
 import {EVMTransactionProof, EVMReceiptProof} from "./interfaces/IProvethVerifier.sol";
+import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -24,8 +25,11 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * - Universal token abstraction supporting various tokens
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
+    IAccountingSiweAuth public immutable siweAuth;
+    /// @dev internal (not private) so MockAccounting test helper can set balances directly.
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
-        public balances;
+        internal balances;
     mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
     mapping(bytes32 depositKey => bool processed) public processedDeposits;
     mapping(address user => UserInfo) private userInfo;
@@ -38,47 +42,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         address indexed userAddress,
         bytes32 indexed tokenId,
         uint256 amount
-    );
-
-    event LockCreated(
-        address indexed userAddress,
-        address indexed serviceAddress,
-        bytes32 indexed tokenId,
-        uint256 amount,
-        uint256 expiry,
-        uint256 lockId
-    );
-
-    event LockUnlocked(
-        address indexed userAddress,
-        bytes32 indexed tokenId,
-        uint256 amount,
-        uint256 lockId
-    );
-
-    event LockModified(
-        address indexed userAddress,
-        address indexed serviceAddress,
-        bytes32 indexed tokenId,
-        uint256 amountAdded,
-        uint256 newExpiry,
-        uint256 lockId
-    );
-
-    event BalanceTransferred(
-        address indexed fromAddress,
-        address indexed toAddress,
-        bytes32 indexed tokenId,
-        uint256 amount
-    );
-
-    event LockedFundsTransferred(
-        address indexed userAddress,
-        address indexed serviceAddress,
-        address indexed toAddress,
-        bytes32 tokenId,
-        uint256 amount,
-        uint256 lockId
     );
 
     event Withdrawal(
@@ -111,8 +74,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error InvalidExpiry();
     error InvalidAmount();
     error WithdrawalTooSoon();
+    error Unauthorized();
     error DepositAlreadyProcessed();
     error ReceiptIndexMismatch();
+    error InvalidSiweAuth();
 
     struct WithdrawalRequest {
         address userAddress;
@@ -124,8 +89,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
+    constructor(address siweAuthAddress) {
         _disableInitializers();
+        if (siweAuthAddress == address(0)) revert InvalidSiweAuth();
+        siweAuth = IAccountingSiweAuth(siweAuthAddress);
     }
 
     /**
@@ -164,6 +132,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
         revert();
+    }
+
+    function _authSender(bytes memory token) internal view returns (address) {
+        if (token.length != 0) {
+            return siweAuth.authSender(token);
+        }
+        return msg.sender;
+    }
+
+    function _requireUser(address user, bytes memory token) internal view {
+        if (_authSender(token) != user) revert Unauthorized();
     }
 
     /**
@@ -360,15 +339,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
                 expiry: expiry
             })
         );
-
-        emit LockCreated(
-            userAddress,
-            serviceAddress,
-            tokenId,
-            amount,
-            expiry,
-            lockId
-        );
     }
 
     function _findLockIndex(
@@ -417,15 +387,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         lock.expiry = newExpiry;
-
-        emit LockModified(
-            userAddress,
-            lock.serviceId,
-            lock.tokenId,
-            amount,
-            newExpiry,
-            lockId
-        );
     }
 
     /**
@@ -469,8 +430,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         locks[lockIndex] = locks[locks.length - 1];
         locks.pop();
-
-        emit LockUnlocked(userAddress, lock.tokenId, lock.amount, lockId);
     }
 
     /**
@@ -504,8 +463,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
                 locks[i] = locks[locks.length - 1];
                 locks.pop();
-
-                emit LockUnlocked(userAddress, lock.tokenId, lock.amount, lock.lockId);
                 unlockedCount++;
             }
         }
@@ -574,15 +531,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         lock.amount -= amount;
         balances[toAddress][lock.tokenId] += amount;
 
-        emit LockedFundsTransferred(
-            userAddress,
-            lock.serviceId,
-            toAddress,
-            lock.tokenId,
-            amount,
-            lockId
-        );
-
         if (lock.amount == 0) {
             locks[lockIndex] = locks[locks.length - 1];
             locks.pop();
@@ -640,8 +588,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
-
-        emit BalanceTransferred(userAddress, toAddress, tokenId, amount);
     }
 
     /**
@@ -836,121 +782,53 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return withdrawals.length;
     }
 
-    /**
-     * @notice Retrieves all active fund locks for a specific user.
-     *
-     * @dev Returns a memory copy of the locks array.
-     *      The returned array may be reordered if locks are removed concurrently.
-     *
-     * @param user The address of the user whose locks to retrieve
-     * @return An array of all active fund locks for the user
-     */
+    /// @notice Returns active locks for a user. Requires auth token for private reads.
     function getUserLocks(
-        address user
-    ) external view returns (FundLock[] memory) {
-        UserInfo storage uInfo = userInfo[user];
-        return uInfo.activeLocks;
+        address user,
+        bytes memory token
+    ) public view returns (FundLock[] memory) {
+        _requireUser(user, token);
+        return userInfo[user].activeLocks;
     }
 
-    /**
-     * @notice Retrieves all expired fund locks for a specific user.
-     *
-     * This function filters the user's active locks to return only those that
-     * have expired (current timestamp >= lock expiry). This is useful for UIs
-     * to display which locks can be unlocked.
-     *
-     * @dev Returns arrays of expired locks and their corresponding indices.
-     *      The indices correspond to positions in the user's activeLocks array.
-     *
-     * @param user The address of the user whose expired locks to retrieve
-     * @return expiredLocks Array of expired FundLock structs
-     * @return lockIndices Array of indices corresponding to each expired lock
-     */
-    function getExpiredLocks(
-        address user
-    )
-        external
-        view
-        returns (FundLock[] memory expiredLocks, uint256[] memory lockIndices)
-    {
+    /// @notice Returns locks for `user` scoped to authenticated service identity.
+    function getServiceLocks(
+        address user,
+        bytes memory token
+    ) public view returns (FundLock[] memory) {
+        address service = _authSender(token);
+        if (service == address(0)) revert Unauthorized();
+
         UserInfo storage uInfo = userInfo[user];
         FundLock[] storage allLocks = uInfo.activeLocks;
 
-        uint256 expiredCount = 0;
+        uint256 matchCount = 0;
         for (uint256 i = 0; i < allLocks.length; i++) {
-            if (block.timestamp >= allLocks[i].expiry) {
-                expiredCount++;
+            if (allLocks[i].serviceId == service) {
+                matchCount++;
             }
         }
 
-        expiredLocks = new FundLock[](expiredCount);
-        lockIndices = new uint256[](expiredCount);
-
+        FundLock[] memory serviceLocks = new FundLock[](matchCount);
         uint256 currentIndex = 0;
         for (uint256 i = 0; i < allLocks.length; i++) {
-            if (block.timestamp >= allLocks[i].expiry) {
-                expiredLocks[currentIndex] = allLocks[i];
-                lockIndices[currentIndex] = i;
+            if (allLocks[i].serviceId == service) {
+                serviceLocks[currentIndex] = allLocks[i];
                 currentIndex++;
             }
         }
 
-        return (expiredLocks, lockIndices);
+        return serviceLocks;
     }
 
-    /**
-     * @notice Retrieves balances for multiple tokens for a specific user.
-     *
-     * This function allows batch querying of token balances to reduce the number
-     * of RPC calls needed by frontends and services.
-     *
-     * @dev Returns balances in the same order as the input tokenIds array.
-     *
-     * @param user The address of the user whose balances to retrieve
-     * @param tokenIds Array of token identifiers to query
-     * @return Array of balances corresponding to each token ID
-     */
-    function getBalances(
+    /// @notice Returns a user's balance for a token (user-only). Requires auth token.
+    function balanceOf(
         address user,
-        bytes32[] calldata tokenIds
-    ) external view returns (uint256[] memory) {
-        uint256[] memory userBalances = new uint256[](tokenIds.length);
-
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            userBalances[i] = balances[user][tokenIds[i]];
-        }
-
-        return userBalances;
-    }
-
-    /**
-     * @notice Calculates the total locked balance for a specific token across all locks.
-     *
-     * This function sums up all locked amounts for a given token ID across all
-     * of a user's active locks. This is useful for displaying the user's total
-     * unavailable balance.
-     *
-     * @dev Iterates through all active locks and sums matching token amounts.
-     *
-     * @param user The address of the user
-     * @param tokenId The token identifier to calculate total locked amount for
-     * @return The total amount of the token that is currently locked
-     */
-    function getTotalLockedBalance(
-        address user,
-        bytes32 tokenId
-    ) external view returns (uint256) {
-        UserInfo storage uInfo = userInfo[user];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        uint256 totalLocked = 0;
-        for (uint256 i = 0; i < locks.length; i++) {
-            if (locks[i].tokenId == tokenId) {
-                totalLocked += locks[i].amount;
-            }
-        }
-
-        return totalLocked;
+        bytes32 tokenId,
+        bytes memory token
+    ) public view returns (uint256) {
+        _requireUser(user, token);
+        return balances[user][tokenId];
     }
 
     /**

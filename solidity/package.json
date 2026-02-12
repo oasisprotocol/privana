@@ -13,6 +13,7 @@
     "format:prettier": "prettier --write --plugin=prettier-plugin-solidity '*.json' '**/*.ts' '**/*.sol'",
     "format": "npm-run-all format:**",
     "build": "hardhat compile",
+    "check:size": "hardhat run scripts/check-bytecode-size.ts --no-compile",
     "test": "hardhat test",
     "coverage": "hardhat coverage"
   },

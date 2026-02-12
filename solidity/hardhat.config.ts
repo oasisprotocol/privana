@@ -37,7 +37,7 @@ const config: HardhatUserConfig = {
       accounts,
     },
     hardhat: {
-      accounts: TEST_HDWALLET
+      accounts: TEST_HDWALLET,
     }
   },
   sourcify: {
@@ -49,7 +49,8 @@ const config: HardhatUserConfig = {
       evmVersion: 'paris',
       optimizer: {
         enabled: true,
-        runs: 200,
+        // Keep bytecode size below EIP-170 limits; large "runs" can bloat size significantly.
+        runs: 50,
       },
       viaIR: true,
     },

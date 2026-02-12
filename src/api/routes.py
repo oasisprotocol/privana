@@ -4,10 +4,13 @@ import asyncio
 import logging
 from typing import Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
+from hexbytes import HexBytes
+from web3.exceptions import ContractLogicError
 
 from src.clients.rofl import TransactionRevertedError
 from src.models.accounting import (
+    BalanceResponse,
     BatchBalancesRequest,
     BatchBalancesResponse,
     DepositQuoteRequest,
@@ -19,6 +22,9 @@ from src.models.accounting import (
     LockFundsRequest,
     ModifyLockRequest,
     PendingWithdrawalsResponse,
+    SiweDomainResponse,
+    SiweLoginRequest,
+    SiweLoginResponse,
     TokenInfoResponse,
     TotalLockedBalanceResponse,
     TransactionSubmissionResponse,
@@ -41,6 +47,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/accounting", tags=["Accounting"])
 
 _service = get_accounting_contract_service()
+
+_SIWE_TOKEN_HEADER = "X-SIWE-Token"
+
+
+def _require_siwe_token(
+    token: Optional[str] = Header(None, alias=_SIWE_TOKEN_HEADER),
+) -> bytes:
+    if not token:
+        raise HTTPException(status_code=401, detail=f"Missing {_SIWE_TOKEN_HEADER} header")
+    try:
+        raw = HexBytes(token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {_SIWE_TOKEN_HEADER} header") from exc
+    return bytes(raw)
 
 
 def _wrap_submission(result: SubmissionResult) -> TransactionSubmissionResponse:
@@ -243,15 +263,26 @@ async def get_withdrawal_info(index: int) -> WithdrawalInfoResponse:
         raise HTTPException(status_code=500, detail="Failed to retrieve withdrawal info") from exc
 
 
-@router.get("/funds/locked/{user_address}", response_model=LockedFundsResponse)
+@router.get(
+    "/funds/locked/{user_address}",
+    response_model=LockedFundsResponse,
+)
 async def get_locked_funds(
-    user_address: str, service_address: Optional[str] = None
+    user_address: str,
+    service_address: Optional[str] = None,
+    siwe_token: bytes = Depends(_require_siwe_token),
 ) -> LockedFundsResponse:
     """Get locked funds for a user, optionally filtered by service address."""
-
     try:
-        result = await asyncio.to_thread(_service.get_locked_funds, user_address, service_address)
+        result = await asyncio.to_thread(
+            _service.get_locked_funds,
+            user_address,
+            service_address,
+            siwe_token,
+        )
         return LockedFundsResponse(**result)
+    except ContractLogicError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
@@ -259,31 +290,24 @@ async def get_locked_funds(
         raise HTTPException(status_code=500, detail="Failed to retrieve locked funds") from exc
 
 
-@router.get("/balances/{user_address}/{token_id}")
-async def get_balance(user_address: str, token_id: str) -> Dict[str, str]:
+@router.get(
+    "/balances/{user_address}/{token_id}",
+    response_model=BalanceResponse,
+)
+async def get_balance(
+    user_address: str,
+    token_id: str,
+    siwe_token: bytes = Depends(_require_siwe_token),
+) -> BalanceResponse:
     """Get the user's balance for a specific token from the contract."""
-
-    def _get_balance_data():
-        balance = _service.get_balance(user_address, token_id)
-        checksum_user = _service.w3.to_checksum_address(user_address)
-
-        token_hex = _service._require_hex(token_id, "token_id", expected_len=32)
-        token_symbol = _service._get_token_symbol(token_hex)
-        token_context = _service._get_token_context(token_hex)
-
-        return {
-            "user_address": checksum_user,
-            "token_id": token_id.lower(),
-            "balance": str(balance),
-            "token_symbol": token_symbol,
-            "chain_id": str(token_context.chain_id),
-        }
-
     try:
-        return await asyncio.to_thread(_get_balance_data)
+        result = await asyncio.to_thread(_service.get_balance, user_address, token_id, siwe_token)
+        return BalanceResponse(**result)
+    except ContractLogicError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get balance")
         raise HTTPException(status_code=500, detail="Failed to retrieve balance") from exc
 
@@ -309,52 +333,102 @@ async def unlock_all_expired_locks(
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
-@router.get("/funds/expired/{user_address}", response_model=ExpiredLocksResponse)
-async def get_expired_locks(user_address: str) -> ExpiredLocksResponse:
+@router.get(
+    "/funds/expired/{user_address}",
+    response_model=ExpiredLocksResponse,
+)
+async def get_expired_locks(
+    user_address: str,
+    siwe_token: bytes = Depends(_require_siwe_token),
+) -> ExpiredLocksResponse:
     """Get all expired locks for a user."""
-
     try:
-        result = await asyncio.to_thread(_service.get_expired_locks, user_address)
+        result = await asyncio.to_thread(_service.get_expired_locks, user_address, siwe_token)
         return ExpiredLocksResponse(**result)
+    except ContractLogicError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get expired locks")
         raise HTTPException(status_code=500, detail="Failed to retrieve expired locks") from exc
 
 
-@router.post("/balances/batch", response_model=BatchBalancesResponse)
-async def get_batch_balances(payload: BatchBalancesRequest) -> BatchBalancesResponse:
+@router.post(
+    "/balances/batch",
+    response_model=BatchBalancesResponse,
+)
+async def get_batch_balances(
+    payload: BatchBalancesRequest,
+    siwe_token: bytes = Depends(_require_siwe_token),
+) -> BatchBalancesResponse:
     """Get balances for multiple tokens for a user."""
-
     try:
         result = await asyncio.to_thread(
-            _service.get_balances, payload.user_address, payload.token_ids
+            _service.get_batch_balances, payload.user_address, payload.token_ids, siwe_token
         )
         return BatchBalancesResponse(**result)
+    except ContractLogicError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get batch balances")
         raise HTTPException(status_code=500, detail="Failed to retrieve balances") from exc
 
 
 @router.get(
-    "/funds/locked/total/{user_address}/{token_id}", response_model=TotalLockedBalanceResponse
+    "/funds/locked/total/{user_address}/{token_id}",
+    response_model=TotalLockedBalanceResponse,
 )
-async def get_total_locked_balance(user_address: str, token_id: str) -> TotalLockedBalanceResponse:
+async def get_total_locked_balance(
+    user_address: str,
+    token_id: str,
+    siwe_token: bytes = Depends(_require_siwe_token),
+) -> TotalLockedBalanceResponse:
     """Get total locked balance for a specific token across all locks."""
-
     try:
-        result = await asyncio.to_thread(_service.get_total_locked_balance, user_address, token_id)
+        result = await asyncio.to_thread(
+            _service.get_total_locked_balance, user_address, token_id, siwe_token
+        )
         return TotalLockedBalanceResponse(**result)
+    except ContractLogicError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get total locked balance")
         raise HTTPException(
             status_code=500, detail="Failed to retrieve total locked balance"
         ) from exc
+
+
+@router.get("/auth/domain", response_model=SiweDomainResponse)
+async def get_siwe_domain() -> SiweDomainResponse:
+    """Fetch the SIWE domain bound to the contract."""
+    try:
+        result = await asyncio.to_thread(_service.get_siwe_domain)
+        return SiweDomainResponse(**result)
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get SIWE domain")
+        raise HTTPException(status_code=500, detail="Failed to retrieve SIWE domain") from exc
+
+
+@router.post("/auth/login", response_model=SiweLoginResponse)
+async def siwe_login(payload: SiweLoginRequest) -> SiweLoginResponse:
+    """Perform SIWE login and return an opaque auth token for private reads."""
+    try:
+        result = await asyncio.to_thread(
+            _service.siwe_login, payload.siwe_message, payload.signature
+        )
+        return SiweLoginResponse(**result)
+    except ContractLogicError as exc:
+        raise HTTPException(status_code=400, detail="SIWE login rejected") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to perform SIWE login")
+        raise HTTPException(status_code=500, detail="Failed to perform SIWE login") from exc
 
 
 @router.get("/tokens/{token_id}", response_model=TokenInfoResponse)

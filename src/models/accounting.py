@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
+from typing import ClassVar, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -240,75 +240,10 @@ class TransactionSubmissionResponse(BaseModel):
     detail: Optional[str] = None
 
 
-class LockInfo(BaseModel):
-    """Information about a single fund lock."""
-
-    lock_id: int
-    user_address: str
-    service_address: str
-    token_id: str
-    amount: int
-    expiry: int
-    is_expired: bool
-
-
-class LockedFundsResponse(BaseModel):
-    """Response containing user's locked funds information."""
-
-    user_address: str
-    service_address: Optional[str] = Field(
-        None, description="Filter by service address if provided"
-    )
-    locks: list[LockInfo]
-    total_locked: int
-
-
 class UnlockAllExpiredLocksRequest(BaseModel):
     """Payload for unlocking all expired locks for a user."""
 
     user_address: str
-
-
-class ExpiredLocksResponse(BaseModel):
-    """Response containing user's expired locks."""
-
-    user_address: str
-    expired_locks: list[LockInfo]
-
-
-class BatchBalancesRequest(BaseModel):
-    """Request for batch balance queries."""
-
-    user_address: str = Field(..., min_length=1)
-    token_ids: list[str] = Field(..., min_items=1)
-
-    @field_validator("token_ids")
-    def _normalise_token_ids(cls, value: list[str]) -> list[str]:
-        return [_normalise_hex(tid) for tid in value]
-
-
-class TokenBalance(BaseModel):
-    """Individual token balance information."""
-
-    token_id: str
-    balance: str
-    token_symbol: str
-    chain_id: str
-
-
-class BatchBalancesResponse(BaseModel):
-    """Response containing multiple token balances."""
-
-    user_address: str
-    balances: list[TokenBalance]
-
-
-class TotalLockedBalanceResponse(BaseModel):
-    """Response containing total locked balance for a token."""
-
-    user_address: str
-    token_id: str
-    total_locked: str
 
 
 class TokenInfoResponse(BaseModel):
@@ -321,6 +256,108 @@ class TokenInfoResponse(BaseModel):
     chain_id: Optional[int] = None
     chain_name: Optional[str] = None
     token_address: Optional[str] = None
+
+
+class BalanceResponse(BaseModel):
+    """Response containing a user's balance for a specific token."""
+
+    user_address: str
+    token_id: str
+    balance: str
+    token_symbol: str
+    chain_id: str
+
+
+class TokenBalance(BaseModel):
+    """Balance info for a single token (used in batch balance responses)."""
+
+    token_id: str
+    balance: str
+    token_symbol: str
+    chain_id: str
+
+
+class BatchBalancesRequest(BaseModel):
+    """Request payload for querying multiple token balances for a user."""
+
+    MAX_TOKEN_IDS: ClassVar[int] = 100
+
+    user_address: str = Field(..., min_length=1)
+    token_ids: list[str] = Field(..., min_length=1, max_length=MAX_TOKEN_IDS)
+
+    @field_validator("user_address")
+    def _normalise_user_address(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("token_ids")
+    def _normalise_token_ids(cls, value: list[str]) -> list[str]:
+        return [_normalise_hex(item) for item in value]
+
+
+class BatchBalancesResponse(BaseModel):
+    """Response containing balances for multiple tokens."""
+
+    user_address: str
+    balances: list[TokenBalance]
+
+
+class LockInfo(BaseModel):
+    """Public shape of a lock returned by the API."""
+
+    lock_id: int
+    user_address: str
+    service_address: str
+    token_id: str
+    amount: int
+    expiry: int
+    is_expired: bool
+
+
+class LockedFundsResponse(BaseModel):
+    """Response containing active locks for a user, optionally filtered by service."""
+
+    user_address: str
+    service_address: Optional[str] = None
+    locks: list[LockInfo]
+    total_locked: int
+
+
+class ExpiredLocksResponse(BaseModel):
+    """Response containing expired locks for a user."""
+
+    user_address: str
+    expired_locks: list[LockInfo]
+
+
+class TotalLockedBalanceResponse(BaseModel):
+    """Response containing total locked balance for a token."""
+
+    user_address: str
+    token_id: str
+    total_locked: str
+
+
+class SiweLoginRequest(BaseModel):
+    """Request payload for SIWE login."""
+
+    siwe_message: str = Field(..., min_length=1)
+    signature: str = Field(..., min_length=4)
+
+    @field_validator("signature")
+    def _normalise_siwe_signature(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
+class SiweLoginResponse(BaseModel):
+    """Response containing an opaque SIWE authentication token."""
+
+    token: str
+
+
+class SiweDomainResponse(BaseModel):
+    """Response containing the SIWE domain configured in the contract."""
+
+    domain: str
 
 
 class WithdrawalNonceResponse(BaseModel):

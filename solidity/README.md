@@ -4,9 +4,10 @@ A cross-chain accounting system built on Oasis Sapphire that enables secure depo
 
 ## Overview
 
-The Accounting module consists of three main components:
+The Accounting module consists of these main components:
 
 - **Accounting.sol** - Core accounting contract managing user balances and operations
+- **auth/AccountingSiweAuth.sol** - SIWE authentication helper for private view-call reads on Sapphire
 - **EVMSignerAndVerifier.sol** - EVM transaction verification and signing capabilities  
 - **EIP712SignatureVerifier.sol** - User authorization via EIP-712 signatures
 
@@ -48,7 +49,7 @@ bun run build
 This will:
 - Compile Solidity contracts using Hardhat
 - Generate TypeChain TypeScript bindings
-- Create artifacts in `artifacts/` and `typechain-types/` (ABIs for)
+- Create artifacts in `artifacts/` and `typechain-types/`
 
 ## Testing
 
@@ -57,7 +58,7 @@ This will:
 Run tests on a local Hardhat node:
 
 ```shell
-bun test
+bun run test
 ```
 
 ### Sapphire Localnet Testing
@@ -89,13 +90,31 @@ bun run coverage
 ### Deploy to Sapphire Localnet
 
 ```shell
-npx hardhat deploy --network sapphire-localnet
+npx hardhat deploy --network sapphire-localnet \
+  --shoyubashi <shoyubashi-address> \
+  --provethverifier <proveth-verifier-address> \
+  --domain localhost
 ```
 
 ### Deploy to Sapphire Testnet
 
 ```shell
-npx hardhat deploy --network sapphire-testnet
+npx hardhat deploy --network sapphire-testnet \
+  --shoyubashi <shoyubashi-address> \
+  --provethverifier <proveth-verifier-address> \
+  --domain <siwe-domain>
+```
+
+### Upgrade
+
+```shell
+npx hardhat upgrade --network sapphire-testnet --proxy <accounting-proxy-address>
+```
+
+If the task cannot resolve `siweAuth()` from the existing proxy (for older deployments), pass it explicitly:
+
+```shell
+npx hardhat upgrade --network sapphire-testnet --proxy <accounting-proxy-address> --siweauth <accounting-siwe-auth-address>
 ```
 
 ## Configuration
@@ -148,7 +167,9 @@ npx hardhat setGasPrice --network sapphire-localnet --chainid 1 --gas-price 2000
 
 | Network | Contract | Address |
 |---------|----------|---------|
+| Sapphire Testnet | AccountingSiweAuth | TBD |
 | Sapphire Testnet | Accounting | TBD |
+| Sapphire Mainnet | AccountingSiweAuth | TBD |
 | Sapphire Mainnet | Accounting | TBD |
 
 ## Security Considerations
@@ -165,6 +186,8 @@ npx hardhat setGasPrice --network sapphire-localnet --chainid 1 --gas-price 2000
 ```
 contracts/
 ├── Accounting.sol              # Main accounting contract
+├── auth/
+│   └── AccountingSiweAuth.sol  # SIWE auth for private reads
 ├── EVMSignerAndVerifier.sol    # EVM transaction handling
 ├── __(Network)SignerAndVerifier.sol    # Sui, Solana, etc transaction handling
 ├── EIP712SignatureVerifier.sol # User authorizations and signatures
