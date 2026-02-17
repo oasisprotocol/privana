@@ -26,6 +26,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
         public balances;
     mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
+    mapping(bytes32 depositKey => bool processed) public processedDeposits;
     mapping(address user => UserInfo) private userInfo;
 
     WithdrawalRequest[] public withdrawals;
@@ -109,6 +110,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
     error InvalidExpiry();
     error InvalidAmount();
     error WithdrawalTooSoon();
+    error DepositAlreadyProcessed();
+    error ReceiptIndexMismatch();
 
     struct WithdrawalRequest {
         address userAddress;
@@ -164,16 +167,16 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         EVMTransactionProof calldata txProof,
         EVMReceiptProof calldata receiptProof
     ) public {
-        bytes memory evmTransactionData = validateTxProof(txProof);
+        if (
+            keccak256(txProof.transactionIndexRlp) !=
+            keccak256(receiptProof.receiptIndexRlp)
+        ) revert ReceiptIndexMismatch();
 
-        bytes memory rawReceipt = validateReceiptProof(
-            txProof.rlpBlockHeader,
-            receiptProof
-        );
+        bytes memory evmTransactionData = validateTxProof(txProof);
 
         (
             uint256 chainId,
-            ,
+            bytes32 txHash,
             address from,
             address to,
             uint256 value,
@@ -182,6 +185,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             ,
 
         ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+
+        bytes32 depositKey = keccak256(abi.encodePacked(chainId, txHash));
+        if (processedDeposits[depositKey]) revert DepositAlreadyProcessed();
+
+        bytes memory rawReceipt = validateReceiptProof(
+            txProof.rlpBlockHeader,
+            receiptProof
+        );
 
         (uint256 status, ) = EVMSignerAndVerifier.decodeEVMTxReceipt(
             rawReceipt
@@ -237,6 +248,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         }
 
         if (amount == 0) revert InvalidAmount();
+
+        processedDeposits[depositKey] = true;
 
         balances[userAddress][tokenId] += amount;
 
