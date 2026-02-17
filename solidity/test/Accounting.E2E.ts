@@ -147,8 +147,6 @@ describe('Accounting', function () {
   });
 
   it("User should be able to deposit", async function () {
-    const depositAddress = await accounting.evmAddress();
-
     const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
 
     const blockNumber = 32680090;
@@ -187,114 +185,163 @@ describe('Accounting', function () {
     expect(balanceAfter).to.equal(parseUsdt("10"));
   });
 
-  it("Should reject deposit with invalid proof", async function () {
-    const depositAddress = await accounting.evmAddress();
-    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+  describe("Deposit validation (isolated deployment)", function () {
+    let isolatedAccounting: MockAccounting;
+    let isolatedShoyubashi: MockShoyuBashi;
+    let rlpBlockHeader: string;
+    let txProof: string[];
+    let receiptProof: string[];
 
     const blockNumber = 32680090;
     const transactionIndex = 45;
 
-    const { rlpBlockHeader, proof } = await getTxInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
+    before(async () => {
+      const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
 
-    const { proof: receiptProof } = await getReceiptInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
+      ({ rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
+        provider,
+        blockNumber,
+        transactionIndex
+      ));
 
-    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
+      ({ proof: receiptProof } = await getReceiptInclusionProof(
+        provider,
+        blockNumber,
+        transactionIndex
+      ));
+    });
 
-    const invalidProof = proof.slice(0, proof.length - 1);
+    beforeEach(async () => {
+      const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
+      isolatedShoyubashi = await MockShoyubashiFactory.deploy();
+      await isolatedShoyubashi.waitForDeployment();
 
-    await expect(
-      accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+      const AccountingFactory = await ethers.getContractFactory('MockAccounting');
+      isolatedAccounting = await AccountingFactory.deploy(await isolatedShoyubashi.getAddress());
+      await isolatedAccounting.waitForDeployment();
+
+      const data = ethers.concat([
+        ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+        ethers.zeroPadValue(TEST_TOKEN.address, 20)
+      ]);
+
+      await isolatedAccounting.setTokenInfo({
+        tokenType: TEST_TOKEN.tokenType,
+        data
+      });
+    });
+
+    it("Should reject replayed deposit proof", async function () {
+      await isolatedShoyubashi.setUnanimousHash(
+        TEST_TOKEN.chainId,
+        blockNumber,
+        keccak256(rlpBlockHeader)
+      );
+
+      await isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
         rlpBlockHeader,
         transactionIndexRlp: getRlpUint(transactionIndex),
-        transactionProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      },
-        {
-          receiptIndexRlp: getRlpUint(transactionIndex),
-          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        }
-      )
-    ).to.be.reverted;
-  });
+        transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      }, {
+        receiptIndexRlp: getRlpUint(transactionIndex),
+        receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      });
 
-
-  it("Should reject deposit with invalid receipt proof", async function () {
-    const depositAddress = await accounting.evmAddress();
-    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
-
-    const blockNumber = 32680090;
-    const transactionIndex = 45;
-
-    const { rlpBlockHeader, proof } = await getTxInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
-
-    const { proof: receiptProof } = await getReceiptInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
-
-    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
-
-    const invalidProof = receiptProof.slice(0, proof.length - 1);
-
-    await expect(
-      accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-        rlpBlockHeader,
-        transactionIndexRlp: getRlpUint(transactionIndex),
-        transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      },
-        {
-          receiptIndexRlp: getRlpUint(transactionIndex),
-          receiptProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        }
-      )
-    ).to.be.reverted;
-  });
-
-  it("Should reject deposit with wrong block hash", async function () {
-    const depositAddress = await accounting.evmAddress();
-    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
-
-    const blockNumber = 32680090;
-    const transactionIndex = 45;
-
-    const { rlpBlockHeader, proof } = await getTxInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
-
-    const { proof: receiptProof } = await getReceiptInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
-
-    const wrongBlockHash = "0x1234567890123456789012345678901234567890123456789012345678901234";
-    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, wrongBlockHash);
-
-    await expect(
-      accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-        rlpBlockHeader,
-        transactionIndexRlp: getRlpUint(transactionIndex),
-        transactionProofStack: ethers.encodeRlp(proof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      },
-        {
+      await expect(
+        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+          rlpBlockHeader,
+          transactionIndexRlp: getRlpUint(transactionIndex),
+          transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        }, {
           receiptIndexRlp: getRlpUint(transactionIndex),
           receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
         })
-    ).to.be.revertedWith("Invalid block hash");
+      ).to.be.revertedWithCustomError(isolatedAccounting, "DepositAlreadyProcessed");
+    });
+
+    it("Should reject deposit with invalid proof", async function () {
+      await isolatedShoyubashi.setUnanimousHash(
+        TEST_TOKEN.chainId,
+        blockNumber,
+        keccak256(rlpBlockHeader)
+      );
+
+      const invalidProof = txProof.slice(0, txProof.length - 1);
+
+      await expect(
+        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+          rlpBlockHeader,
+          transactionIndexRlp: getRlpUint(transactionIndex),
+          transactionProofStack: ethers.encodeRlp(
+            invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))
+          ),
+        }, {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        })
+      ).to.be.reverted;
+    });
+
+    it("Should reject deposit with invalid receipt proof", async function () {
+      await isolatedShoyubashi.setUnanimousHash(
+        TEST_TOKEN.chainId,
+        blockNumber,
+        keccak256(rlpBlockHeader)
+      );
+
+      const invalidProof = receiptProof.slice(0, receiptProof.length - 1);
+
+      await expect(
+        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+          rlpBlockHeader,
+          transactionIndexRlp: getRlpUint(transactionIndex),
+          transactionProofStack: ethers.encodeRlp(
+            txProof.map((rlpList) => ethers.decodeRlp(rlpList))
+          ),
+        }, {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        })
+      ).to.be.reverted;
+    });
+
+    it("Should reject deposit when tx/receipt indices mismatch", async function () {
+      await isolatedShoyubashi.setUnanimousHash(
+        TEST_TOKEN.chainId,
+        blockNumber,
+        keccak256(rlpBlockHeader)
+      );
+
+      await expect(
+        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+          rlpBlockHeader,
+          transactionIndexRlp: getRlpUint(transactionIndex),
+          transactionProofStack: ethers.encodeRlp(
+            txProof.map((rlpList) => ethers.decodeRlp(rlpList))
+          ),
+        }, {
+          receiptIndexRlp: getRlpUint(transactionIndex + 1),
+          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        })
+      ).to.be.revertedWithCustomError(isolatedAccounting, "ReceiptIndexMismatch");
+    });
+
+    it("Should reject deposit with wrong block hash", async function () {
+      const wrongBlockHash =
+        "0x1234567890123456789012345678901234567890123456789012345678901234";
+      await isolatedShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, wrongBlockHash);
+
+      await expect(
+        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
+          rlpBlockHeader,
+          transactionIndexRlp: getRlpUint(transactionIndex),
+          transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        }, {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        })
+      ).to.be.revertedWith("Invalid block hash");
+    });
   });
 
   it("Test EIP712 transfer", async function () {
