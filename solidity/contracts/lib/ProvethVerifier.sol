@@ -3,6 +3,7 @@
 pragma solidity ^0.8.18;
 
 import "solidity-rlp/contracts/RLPReader.sol";
+import {IProvethVerifier, EVMTransactionProof, EVMReceiptProof} from "../interfaces/IProvethVerifier.sol";
 
 struct StorageProof {
     bytes rlpBlockHeader;
@@ -12,18 +13,7 @@ struct StorageProof {
     bytes storageProofStack;
 }
 
-struct EVMTransactionProof {
-    bytes rlpBlockHeader;
-    bytes transactionIndexRlp;
-    bytes transactionProofStack;
-}
-
-struct EVMReceiptProof {
-    bytes receiptIndexRlp;
-    bytes receiptProofStack;
-}
-
-contract ProvethVerifier {
+contract ProvethVerifier is IProvethVerifier {
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for bytes;
 

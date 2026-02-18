@@ -269,5 +269,5 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[48] private __gap;
+    uint256[47] private __gap;
 }

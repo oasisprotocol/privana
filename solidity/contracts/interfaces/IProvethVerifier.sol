@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
 
-import {EVMTransactionProof, EVMReceiptProof} from "../lib/ProvethVerifier.sol";
+struct EVMTransactionProof {
+    bytes rlpBlockHeader;
+    bytes transactionIndexRlp;
+    bytes transactionProofStack;
+}
+
+struct EVMReceiptProof {
+    bytes receiptIndexRlp;
+    bytes receiptProofStack;
+}
 
 interface IProvethVerifier {
     function validateTxProof(

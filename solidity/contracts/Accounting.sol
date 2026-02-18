@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
-import {EVMTransactionProof, EVMReceiptProof} from "./lib/ProvethVerifier.sol";
+import {EVMTransactionProof, EVMReceiptProof} from "./interfaces/IProvethVerifier.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -160,6 +160,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param newImplementation Address of the new implementation contract
      */
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
+    function renounceOwnership() public pure override {
+        revert();
+    }
 
     /**
      * @notice Credits user's account after verifying an EVM deposit transaction.
@@ -952,5 +957,5 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[45] private __gap;
+    uint256[44] private __gap;
 }

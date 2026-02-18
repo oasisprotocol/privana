@@ -13,8 +13,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {
     EIP155Signer
 } from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
-import {EVMTransactionProof, EVMReceiptProof} from "./lib/ProvethVerifier.sol";
-import {IProvethVerifier} from "./interfaces/IProvethVerifier.sol";
+import {IProvethVerifier, EVMTransactionProof, EVMReceiptProof} from "./interfaces/IProvethVerifier.sol";
 
 import {SliceBytes} from "./lib/SliceBytes.sol";
 import {
@@ -30,7 +29,7 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 
 abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     address public evmAddress;
-    bytes32 internal secretKey;
+    bytes32 private secretKey;
     IShoyuBashi public shoyuBashi;
     IProvethVerifier public provethVerifier;
 
@@ -671,13 +670,6 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
             .toRlpItem()
             .toList();
         blockNumber = (blockHeader[8].toUint());
-    }
-
-    function validateEVMTxProof(
-        EVMTransactionProof calldata txProof
-    ) internal view returns (bytes memory) {
-        // Validate the transaction proof using the external ProvethVerifier
-        return provethVerifier.validateTxProof(txProof);
     }
 
     function verifyBlockHash(
