@@ -2,6 +2,9 @@
 pragma solidity ^0.8.18;
 
 library SliceBytes {
+    error InvalidSliceRange();
+    error SliceOutOfBounds();
+
     /**
      * @notice Extracts a slice from bytes data
      * @param data The bytes data to slice
@@ -14,8 +17,8 @@ library SliceBytes {
         uint256 begin,
         uint256 end
     ) internal pure returns (bytes memory result) {
-        require(begin <= end, "Invalid slice range");
-        require(end <= data.length, "Slice out of bounds");
+        if (begin > end) revert InvalidSliceRange();
+        if (end > data.length) revert SliceOutOfBounds();
 
         result = new bytes(end - begin);
         for (uint256 i = 0; i < end - begin; i++) {

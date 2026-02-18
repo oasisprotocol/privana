@@ -4,7 +4,8 @@ pragma solidity ^0.8.20;
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
-import {EVMTransactionProof, EVMReceiptProof} from "./lib/ProvethVerifier.sol";
+import {EVMTransactionProof, EVMReceiptProof} from "./interfaces/IProvethVerifier.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
  * @title Accounting
@@ -22,7 +23,7 @@ import {EVMTransactionProof, EVMReceiptProof} from "./lib/ProvethVerifier.sol";
  * - Automated withdrawal transaction generation
  * - Universal token abstraction supporting various tokens
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
+contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
         public balances;
     mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
@@ -31,7 +32,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
     WithdrawalRequest[] public withdrawals;
 
-    uint256 private nextLockId = 1;
+    uint256 private nextLockId;
 
     event Deposit(
         address indexed userAddress,
@@ -122,15 +123,48 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes txIdentifier; // nonce, utxo identifier, or similar
     }
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @notice Internal initializer for the Accounting contract.
+     * @dev Sets up EIP-712 domain and EVM signing infrastructure.
+     * @param _shoyubashi Address of the ShoyuBashi oracle for cross-chain block hash verification
+     * @param _provethVerifier Address of the ProvethVerifier contract for proof validation
+     * @param _owner Address that will own this contract
+     */
+    function __Accounting_init(address _shoyubashi, address _provethVerifier, address _owner) internal onlyInitializing {
+        __EIP712SignatureVerifier_init();
+        __EVMSignerAndVerifier_init(_shoyubashi, _provethVerifier, _owner);
+        __UUPSUpgradeable_init();
+        nextLockId = 1;
+    }
+
     /**
      * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
-     * @dev Calls parent constructors to set up EIP-712 domain and EVM signing infrastructure.
-     *      The deployer (msg.sender) becomes the contract owner through EVMSignerAndVerifier.
+     * @dev Replaces the constructor for upgradeable contracts.
+     *      The specified owner becomes the contract owner.
      * @param _shoyubashi Address of the ShoyuBashi oracle for cross-chain block hash verification
+     * @param _provethVerifier Address of the ProvethVerifier contract for proof validation
+     * @param _owner Address that will own this contract
      */
-    constructor(
-        address _shoyubashi
-    ) EVMSignerAndVerifier(_shoyubashi) EIP712SignatureVerifier() {}
+    function initialize(address _shoyubashi, address _provethVerifier, address _owner) external virtual initializer {
+        __Accounting_init(_shoyubashi, _provethVerifier, _owner);
+    }
+
+    /**
+     * @notice Authorizes an upgrade to a new implementation.
+     * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
+     * @param newImplementation Address of the new implementation contract
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
+    function renounceOwnership() public pure override {
+        revert();
+    }
 
     /**
      * @notice Credits user's account after verifying an EVM deposit transaction.
@@ -172,7 +206,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
             keccak256(receiptProof.receiptIndexRlp)
         ) revert ReceiptIndexMismatch();
 
-        bytes memory evmTransactionData = validateTxProof(txProof);
+        bytes memory evmTransactionData = provethVerifier.validateTxProof(txProof);
 
         (
             uint256 chainId,
@@ -189,7 +223,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
         bytes32 depositKey = keccak256(abi.encodePacked(chainId, txHash));
         if (processedDeposits[depositKey]) revert DepositAlreadyProcessed();
 
-        bytes memory rawReceipt = validateReceiptProof(
+        bytes memory rawReceipt = provethVerifier.validateReceiptProof(
             txProof.rlpBlockHeader,
             receiptProof
         );
@@ -918,4 +952,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier {
 
         return totalLocked;
     }
+
+    /**
+     * @dev Reserved storage gap for future upgrades.
+     * This allows adding new state variables without shifting storage layout.
+     */
+    uint256[44] private __gap;
 }

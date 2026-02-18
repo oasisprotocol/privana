@@ -1,7 +1,7 @@
 import { expect, version } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { parseEther, Wallet } from 'ethers';
-import { MockEVMSignerAndVerifier } from '../typechain-types';
+import { MockEVMSignerAndVerifier, MockShoyuBashi, ProvethVerifier } from '../typechain-types';
 import { generateERC20Tx, generateNativeTx } from './utils';
 import { decode } from 'rlp';
 
@@ -39,12 +39,32 @@ const userWallet2 = Wallet.createRandom().connect(ethers.provider);
 
 describe('EVMSignerAndVerifier', function () {
   let mockEVMSignerAndVerifier: MockEVMSignerAndVerifier;
+  let mockShoyubashi: MockShoyuBashi;
+  let provethVerifier: ProvethVerifier;
 
   before(async () => {
-    // Any eth passed to constructor will be sent to the random wallet
+    const MockShoyuBashiFactory = await ethers.getContractFactory('MockShoyuBashi');
+    mockShoyubashi = await MockShoyuBashiFactory.deploy();
+    await mockShoyubashi.waitForDeployment();
+
+    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
+    provethVerifier = await ProvethVerifierFactory.deploy();
+    await provethVerifier.waitForDeployment();
+
     const MockEVMSignerAndVerifierFactory = await ethers.getContractFactory('MockEVMSignerAndVerifier');
-    mockEVMSignerAndVerifier = await MockEVMSignerAndVerifierFactory.deploy();
+    // Deploy as UUPS proxy to properly initialize the contract
+    mockEVMSignerAndVerifier = await upgrades.deployProxy(
+      MockEVMSignerAndVerifierFactory,
+      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress()],
+      { kind: 'uups', initializer: 'initialize' }
+    ) as unknown as MockEVMSignerAndVerifier;
     await mockEVMSignerAndVerifier.waitForDeployment();
+  });
+
+  it("Should have initialized evmAddress correctly", async function () {
+    const evmAddress = await mockEVMSignerAndVerifier.evmAddress();
+    // TEST_ADDRESS from MockEVMSignerAndVerifier contract
+    expect(evmAddress).to.equal("0x1234567890123456789012345678901234567890");
   });
 
   it("User should be able to deposit TEST token using every transaction type", async function () {

@@ -3,6 +3,7 @@
 pragma solidity ^0.8.18;
 
 import "solidity-rlp/contracts/RLPReader.sol";
+import {IProvethVerifier, EVMTransactionProof, EVMReceiptProof} from "../interfaces/IProvethVerifier.sol";
 
 struct StorageProof {
     bytes rlpBlockHeader;
@@ -12,20 +13,12 @@ struct StorageProof {
     bytes storageProofStack;
 }
 
-struct EVMTransactionProof {
-    bytes rlpBlockHeader;
-    bytes transactionIndexRlp;
-    bytes transactionProofStack;
-}
-
-struct EVMReceiptProof {
-    bytes receiptIndexRlp;
-    bytes receiptProofStack;
-}
-
-contract ProvethVerifier {
+contract ProvethVerifier is IProvethVerifier {
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for bytes;
+
+    error RootHashMismatch();
+    error NodeHashMismatch();
 
     uint256 private constant BLOCK_HEADER_STATE_ROOT_INDEX = 3;
     uint256 private constant BLOCK_HEADER_TX_ROOT_INDEX = 4;
@@ -300,12 +293,12 @@ contract ProvethVerifier {
             rlpNode = stack[i].toRlpBytes();
             // The root node is hashed with Keccak-256 ...
             if (i == 0 && rootHash != keccak256(rlpNode)) {
-                revert("Root hash does not match first node's hash");
+                revert RootHashMismatch();
             }
             // ... whereas all other nodes are hashed with the MPT
             // hash function.
             if (i != 0 && nodeHashHash != mptHashHash(rlpNode)) {
-                revert("Node hash does not equal mpt hash");
+                revert NodeHashMismatch();
             }
             // We verified that stack[i] has the correct hash, so we
             // may safely decode it.

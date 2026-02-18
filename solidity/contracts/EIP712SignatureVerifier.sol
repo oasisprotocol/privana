@@ -3,7 +3,8 @@
 pragma solidity ^0.8.20;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
 /**
  * @title EIP712SignatureVerifier
@@ -22,11 +23,14 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
  * The contract prevents signature replay attacks by tracking used signatures and ensures
  * that only the rightful user can authorize operations on their funds.
  */
-contract EIP712SignatureVerifier is EIP712 {
+abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /**
-     * @notice Sets up the EIP-712 domain separator for typed data signatures.
+     * @notice Initializes the EIP-712 domain separator for typed data signatures.
+     * @dev This replaces the constructor for upgradeable contracts.
      */
-    constructor() EIP712("AccountingModule", "1") {}
+    function __EIP712SignatureVerifier_init() internal onlyInitializing {
+        __EIP712_init("AccountingModule", "1");
+    }
 
     /// @notice Mapping to track used signatures to prevent replay attacks
     mapping(bytes signature => bool used) public usedSignatures;
@@ -260,4 +264,10 @@ contract EIP712SignatureVerifier is EIP712 {
 
         usedSignatures[signature] = true;
     }
+
+    /**
+     * @dev Reserved storage gap for future upgrades.
+     * This allows adding new state variables without shifting storage layout.
+     */
+    uint256[47] private __gap;
 }
