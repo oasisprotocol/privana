@@ -4,9 +4,20 @@
 
 Requests and responses are JSON. Hex strings must include the `0x` prefix. Signatures follow the EIP-712 payloads defined in the contracts.
 
+## Authentication (private reads)
+
+Balances and lock details are private. To read them via this API, clients must authenticate using SIWE and include the returned token in the `X-SIWE-Token` header.
+
+High-level flow:
+1. `GET /auth/domain` to fetch the SIWE domain bound to the contract.
+2. Create a SIWE message using that domain and the Sapphire chain ID (e.g., 23295 for Sapphire Testnet).
+3. Sign the message with the user's wallet (`signMessage`).
+4. `POST /auth/login` with `{ siwe_message, signature }` to receive a `token`.
+5. Include `X-SIWE-Token: <token>` on private read endpoints.
+
 ## Endpoints
 
-### POST `/deposits/quote`
+### POST `/quote/deposit`
 Generate deposit instructions and transaction data for a user/token/amount combination.
 - **Request body**
   - `user_address` (string, required) – EVM address of the user.
@@ -56,7 +67,7 @@ Lock user funds for a service using the user's EIP-712 signature.
 Modify an existing lock by adding funds and/or extending the expiry.
 - **Request body**
   - `user_address` (string, required) – Owner of the lock.
-  - `lock_index` (integer, required) – Index of the lock to modify.
+  - `lock_id` (integer, required) – ID of the lock to modify.
   - `amount` (integer, required) – Amount to add in base units (use 0 to only extend expiry).
   - `new_expiry` (integer, required) – New expiry timestamp (must be >= current expiry).
   - `signature` (string, required) – User EIP-712 `ModifyLock` signature.
@@ -67,21 +78,13 @@ Modify an existing lock by adding funds and/or extending the expiry.
 - **Note:** At least one of `amount > 0` or `new_expiry > current_expiry` must be true; otherwise the call is rejected as a no-op.
 
 ### GET `/funds/locked/{user_address}`
-Get locked funds for a user, optionally filtered by service address.
+Get locked funds for a user, optionally filtered by `service_address`.
+- **Headers**
+  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
 - **Query parameters**
-  - `service_address` (string, optional) – Filter locks by service address.
-- **Response body**
-  - `user_address` (string) – Checksummed user address.
-  - `service_address` (string, optional) – Service address filter if provided.
-  - `locks` (array) – List of lock information:
-    - `lock_index` (integer) – Index of the lock.
-    - `user_address` (string) – Owner of the lock.
-    - `service_address` (string) – Service that locked the funds.
-    - `token_id` (string) – Token identifier.
-    - `amount` (integer) – Locked amount.
-    - `expiry` (integer) – Unix timestamp when lock expires.
-    - `is_expired` (boolean) – Whether the lock has expired.
-  - `total_locked` (integer) – Total amount locked across all locks.
+  - `service_address` (string, optional) – Filter locks by service.
+- **Note**
+  - `service_address` is a response filter on user-authenticated reads. It does not grant service-only access. Service backends should use contract-level `getServiceLocks(...)` with Sapphire authenticated view calls.
 
 ### POST `/funds/transfer`
 Transfer balances between users with the originator's EIP-712 signature.
@@ -97,7 +100,7 @@ Transfer balances between users with the originator's EIP-712 signature.
 Consume or release locked funds using the service's EIP-712 signature.
 - **Request body**
   - `user_address` (string, required) – Owner of the lock.
-  - `lock_index` (integer, required).
+  - `lock_id` (integer, required).
   - `to_address` (string, required).
   - `amount` (integer, required).
   - `signature` (string, required) – Service EIP-712 `TransferLocked` signature.
@@ -107,7 +110,7 @@ Consume or release locked funds using the service's EIP-712 signature.
 Unlock a single expired lock without a signature.
 - **Request body**
   - `user_address` (string, required).
-  - `lock_index` (integer, required).
+  - `lock_id` (integer, required).
 - **Response body** – same structure as `/funds/lock`.
 
 ### POST `/funds/unlock-all-expired`
@@ -121,9 +124,26 @@ Unlock all expired locks for a user in a single transaction.
 
 ### GET `/funds/expired/{user_address}`
 Get all expired locks for a user.
+- **Headers**
+  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
 - **Response body**
   - `user_address` (string) – Checksummed user address.
-  - `expired_locks` (array) – List of expired lock information (same structure as locks in `/funds/locked`).
+  - `expired_locks` (array) – List of expired lock records:
+    - `lock_id` (integer)
+    - `user_address` (string)
+    - `service_address` (string)
+    - `token_id` (string)
+    - `amount` (integer)
+    - `expiry` (integer)
+    - `is_expired` (boolean, always `true`)
+
+### GET `/withdraw/nonce/{user_address}`
+Get the current withdrawal nonce for a user. Use this nonce in `POST /withdraw` and include it in the EIP-712 `Withdraw` signature.
+- **Path parameters**
+  - `user_address` (string, required) – User's EVM address.
+- **Response body**
+  - `user_address` (string) – Checksummed user address.
+  - `nonce` (integer) – Current withdrawal nonce.
 
 ### POST `/withdraw`
 Request a withdrawal based on the user's EIP-712 signature. This schedules the withdrawal for resolution in a later block (simulation attack protection). The user's balance is debited immediately and a nonce is reserved for the withdrawal transaction.
@@ -131,6 +151,7 @@ Request a withdrawal based on the user's EIP-712 signature. This schedules the w
   - `user_address` (string, required).
   - `token_id` (string, required).
   - `amount` (integer, required).
+  - `nonce` (integer, required) – Current withdrawal nonce for the user (use `GET /withdraw/nonce/{user_address}`).
   - `signature` (string, required) – User EIP-712 `Withdraw` signature.
 - **Response body**
   - `submission_id` (string) – ROFL submission identifier.
@@ -167,36 +188,33 @@ Get information about a specific withdrawal request.
   - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
 
 ### GET `/balances/{user_address}/{token_id}`
-Get the user's balance for a specific token from the contract.
-- **Response body**
-  - `user_address` (string) – Checksummed address.
-  - `token_id` (string) – Token identifier.
-  - `balance` (string) – User's balance in base units (wei for ETH).
-  - `token_symbol` (string) – Token symbol.
-  - `chain_id` (string) – Chain ID where the token originates.
+Get the user's balance for a specific token.
+- **Headers**
+  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
 
 ### POST `/balances/batch`
-Get balances for multiple tokens for a user in a single call.
+Get balances for multiple tokens for a user.
+- **Headers**
+  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
 - **Request body**
-  - `user_address` (string, required).
-  - `token_ids` (array of strings, required) – List of token identifiers.
-- **Response body**
-  - `user_address` (string) – Checksummed address.
-  - `balances` (array) – List of token balance information:
-    - `token_id` (string) – Token identifier.
-    - `balance` (string) – Balance in base units.
-    - `token_symbol` (string) – Token symbol.
-    - `chain_id` (string) – Chain ID where the token originates.
+  - `user_address` (string, required)
+  - `token_ids` (array[string], required) – Bytes32 token identifiers (hex), max 100 items
 
 ### GET `/funds/locked/total/{user_address}/{token_id}`
 Get total locked balance for a specific token across all locks.
-- **Path parameters**
-  - `user_address` (string, required) – User's EVM address.
-  - `token_id` (string, required) – Token identifier.
+- **Headers**
+  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
+
+### GET `/auth/domain`
+Get the SIWE domain bound to the contract.
+
+### POST `/auth/login`
+Perform SIWE login and receive an opaque token for private reads.
+- **Request body**
+  - `siwe_message` (string, required)
+  - `signature` (string, required) – `signMessage` signature for the SIWE message (hex)
 - **Response body**
-  - `user_address` (string) – Checksummed address.
-  - `token_id` (string) – Token identifier.
-  - `total_locked` (string) – Total locked amount in base units.
+  - `token` (string) – SIWE auth token (hex). Include in `X-SIWE-Token`.
 
 ### GET `/tokens/{token_id}`
 Get information about a registered token.

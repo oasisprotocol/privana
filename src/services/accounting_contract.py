@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from eth_account import Account
+from eth_account.signers.local import LocalAccount
 from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
+from sapphirepy import sapphire
 from web3 import Web3
 from web3.contract import Contract
+from web3.middleware import SignAndSendRawMiddlewareBuilder
 
 from src.abi.accounting import ACCOUNTING_ABI
+from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import RoflAppdClient
 from src.config import CHAIN_NAMES, ERC20_TOKENS, NATIVE_TOKEN_SYMBOLS, load_settings
 from src.models.types import Settings
@@ -27,6 +33,10 @@ def _ensure_hex(value: str) -> str:
 
 def _to_checksum(address: str) -> ChecksumAddress:
     return Web3.to_checksum_address(address)
+
+
+def _to_prefixed_hex(value: Any) -> str:
+    return HexBytes(value).to_0x_hex().lower()
 
 
 @dataclass
@@ -68,6 +78,11 @@ class AccountingContractService:
             if self.reader_w3
             else None
         )
+        self._confidential_reader_w3: Optional[Web3] = None
+        self._confidential_contract_reader: Optional[Contract] = None
+        self._siwe_auth_address: Optional[ChecksumAddress] = None
+        self._siwe_auth_reader: Optional[Contract] = None
+        self._confidential_siwe_auth_reader: Optional[Contract] = None
         self.rofl_client = RoflAppdClient()
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, Web3] = {}
@@ -189,6 +204,87 @@ class AccountingContractService:
         if self.contract_reader is None:
             raise ValueError("SAPPHIRE_RPC_URL must be configured to perform withdrawal operations")
         return self.contract_reader
+
+    def _get_siwe_auth_address(self) -> ChecksumAddress:
+        if self._siwe_auth_address is not None:
+            return self._siwe_auth_address
+
+        contract_reader = self._get_reader_contract()
+        auth_address = contract_reader.functions.siweAuth().call()
+        if not isinstance(auth_address, str) or not Web3.is_address(auth_address):
+            raise ValueError(
+                "Invalid SIWE auth contract address returned by the Accounting contract"
+            )
+
+        self._siwe_auth_address = _to_checksum(auth_address)
+        return self._siwe_auth_address
+
+    def _get_siwe_auth_reader_contract(self) -> Contract:
+        if self._siwe_auth_reader is not None:
+            return self._siwe_auth_reader
+
+        if self.reader_w3 is None:
+            raise ValueError("SAPPHIRE_RPC_URL must be configured to read SIWE auth settings")
+
+        auth_address = self._get_siwe_auth_address()
+        self._siwe_auth_reader = self.reader_w3.eth.contract(
+            address=auth_address,
+            abi=ACCOUNTING_SIWE_AUTH_ABI,
+        )
+        return self._siwe_auth_reader
+
+    def _get_confidential_reader_contract(self) -> Contract:
+        if self._confidential_contract_reader is not None:
+            return self._confidential_contract_reader
+
+        if not self.sapphire_rpc_url:
+            raise ValueError("SAPPHIRE_RPC_URL must be configured to perform confidential reads")
+
+        # Uses SAPPHIRE_VIEW_PRIVATE_KEY if set; otherwise tries ROFL appd keypair.
+        private_key = os.getenv("SAPPHIRE_VIEW_PRIVATE_KEY")
+        if private_key:
+            private_key = _ensure_hex(private_key)
+        else:
+            # In ROFL deployments, use the app-managed service key for signing view calls.
+            try:
+                private_key, _ = self.rofl_client.get_keypair()
+            except Exception as exc:  # pragma: no cover - depends on ROFL runtime
+                raise ValueError(
+                    "SAPPHIRE_VIEW_PRIVATE_KEY is not set and ROFL appd key is unavailable"
+                ) from exc
+
+        account: LocalAccount = Account.from_key(private_key)
+
+        w3 = Web3(Web3.HTTPProvider(self.sapphire_rpc_url))
+        w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(account))
+        wrapped_w3 = sapphire.wrap(w3, account)
+
+        self._confidential_reader_w3 = wrapped_w3
+        self._confidential_contract_reader = wrapped_w3.eth.contract(
+            address=self.contract_address, abi=ACCOUNTING_ABI
+        )
+        return self._confidential_contract_reader
+
+    def _get_confidential_siwe_auth_reader_contract(self) -> Contract:
+        if self._confidential_siwe_auth_reader is not None:
+            return self._confidential_siwe_auth_reader
+
+        # Ensure the confidential reader is initialized.
+        self._get_confidential_reader_contract()
+        if self._confidential_reader_w3 is None:
+            raise ValueError("Confidential reader is not initialized")
+
+        auth_address = self._get_siwe_auth_address()
+        self._confidential_siwe_auth_reader = self._confidential_reader_w3.eth.contract(
+            address=auth_address,
+            abi=ACCOUNTING_SIWE_AUTH_ABI,
+        )
+        return self._confidential_siwe_auth_reader
+
+    def _get_chain_timestamp(self) -> int:
+        if self._confidential_reader_w3 is None:
+            raise ValueError("Confidential reader is not initialized")
+        return int(self._confidential_reader_w3.eth.get_block("latest")["timestamp"])
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -456,56 +552,6 @@ class AccountingContractService:
         )
         return self._submit(fn._encode_transaction_data(), gas=3_000_000)  # leave 3m gas limit
 
-    def get_balance(self, user_address: str, token_id: str) -> int:
-        """Get user balance for a specific token from the contract."""
-        checksum_user = self._require_address(user_address, "user_address")
-        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
-
-        contract_reader = self._get_reader_contract()
-        balance = contract_reader.functions.balances(checksum_user, bytes(token_hex)).call()
-        return balance
-
-    def get_locked_funds(
-        self, user_address: str, service_address: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Get locked funds for a user, optionally filtered by service address."""
-        checksum_user = self._require_address(user_address, "user_address")
-
-        contract_reader = self._get_reader_contract()
-
-        fund_locks = contract_reader.functions.getUserLocks(checksum_user).call()
-
-        latest_timestamp = None
-        if self.reader_w3:
-            latest_block = self.reader_w3.eth.get_block("latest")
-            latest_timestamp = latest_block.get("timestamp")
-
-        locks = []
-        for lock in fund_locks:
-            lock_info = {
-                "lock_id": lock[0],
-                "user_address": checksum_user,
-                "service_address": lock[1],
-                "token_id": "0x" + lock[2].hex(),
-                "amount": lock[3],
-                "expiry": lock[4],
-                "is_expired": bool(latest_timestamp is not None and lock[4] < latest_timestamp),
-            }
-
-            if service_address is None or lock[1].lower() == service_address.lower():
-                locks.append(lock_info)
-
-        total_locked = sum(lock["amount"] for lock in locks)
-
-        response = {
-            "user_address": checksum_user,
-            "service_address": service_address,
-            "locks": locks,
-            "total_locked": total_locked,
-        }
-
-        return response
-
     def request_withdrawal(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
@@ -688,96 +734,18 @@ class AccountingContractService:
         fn = self.contract.functions.unlockAllExpiredLocks(user)
         return self._submit(fn._encode_transaction_data())
 
-    def get_expired_locks(self, user_address: str) -> Dict[str, Any]:
-        """Get all expired locks for a user."""
-        checksum_user = self._require_address(user_address, "user_address")
-
-        contract_reader = self._get_reader_contract()
-
-        expired_locks, _ = contract_reader.functions.getExpiredLocks(checksum_user).call()
-
-        locks = []
-        for lock in expired_locks:
-            lock_info = {
-                "lock_id": lock[0],
-                "user_address": checksum_user,
-                "service_address": lock[1],
-                "token_id": "0x" + lock[2].hex(),
-                "amount": lock[3],
-                "expiry": lock[4],
-                "is_expired": True,
-            }
-            locks.append(lock_info)
-
-        return {
-            "user_address": checksum_user,
-            "expired_locks": locks,
-        }
-
-    def get_balances(self, user_address: str, token_ids: list[str]) -> Dict[str, Any]:
-        """Get balances for multiple tokens for a user."""
-        checksum_user = self._require_address(user_address, "user_address")
-
-        token_hex_list = [
-            self._require_hex(token_id, "token_id", expected_len=32) for token_id in token_ids
-        ]
-
-        contract_reader = self._get_reader_contract()
-
-        balances = contract_reader.functions.getBalances(
-            checksum_user, [bytes(token) for token in token_hex_list]
-        ).call()
-
-        token_balances = []
-        for i, token_id in enumerate(token_ids):
-            token_hex = token_hex_list[i]
-            token_symbol = self._get_token_symbol(token_hex)
-            token_context = self._get_token_context(token_hex)
-
-            token_balances.append(
-                {
-                    "token_id": token_id.lower(),
-                    "balance": str(balances[i]),
-                    "token_symbol": token_symbol,
-                    "chain_id": str(token_context.chain_id),
-                }
-            )
-
-        return {
-            "user_address": checksum_user,
-            "balances": token_balances,
-        }
-
-    def get_total_locked_balance(self, user_address: str, token_id: str) -> Dict[str, Any]:
-        checksum_user = self._require_address(user_address, "user_address")
-        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
-
-        contract_reader = self._get_reader_contract()
-
-        total_locked = contract_reader.functions.getTotalLockedBalance(
-            checksum_user, bytes(token_hex)
-        ).call()
-
-        return {
-            "user_address": checksum_user,
-            "token_id": token_id.lower(),
-            "total_locked": str(total_locked),
-        }
-
     def get_token_info(self, token_id: str) -> Dict[str, Any]:
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
         contract_reader = self._get_reader_contract()
 
         token_type, token_data = contract_reader.functions.tokens(bytes(token_hex)).call()
 
+        token_type_names = {0: "NativeEVM", 1: "ERC20"}
+
         result = {
             "token_id": token_id.lower(),
             "token_type": token_type,
-            "token_type_name": "NativeEVM"
-            if token_type == 0
-            else "ERC20"
-            if token_type == 1
-            else "Unknown",
+            "token_type_name": token_type_names.get(token_type, "Unknown"),
             "data": "0x" + token_data.hex() if token_data else "0x",
         }
 
@@ -812,6 +780,151 @@ class AccountingContractService:
         return {
             "user_address": checksum_user,
             "nonce": nonce,
+        }
+
+    def get_siwe_domain(self) -> Dict[str, Any]:
+        contract_reader = self._get_siwe_auth_reader_contract()
+        domain = contract_reader.functions.domain().call()
+        return {"domain": domain}
+
+    @staticmethod
+    def _parse_signature_rsv(signature: str) -> tuple[bytes, bytes, int]:
+        sig = HexBytes(_ensure_hex(signature))
+        if len(sig) != 65:
+            raise ValueError("SIWE signature must be 65 bytes")
+        r = bytes(sig[0:32])
+        s = bytes(sig[32:64])
+        v = int(sig[64])
+        if v < 27:
+            v += 27
+        if v not in (27, 28):
+            raise ValueError(f"Invalid signature recovery parameter v={v}")
+        return (r, s, v)
+
+    def siwe_login(self, siwe_message: str, signature: str) -> Dict[str, Any]:
+        contract_reader = self._get_confidential_siwe_auth_reader_contract()
+        r, s, v = self._parse_signature_rsv(signature)
+        token = contract_reader.functions.login(siwe_message, (r, s, v)).call()
+        return {"token": _to_prefixed_hex(token)}
+
+    def get_balance(self, user_address: str, token_id: str, siwe_token: bytes) -> Dict[str, Any]:
+        checksum_user = self._require_address(user_address, "user_address")
+        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+
+        contract_reader = self._get_confidential_reader_contract()
+        balance = contract_reader.functions.balanceOf(
+            checksum_user, bytes(token_hex), siwe_token
+        ).call()
+
+        context = self._get_token_context(token_hex)
+        return {
+            "user_address": checksum_user,
+            "token_id": _to_prefixed_hex(token_hex),
+            "balance": str(balance),
+            "token_symbol": self._get_token_symbol(token_hex),
+            "chain_id": str(context.chain_id),
+        }
+
+    def get_batch_balances(
+        self, user_address: str, token_ids_raw: list[str], siwe_token: bytes
+    ) -> Dict[str, Any]:
+        user = self._require_address(user_address, "user_address")
+        if not isinstance(token_ids_raw, list) or len(token_ids_raw) == 0:
+            raise ValueError("token_ids must be a non-empty array")
+
+        token_ids: list[HexBytes] = [
+            self._require_hex(token_id, "token_id", expected_len=32) for token_id in token_ids_raw
+        ]
+
+        contract_reader = self._get_confidential_reader_contract()
+
+        response_balances = []
+        for token_id in token_ids:
+            balance = contract_reader.functions.balanceOf(user, bytes(token_id), siwe_token).call()
+            context = self._get_token_context(token_id)
+            response_balances.append(
+                {
+                    "token_id": _to_prefixed_hex(token_id),
+                    "balance": str(balance),
+                    "token_symbol": self._get_token_symbol(token_id),
+                    "chain_id": str(context.chain_id),
+                }
+            )
+
+        return {"user_address": user, "balances": response_balances}
+
+    def _lock_to_info(self, user: ChecksumAddress, lock: Any, now: int) -> Dict[str, Any]:
+        lock_id, service_id, token_id, amount, expiry = lock
+        return {
+            "lock_id": int(lock_id),
+            "user_address": user,
+            "service_address": Web3.to_checksum_address(service_id),
+            "token_id": _to_prefixed_hex(token_id),
+            "amount": int(amount),
+            "expiry": int(expiry),
+            "is_expired": now >= int(expiry),
+        }
+
+    def get_locked_funds(
+        self,
+        user_address: str,
+        service_address: Optional[str],
+        siwe_token: bytes,
+    ) -> Dict[str, Any]:
+        user = self._require_address(user_address, "user_address")
+        service = (
+            self._require_address(service_address, "service_address") if service_address else None
+        )
+
+        contract_reader = self._get_confidential_reader_contract()
+
+        locks: list[Any]
+        # API private reads are user-token scoped; `service_address` here is an output filter.
+        # Backend services that need service-authenticated reads should query
+        # getServiceLocks(...) directly on the contract using Sapphire authenticated
+        # view calls (for Python wrappers: signed query with empty token parameter).
+        all_locks = contract_reader.functions.getUserLocks(user, siwe_token).call()
+        if service is None:
+            locks = all_locks
+        else:
+            locks = [lock for lock in all_locks if lock[1].lower() == service.lower()]
+
+        now = self._get_chain_timestamp()
+
+        lock_infos = [self._lock_to_info(user, lock, now) for lock in locks]
+        total_locked = sum(info["amount"] for info in lock_infos)
+
+        return {
+            "user_address": user,
+            "service_address": service,
+            "locks": lock_infos,
+            "total_locked": int(total_locked),
+        }
+
+    def get_expired_locks(self, user_address: str, siwe_token: bytes) -> Dict[str, Any]:
+        user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_confidential_reader_contract()
+
+        now = self._get_chain_timestamp()
+        all_locks = contract_reader.functions.getUserLocks(user, siwe_token).call()
+        expired_locks = [lock for lock in all_locks if now >= int(lock[4])]
+        lock_infos = [self._lock_to_info(user, lock, now) for lock in expired_locks]
+        return {"user_address": user, "expired_locks": lock_infos}
+
+    def get_total_locked_balance(
+        self, user_address: str, token_id: str, siwe_token: bytes
+    ) -> Dict[str, Any]:
+        user = self._require_address(user_address, "user_address")
+        token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+
+        contract_reader = self._get_confidential_reader_contract()
+        locks = contract_reader.functions.getUserLocks(user, siwe_token).call()
+        total_locked = sum(int(lock[3]) for lock in locks if HexBytes(lock[2]) == token_hex)
+
+        return {
+            "user_address": user,
+            "token_id": _to_prefixed_hex(token_hex),
+            "total_locked": str(total_locked),
         }
 
 

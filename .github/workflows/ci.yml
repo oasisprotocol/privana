@@ -65,6 +65,9 @@ jobs:
       - name: Compile Solidity contracts
         run: make solidity-build
 
+      - name: Enforce bytecode size budget
+        run: cd solidity && bun run check:size
+
       - name: Validate upgrade safety
         run: cd solidity && npx hardhat run scripts/validate-upgrade.ts
 

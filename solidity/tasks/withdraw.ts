@@ -33,6 +33,48 @@ function getChainIdFromTokenId(tokenId: string): number | null {
   return 84532;
 }
 
+type WithdrawalMatch = {
+  index: number;
+  resolved: boolean;
+};
+
+type WithdrawalQueueEntry = [string, bigint, bigint, string, boolean, string];
+
+type WithdrawalReader = {
+  withdrawalCount: () => Promise<bigint>;
+  withdrawals: (index: number) => Promise<WithdrawalQueueEntry>;
+};
+
+async function findLatestMatchingWithdrawal(
+  accounting: WithdrawalReader,
+  userAddress: string,
+  tokenId: string,
+  amount: bigint,
+  maxScan = 25,
+): Promise<WithdrawalMatch | null> {
+  const withdrawalCount = Number(await accounting.withdrawalCount());
+  if (withdrawalCount === 0) {
+    return null;
+  }
+
+  const minIndex = Math.max(0, withdrawalCount - maxScan);
+  for (let i = withdrawalCount - 1; i >= minIndex; i--) {
+    const withdrawal = await accounting.withdrawals(i);
+    const sameUser = String(withdrawal[0]).toLowerCase() === userAddress.toLowerCase();
+    const sameToken = String(withdrawal[3]).toLowerCase() === tokenId.toLowerCase();
+    const sameAmount = BigInt(withdrawal[1].toString()) === amount;
+
+    if (sameUser && sameToken && sameAmount) {
+      return {
+        index: i,
+        resolved: Boolean(withdrawal[4]),
+      };
+    }
+  }
+
+  return null;
+}
+
 function decodeSubmissionResponse(hexString: string): { ok: boolean; error?: string } {
   try {
     const buffer = Buffer.from(hexString, "hex");
@@ -69,26 +111,16 @@ task("withdraw")
     "API base URL",
     "https://p8000.m1356.opf-testnet-rofl-25.rofl.app",
   )
+  .addOptionalParam("scanlimit", "How many latest withdrawals to scan when fallback-confirming on-chain", "250")
   .addOptionalParam("timeout", "Timeout in seconds to wait for resolution", "120")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
-    const accounting = await hre.ethers.getContractAt(
-      "Accounting",
-      args.contract,
-    );
+    const accounting = await hre.ethers.getContractAt("Accounting", args.contract, signer);
 
     console.log("User address:", userAddress);
     console.log("Token ID:", args.tokenid);
     console.log("Amount (base units):", args.amount);
-
-    // Get balance before withdrawal for verification
-    const balanceUrl = `${args.apiurl}/v1/accounting/balances/${userAddress}/${args.tokenid}`;
-    const balanceBefore = await fetch(balanceUrl)
-      .then((r) => r.json())
-      .then((d) => BigInt(d.balance || "0"))
-      .catch(() => BigInt(0));
-    console.log("Balance before:", balanceBefore.toString());
 
     // Get EIP-712 domain from contract
     const domainTuple = await accounting.eip712Domain();
@@ -177,48 +209,60 @@ task("withdraw")
     const pendingUrl = `${args.apiurl}/v1/accounting/withdraw/pending/${userAddress}`;
     const pendingResponse = await fetch(pendingUrl);
     const pendingData = await pendingResponse.json();
+    let withdrawalIndex: number | null = null;
 
     if (!pendingData.pending_withdrawals || pendingData.pending_withdrawals.length === 0) {
-      // No pending withdrawals - check if it was already processed by comparing balances
-      const balanceAfter = await fetch(balanceUrl)
-        .then((r) => r.json())
-        .then((d) => BigInt(d.balance || "0"))
-        .catch(() => BigInt(0));
+      console.log("No pending withdrawals returned by API. Confirming on-chain state...");
+      const nonceAfter = await accounting.withdrawalNonces(userAddress);
 
-      const chainId = getChainIdFromTokenId(args.tokenid);
-      const explorerUrl = chainId ? CHAIN_EXPLORERS[chainId] : null;
-      const depositAddress = await accounting.evmAddress();
-
-      const expectedBalance = balanceBefore - BigInt(args.amount);
-      if (balanceAfter === expectedBalance) {
-        console.log("\n=== Withdrawal Complete ===");
-        console.log("Balance before:", balanceBefore.toString());
-        console.log("Balance after:", balanceAfter.toString());
-        console.log("Withdrawal was processed quickly and has been broadcast to the destination chain.");
-        if (explorerUrl) {
-          console.log(`\nView transactions: ${explorerUrl}/address/${depositAddress}#tokentxns`);
-        }
-        return { ...result, resolved: true };
-      } else if (balanceAfter < balanceBefore) {
-        console.log("\n=== Withdrawal Likely Complete ===");
-        console.log("Balance before:", balanceBefore.toString());
-        console.log("Balance after:", balanceAfter.toString());
-        console.log("Balance decreased - withdrawal appears to have been processed.");
-        if (explorerUrl) {
-          console.log(`\nView transactions: ${explorerUrl}/address/${depositAddress}#tokentxns`);
-        }
-        return { ...result, resolved: true };
-      } else {
-        console.log("No pending withdrawals found and balance unchanged.");
-        console.log("The withdrawal may have failed or is still being processed.");
-        return result;
+      if (nonceAfter <= nonce) {
+        console.log("Withdrawal nonce did not advance yet; request is not confirmed on-chain.");
+        return { ...result, confirmedOnchain: false };
       }
+
+      const match = await findLatestMatchingWithdrawal(
+        accounting,
+        userAddress,
+        args.tokenid,
+        BigInt(args.amount),
+        parseInt(args.scanlimit),
+      );
+
+      if (!match) {
+        console.log(
+          `Withdrawal nonce advanced, but matching withdrawal was not found in the last ${args.scanlimit} on-chain entries.`,
+        );
+        console.log(`Retry with a higher --scanlimit if the withdrawal queue is very large.`);
+        return { ...result, confirmedOnchain: true };
+      }
+
+      withdrawalIndex = match.index;
+      console.log(
+        `Confirmed on-chain withdrawal #${withdrawalIndex} via nonce advance + withdrawal queue lookup.`,
+      );
+
+      if (match.resolved) {
+        console.log(`Withdrawal #${withdrawalIndex} is already resolved on Sapphire.`);
+        const chainId = getChainIdFromTokenId(args.tokenid);
+        const explorerUrl = chainId ? CHAIN_EXPLORERS[chainId] : null;
+        if (explorerUrl) {
+          const depositAddress = await accounting.evmAddress();
+          console.log(`\nView transactions: ${explorerUrl}/address/${depositAddress}#tokentxns`);
+        }
+        return { ...result, withdrawalIndex, resolved: true };
+      }
+
+      console.log(`Withdrawal #${withdrawalIndex} is pending. Watching for resolution...`);
+    } else {
+      // Get the most recent pending withdrawal for this user
+      const withdrawal = pendingData.pending_withdrawals[pendingData.pending_withdrawals.length - 1];
+      withdrawalIndex = Number(withdrawal.index);
+      console.log(`Found withdrawal #${withdrawalIndex}`);
     }
 
-    // Get the most recent pending withdrawal for this user
-    const withdrawal = pendingData.pending_withdrawals[pendingData.pending_withdrawals.length - 1];
-    const withdrawalIndex = withdrawal.index;
-    console.log(`Found withdrawal #${withdrawalIndex}`);
+    if (withdrawalIndex === null) {
+      throw new Error("Failed to determine withdrawal index for status tracking");
+    }
 
     // Poll until resolved
     const timeoutSeconds = parseInt(args.timeout);
@@ -303,4 +347,3 @@ task("watchWithdrawal")
     console.log("The resolver service may still process it in the background.");
     return { resolved: false };
   });
-
