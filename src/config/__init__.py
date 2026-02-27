@@ -27,11 +27,31 @@ NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     84532: "ETH",
 }
 
-ERC20_TOKENS: Dict[int, Dict[str, str]] = {
+# Default ERC20 token addresses (can be overridden via env)
+_DEFAULT_ERC20_TOKENS: Dict[int, Dict[str, str]] = {
     84532: {
-        "0x12084E1A0fe92b5ab803a81A0Ae54D91040F89ca": "USDC",
+        "0x036CbD53842c5426634e7929541eC2318f3dCF7e": "USDC",
     }
 }
+
+
+def _build_erc20_tokens() -> Dict[int, Dict[str, str]]:
+    """Build ERC20 tokens config, allowing env overrides."""
+    tokens: Dict[int, Dict[str, str]] = {}
+    for chain_id, chain_tokens in _DEFAULT_ERC20_TOKENS.items():
+        tokens[chain_id] = {}
+        for addr, symbol in chain_tokens.items():
+            # Check for env override: ERC20_{SYMBOL}_{CHAIN_ID}
+            env_key = f"ERC20_{symbol}_{chain_id}"
+            override_addr = os.getenv(env_key)
+            if override_addr:
+                tokens[chain_id][override_addr] = symbol
+            else:
+                tokens[chain_id][addr] = symbol
+    return tokens
+
+
+ERC20_TOKENS: Dict[int, Dict[str, str]] = _build_erc20_tokens()
 
 
 def _get_int(name: str, default: int) -> int:
