@@ -1,4 +1,26 @@
 import { task } from "hardhat/config";
+import {
+  fetchBalance,
+  fetchJson,
+  getSiweToken,
+  isJsonObject,
+  normalizeApiBaseUrl,
+} from "./utils/siwe";
+
+async function tryFetchBalance(
+  siweToken: string | null,
+  params: { apiBaseUrl: string; userAddress: string; tokenId: string },
+  label: string,
+): Promise<bigint | null> {
+  if (!siweToken) return null;
+  try {
+    return await fetchBalance({ ...params, siweToken });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`Failed to fetch balance ${label}: ${message}`);
+    return null;
+  }
+}
 
 task("transfer")
   .addParam("contract", "The address of the Accounting contract")
@@ -15,6 +37,8 @@ task("transfer")
     const [signer] = await hre.ethers.getSigners();
     const userAddress = hre.ethers.getAddress(signer.address); // Ensure checksum
     const toAddress = hre.ethers.getAddress(args.to); // Ensure checksum
+    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
+    const chainId = Number((await hre.ethers.provider.getNetwork()).chainId);
     const accounting = await hre.ethers.getContractAt(
       "Accounting",
       args.contract,
@@ -25,13 +49,32 @@ task("transfer")
     console.log("Token ID:", args.tokenid);
     console.log("Amount (base units):", args.amount);
 
+    // SIWE login for private reads (balances/locks).
+    let siweToken: string | null = null;
+    try {
+      siweToken = await getSiweToken({
+        apiBaseUrl,
+        signer,
+        userAddress,
+        chainId,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `SIWE login failed; skipping private balance reads: ${message}`,
+      );
+    }
+
     // Get balance before transfer
-    const balanceUrl = `${args.apiurl}/v1/accounting/balances/${userAddress}/${args.tokenid}`;
-    const balanceBefore = await fetch(balanceUrl)
-      .then((r) => r.json())
-      .then((d) => BigInt(d.balance || "0"))
-      .catch(() => BigInt(0));
-    console.log("Balance before:", balanceBefore.toString());
+    const balanceBefore = await tryFetchBalance(
+      siweToken,
+      { apiBaseUrl, userAddress, tokenId: args.tokenid },
+      "before transfer",
+    );
+    console.log(
+      "Balance before:",
+      balanceBefore !== null ? balanceBefore.toString() : "(unavailable)",
+    );
 
     // Get EIP-712 domain from contract
     const domainTuple = await accounting.eip712Domain();
@@ -68,13 +111,20 @@ task("transfer")
       nonce: nonce,
     };
 
-    console.log("\nMessage to sign:", JSON.stringify({
-      userAddress: message.userAddress,
-      toAddress: message.toAddress,
-      tokenId: message.tokenId,
-      amount: message.amount.toString(),
-      nonce: message.nonce.toString(),
-    }, null, 2));
+    console.log(
+      "\nMessage to sign:",
+      JSON.stringify(
+        {
+          userAddress: message.userAddress,
+          toAddress: message.toAddress,
+          tokenId: message.tokenId,
+          amount: message.amount.toString(),
+          nonce: message.nonce.toString(),
+        },
+        null,
+        2,
+      ),
+    );
 
     console.log("\nSigning transfer request...");
 
@@ -83,7 +133,7 @@ task("transfer")
     console.log("Signature:", signature);
 
     // Submit to API
-    const apiUrl = `${args.apiurl}/v1/accounting/funds/transfer`;
+    const apiUrl = `${apiBaseUrl}/v1/accounting/funds/transfer`;
     const payload = {
       user_address: userAddress,
       to_address: toAddress,
@@ -96,23 +146,24 @@ task("transfer")
     console.log("\nPayload:", JSON.stringify(payload, null, 2));
     console.log("\nSubmitting transfer request to API...");
 
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const responseText = await response.text();
-
-    if (!response.ok) {
-      console.error("\nAPI Error:", response.status, response.statusText);
-      console.error("Response:", responseText);
-      throw new Error(`API request failed: ${response.status}`);
+    let result: unknown;
+    try {
+      result = await fetchJson(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("\nAPI Error:", message);
+      throw err;
     }
 
-    const result = JSON.parse(responseText);
+    if (!isJsonObject(result) || typeof result.submission_id !== "string") {
+      throw new Error("Unexpected response from API");
+    }
     console.log("\nTransfer submitted successfully!");
     console.log("Submission ID:", result.submission_id);
 
@@ -120,11 +171,15 @@ task("transfer")
     console.log("\nWaiting for transaction to process...");
     await new Promise((r) => setTimeout(r, 5000));
 
-    const balanceAfter = await fetch(balanceUrl)
-      .then((r) => r.json())
-      .then((d) => BigInt(d.balance || "0"))
-      .catch(() => BigInt(0));
-    console.log("Balance after:", balanceAfter.toString());
+    const balanceAfter = await tryFetchBalance(
+      siweToken,
+      { apiBaseUrl, userAddress, tokenId: args.tokenid },
+      "after transfer",
+    );
+    console.log(
+      "Balance after:",
+      balanceAfter !== null ? balanceAfter.toString() : "(unavailable)",
+    );
 
     return result;
   });
