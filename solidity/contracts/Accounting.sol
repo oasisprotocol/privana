@@ -37,6 +37,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     WithdrawalRequest[] public withdrawals;
 
     uint256 private nextLockId;
+    address public fdcRelayer;
 
     event Deposit(
         address indexed userAddress,
@@ -60,6 +61,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     );
 
     event TokenRegistered(bytes32 indexed tokenId, TokenType tokenType);
+    event FDCRelayerUpdated(address indexed relayer);
 
     error InvalidDeposit();
     error InsufficientBalance();
@@ -78,6 +80,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error DepositAlreadyProcessed();
     error ReceiptIndexMismatch();
     error InvalidSiweAuth();
+    error UnauthorizedRelayer();
 
     struct WithdrawalRequest {
         address userAddress;
@@ -142,6 +145,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     function _requireUser(address user, bytes memory token) internal view {
         if (_authSender(token) != user) revert Unauthorized();
+    }
+
+    modifier onlyFDCRelayer() {
+        if (msg.sender != fdcRelayer) revert UnauthorizedRelayer();
+        _;
     }
 
     /**
@@ -263,6 +271,57 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         processedDeposits[depositKey] = true;
 
+        balances[userAddress][tokenId] += amount;
+
+        emit Deposit(userAddress, tokenId, amount);
+    }
+
+    /// @notice Credit a deposit verified via Flare FDC trusted relayer.
+    /// @dev Only callable by the authorized FDC relayer (ROFL TEE).
+    ///      The relayer has already verified the FDC proof on Coston2 before calling this.
+    /// @param userAddress  The depositor's address (sourceAddress from FDC response)
+    /// @param tokenId      The registered token identifier
+    /// @param txHash       The source chain transaction hash (for dedup)
+    /// @param chainId      The source chain ID (e.g. 11155111 for Sepolia)
+    /// @param receivingAddress  The tx.to address on source chain
+    /// @param value        The native token amount in wei (0 for ERC-20)
+    /// @param erc20Amount  The ERC-20 transfer amount (0 for native)
+    function creditFDCDeposit(
+        address userAddress,
+        bytes32 tokenId,
+        bytes32 txHash,
+        uint256 chainId,
+        address receivingAddress,
+        uint256 value,
+        uint256 erc20Amount
+    ) external onlyFDCRelayer {
+        // 1. Dedup — same key format as creditEVMDeposit for cross-path protection
+        bytes32 depositKey = keccak256(abi.encodePacked(chainId, txHash));
+        if (processedDeposits[depositKey]) revert DepositAlreadyProcessed();
+
+        // 2. Token validation
+        TokenInfo memory tInfo = tokens[tokenId];
+        uint256 amount;
+
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+            if (tChainId != chainId) revert ChainIdMismatch();
+            if (receivingAddress != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
+            amount = value;
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (uint256 tChainId, address tokenAddress) =
+                EVMSignerAndVerifier.decodeEVMErc20TokenData(tInfo.data);
+            if (tChainId != chainId) revert ChainIdMismatch();
+            if (receivingAddress != tokenAddress) revert InvalidDeposit();
+            amount = erc20Amount;
+        } else {
+            revert UnsupportedTokenType();
+        }
+
+        if (amount == 0) revert InvalidAmount();
+
+        // 3. Mark processed and credit
+        processedDeposits[depositKey] = true;
         balances[userAddress][tokenId] += amount;
 
         emit Deposit(userAddress, tokenId, amount);
@@ -772,6 +831,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         emit TokenRegistered(tokenId, info.tokenType);
     }
 
+    /// @notice Sets the authorized FDC relayer address.
+    /// @param _relayer The address of the trusted FDC relayer (ROFL TEE)
+    function setFDCRelayer(address _relayer) external onlyOwner {
+        fdcRelayer = _relayer;
+        emit FDCRelayerUpdated(_relayer);
+    }
+
     /**
      * @notice Returns the total number of withdrawal requests.
      *
@@ -834,5 +900,5 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[44] private __gap;
+    uint256[43] private __gap;
 }

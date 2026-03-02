@@ -1,0 +1,18 @@
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --frozen --no-install-project
+
+COPY . .
+
+RUN test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json \
+    && test -f solidity/artifacts/contracts/auth/AccountingSiweAuth.sol/AccountingSiweAuth.json \
+    || (echo "ERROR: Solidity artifacts not found. Run 'make solidity-build' before building." && exit 1)
+
+RUN uv sync --no-dev --frozen
+
+ENV PYTHONPATH="/app"
+
+CMD ["uv", "run", "python", "-m", "src.main"]

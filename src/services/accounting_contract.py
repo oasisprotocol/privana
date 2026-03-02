@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -84,6 +85,11 @@ class AccountingContractService:
         self._siwe_auth_reader: Optional[Contract] = None
         self._confidential_siwe_auth_reader: Optional[Contract] = None
         self.rofl_client = RoflAppdClient()
+        self._local_private_key = os.getenv("SAPPHIRE_PRIVATE_KEY", "")
+        self._use_direct_submit = bool(self._local_private_key)
+        self._local_w3: Optional[Web3] = None
+        self._local_account: Optional[LocalAccount] = None
+        self._local_w3_lock = threading.Lock()
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, Web3] = {}
         self.default_token_symbol = "ETH"
@@ -115,6 +121,8 @@ class AccountingContractService:
 
     def _submit(self, data: bytes, value: int = 0, gas: Optional[int] = None) -> SubmissionResult:
         tx = self._build_tx(data, value=value, gas=gas)
+        if self._use_direct_submit:
+            return self._direct_submit(tx)
         submission_id = self.rofl_client.submit_tx(tx)
         return SubmissionResult(submission_id=submission_id, status="submitted")
 
@@ -316,6 +324,32 @@ class AccountingContractService:
         raw_bytes = self._as_raw_tx_bytes(raw_tx)
         tx_hash = chain_w3.eth.send_raw_transaction(raw_bytes)
         return HexBytes(tx_hash).hex()
+
+    def _get_local_w3(self) -> tuple[Web3, LocalAccount]:
+        """Lazily initialize a web3 instance signed with SAPPHIRE_PRIVATE_KEY."""
+        with self._local_w3_lock:
+            if self._local_w3 is not None:
+                return self._local_w3, self._local_account  # type: ignore[return-value]
+            private_key = _ensure_hex(self._local_private_key)
+            account: LocalAccount = Account.from_key(private_key)
+            w3 = Web3(Web3.HTTPProvider(self.sapphire_rpc_url))
+            w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(account))
+            self._local_w3 = w3
+            self._local_account = account
+            logger.info("Local signer initialized: %s", account.address)
+            return w3, account
+
+    def _direct_submit(self, tx: Dict) -> SubmissionResult:
+        """Sign and broadcast a transaction directly using SAPPHIRE_PRIVATE_KEY."""
+        w3, account = self._get_local_w3()
+        tx_hash = w3.eth.send_transaction(
+            {**tx, "from": account.address, "gasPrice": w3.eth.gas_price}
+        )
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        if receipt["status"] != 1:
+            raise ValueError(f"Transaction reverted: {HexBytes(tx_hash).hex()}")
+        logger.info("Direct submission confirmed: %s", HexBytes(tx_hash).hex())
+        return SubmissionResult(submission_id=HexBytes(tx_hash).hex(), status="submitted")
 
     def _get_token_context(self, token: HexBytes) -> TokenContext:
         contract = self._get_reader_contract()
@@ -552,6 +586,27 @@ class AccountingContractService:
         )
         return self._submit(fn._encode_transaction_data(), gas=3_000_000)  # leave 3m gas limit
 
+    def credit_fdc_deposit(self, payload: Dict) -> SubmissionResult:
+        """Submit FDC-verified deposit to Accounting contract."""
+        user = self._require_address(payload["user_address"], "user_address")
+        token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
+        tx_hash = self._require_hex(payload["tx_hash"], "tx_hash", expected_len=32)
+        chain_id = self._require_positive(payload["chain_id"], "chain_id")
+        receiving_address = self._require_address(payload["receiving_address"], "receiving_address")
+        value = payload.get("value", 0)
+        erc20_amount = payload.get("erc20_amount", 0)
+
+        fn = self.contract.functions.creditFDCDeposit(
+            user,
+            token,
+            tx_hash,
+            chain_id,
+            receiving_address,
+            value,
+            erc20_amount,
+        )
+        return self._submit(fn._encode_transaction_data())
+
     def request_withdrawal(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
@@ -594,7 +649,8 @@ class AccountingContractService:
             signature,
         )
 
-        submission_id = self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
+        result = self._submit(fn._encode_transaction_data())
+        submission_id = result.submission_id
 
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:

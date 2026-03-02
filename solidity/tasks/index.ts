@@ -5,3 +5,4 @@ import "./accounts";
 import "./admin";
 import "./withdraw";
 import "./transfer";
+import "./fdcRelayer";

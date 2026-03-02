@@ -10,17 +10,22 @@ from web3.types import BlockData
 
 from src.abi.rofl_adapter import ROFL_ADAPTER_ABI
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
-from src.services.accounting_contract import AccountingContractService
+from src.config.fdc_config import load_fdc_config
+from src.services.accounting_contract import AccountingContractService, SubmissionResult
 from src.services.block_state import get_block_state_manager
+from src.services.fdc_deposit_verifier import FDCDepositVerifier
 from src.services.proof_generator import get_proof_generator
 
 logger = logging.getLogger(__name__)
+
+# ERC-20 Transfer(address,address,uint256) event topic — canonical 0x-prefixed form
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
 class DepositListener:
     """Monitors ETH and ERC20 token deposits to the ROFL deposit address."""
 
-    TRANSFER_EVENT_SIGNATURE = Web3.keccak(text="Transfer(address,address,uint256)").hex()
+    TRANSFER_EVENT_SIGNATURE = TRANSFER_TOPIC[2:]  # bare hex for web3 log comparison
 
     def __init__(self):
         self.settings = load_settings()
@@ -40,6 +45,16 @@ class DepositListener:
         self._min_rpc_interval = 0.05
         self._proof_generator = get_proof_generator(self.chain_rpc_urls)
         self._block_state = get_block_state_manager()
+        # FDC verifier (used for chains in FDC config)
+        fdc_config = load_fdc_config()
+        self._fdc_verifier: FDCDepositVerifier | None = None
+        self._fdc_chain_ids: set[int] = set()
+        if fdc_config.coston2_private_key:
+            self._fdc_verifier = FDCDepositVerifier(fdc_config)
+            self._fdc_chain_ids = set(fdc_config.source_ids.keys())
+            logger.info("FDC verifier enabled for chains: %s", self._fdc_chain_ids)
+        else:
+            logger.info("FDC verifier disabled (no COSTON2_PRIVATE_KEY)")
         self._sapphire_web3 = Web3(Web3.HTTPProvider(self.settings.sapphire_rpc_url))
         self._rofl_adapter_address = Web3.to_checksum_address(self.settings.rofl_adapter_address)
         self._rofl_adapter_contract = self._sapphire_web3.eth.contract(
@@ -202,6 +217,50 @@ class DepositListener:
         self._erc20_token_ids[cache_key] = token_id
         return token_id
 
+    async def _submit_legacy_deposit(
+        self,
+        chain_id: int,
+        tx_hash: str,
+        from_address: str,
+        token_id: str,
+        block_number: int,
+    ) -> Optional[SubmissionResult]:
+        """Verify deposit via ShoyuBashi Merkle proof and submit to accounting contract.
+
+        Returns None if the deposit should be skipped (tx failed or block hash
+        unavailable). Raises on proof generation or submission error.
+        """
+        web3 = self._get_chain_web3(chain_id)
+        tx_receipt = await self._rate_limited_rpc_call(
+            chain_id, web3.eth.get_transaction_receipt, tx_hash
+        )
+        if tx_receipt["status"] != 1:
+            logger.warning("Transaction %s failed on chain %s, skipping", tx_hash, chain_id)
+            return None
+
+        hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
+        if not hash_stored:
+            logger.error(
+                "Block hash not available for block %s, skipping deposit %s",
+                block_number,
+                tx_hash,
+            )
+            return None
+
+        proofs = await asyncio.to_thread(
+            self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
+        )
+        payload = {
+            "user_address": from_address,
+            "token_id": token_id,
+            **proofs,
+        }
+        return await asyncio.to_thread(self.accounting_service.include_deposit, payload)
+
+    def _uses_fdc(self, chain_id: int) -> bool:
+        """Check whether the given chain should use FDC verification."""
+        return self._fdc_verifier is not None and chain_id in self._fdc_chain_ids
+
     async def _process_deposit(
         self,
         chain_id: int,
@@ -219,41 +278,23 @@ class DepositListener:
 
             self._block_state.add_pending_tx(chain_id, tx_hash, block_number)
 
-            web3 = self._get_chain_web3(chain_id)
-            tx_receipt = await self._rate_limited_rpc_call(
-                chain_id, web3.eth.get_transaction_receipt, tx_hash
-            )
+            token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
 
-            if tx_receipt["status"] != 1:
-                logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
+            if self._uses_fdc(chain_id):
+                result = await self._submit_fdc_deposit(chain_id, tx_hash, token_id)
+            else:
+                result = await self._submit_legacy_deposit(
+                    chain_id, tx_hash, from_address, token_id, block_number
+                )
+
+            if result is None:
                 self._block_state.complete_pending_tx(chain_id, tx_hash)
                 return
 
-            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
-            if not hash_stored:
-                logger.error(
-                    f"Block hash not available for block {block_number}, skipping deposit {tx_hash}"
-                )
-                return
-
-            proofs = await asyncio.to_thread(
-                self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
-            )
-
-            token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
-
-            payload = {
-                "user_address": from_address,
-                "token_id": token_id,
-                **proofs,
-            }
-
-            result = self.accounting_service.include_deposit(payload)
             logger.info(
                 f"Deposit included successfully: submission_id={result.submission_id}, "
                 f"status={result.status}"
             )
-
             self._block_state.complete_pending_tx(chain_id, tx_hash)
 
         except Exception:
@@ -278,45 +319,98 @@ class DepositListener:
 
             self._block_state.add_pending_tx(chain_id, tx_hash, block_number)
 
-            web3 = self._get_chain_web3(chain_id)
-            tx_receipt = await self._rate_limited_rpc_call(
-                chain_id, web3.eth.get_transaction_receipt, tx_hash
-            )
+            token_id = await asyncio.to_thread(self._get_erc20_token_id, chain_id, token_address)
 
-            if tx_receipt["status"] != 1:
-                logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
+            if self._uses_fdc(chain_id):
+                result = await self._submit_fdc_deposit(chain_id, tx_hash, token_id, token_address)
+            else:
+                result = await self._submit_legacy_deposit(
+                    chain_id, tx_hash, from_address, token_id, block_number
+                )
+
+            if result is None:
                 self._block_state.complete_pending_tx(chain_id, tx_hash)
                 return
 
-            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
-            if not hash_stored:
-                logger.error(
-                    f"Block hash not available for block {block_number}, skipping ERC20 deposit {tx_hash}"
-                )
-                return
-
-            proofs = await asyncio.to_thread(
-                self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
-            )
-
-            token_id = await asyncio.to_thread(self._get_erc20_token_id, chain_id, token_address)
-
-            payload = {
-                "user_address": from_address,
-                "token_id": token_id,
-                **proofs,
-            }
-
-            result = self.accounting_service.include_deposit(payload)
             logger.info(
                 f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
                 f"status={result.status}"
             )
-
             self._block_state.complete_pending_tx(chain_id, tx_hash)
 
         except Exception:
             logger.exception("Failed to process ERC20 deposit %s on chain %s", tx_hash, chain_id)
+
+    @staticmethod
+    def _extract_erc20_amount(
+        events: list, token_address: str, deposit_address: str
+    ) -> Optional[int]:
+        """Extract ERC-20 transfer amount from FDC event data.
+
+        Looks for Transfer(from, to, value) event from the token contract
+        where the recipient (topics[2]) matches the deposit address.
+        Transfer topic0 = keccak256("Transfer(address,address,uint256)")
+        Returns None if no matching Transfer event is found.
+        """
+        for event in events:
+            emitter = event.get("emitterAddress", "").lower()
+            topics = event.get("topics", [])
+
+            if emitter == token_address.lower() and len(topics) >= 3:
+                if topics[0].lower() == TRANSFER_TOPIC:
+                    # Verify the Transfer recipient is the deposit address
+                    to_addr = "0x" + topics[2][-40:]
+                    if to_addr.lower() != deposit_address.lower():
+                        continue
+                    # value is in event data (non-indexed param); slice to 32 bytes
+                    data = event.get("data", "0x")
+                    if len(data) >= 66:  # 0x + 64 hex chars = 32 bytes
+                        return int(data[:66], 16)
+
+        return None
+
+    async def _submit_fdc_deposit(
+        self,
+        chain_id: int,
+        tx_hash: str,
+        token_id: str,
+        token_address: Optional[str] = None,
+    ) -> Optional[SubmissionResult]:
+        """Run FDC verification and submit deposit to the accounting contract.
+
+        Returns None if the deposit should be skipped (tx failed on source
+        chain, or ERC20 Transfer event not found). Raises on attestation error.
+        """
+        verified = await self._fdc_verifier.verify_deposit(chain_id, tx_hash)
+
+        if verified.status != 1:
+            logger.warning(
+                "Deposit tx %s failed on source chain (status=%s)", tx_hash, verified.status
+            )
+            return None
+
+        if token_address is not None:
+            deposit_address = self._get_deposit_address()
+            erc20_amount = self._extract_erc20_amount(
+                verified.events, token_address, deposit_address
+            )
+            if erc20_amount is None:
+                logger.error("No Transfer event found for %s in tx %s", token_address, tx_hash)
+                return None
+            value, erc20 = 0, erc20_amount
+        else:
+            value, erc20 = verified.value, 0
+
+        payload = {
+            "user_address": verified.source_address,
+            "token_id": token_id,
+            "tx_hash": tx_hash,
+            "chain_id": chain_id,
+            "receiving_address": verified.receiving_address,
+            "value": value,
+            "erc20_amount": erc20,
+        }
+        return await asyncio.to_thread(self.accounting_service.credit_fdc_deposit, payload)
 
     async def _monitor_chain(self, chain_id: int):
         chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
@@ -407,7 +501,7 @@ class DepositListener:
                                 )
 
                                 for tx in block.get("transactions", []):
-                                    tx_hash = tx["hash"].hex()
+                                    tx_hash = tx["hash"].to_0x_hex()
                                     tx_to = tx.get("to")
 
                                     # Native deposit
@@ -508,6 +602,10 @@ class DepositListener:
 
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+
+        if self._fdc_verifier:
+            await self._fdc_verifier.close()
+
         logger.info("Deposit listener stopped")
 
 

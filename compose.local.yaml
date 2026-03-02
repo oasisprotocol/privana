@@ -1,0 +1,14 @@
+services:
+  accounting-module:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    env_file: .env
+    volumes:
+      - deposit-listener-data:/data/deposit-listener
+    ports:
+      - "8000:8000"
+    restart: on-failure
+
+volumes:
+  deposit-listener-data:

@@ -16,14 +16,17 @@ _settings: Optional[Settings] = None
 _defaults = Settings()
 
 ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
+    11155111: "eth-sepolia",
     84532: "base-sepolia",
 }
 
 CHAIN_NAMES: Dict[int, str] = {
+    11155111: "Sepolia",
     84532: "Base Sepolia",
 }
 
 NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
+    11155111: "ETH",
     84532: "ETH",
 }
 
