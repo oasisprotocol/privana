@@ -17,7 +17,6 @@ contract MockEVMSignerAndVerifier is EVMSignerAndVerifier, UUPSUpgradeable {
 
     function initialize(address _shoyubashi, address _provethVerifier) external initializer {
         __EVMSignerAndVerifier_init(_shoyubashi, _provethVerifier, msg.sender);
-        __UUPSUpgradeable_init();
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}

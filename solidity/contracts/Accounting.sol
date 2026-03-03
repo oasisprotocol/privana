@@ -106,7 +106,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     function __Accounting_init(address _shoyubashi, address _provethVerifier, address _owner) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
         __EVMSignerAndVerifier_init(_shoyubashi, _provethVerifier, _owner);
-        __UUPSUpgradeable_init();
         nextLockId = 1;
     }
 
