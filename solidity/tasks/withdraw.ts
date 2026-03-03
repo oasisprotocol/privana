@@ -1,6 +1,7 @@
 import { task } from "hardhat/config";
 import * as cbor from "cbor";
 import { Interface } from "ethers";
+import { fetchJson, isJsonObject, normalizeApiBaseUrl } from "./utils/siwe";
 
 // Build error selectors from the ABI (lazy loaded)
 let ERROR_SELECTORS: Record<string, string> | null = null;
@@ -162,7 +163,8 @@ task("withdraw")
     console.log("Signature:", signature);
 
     // Submit to API
-    const apiUrl = `${args.apiurl}/v1/accounting/withdraw`;
+    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
+    const apiUrl = `${apiBaseUrl}/v1/accounting/withdraw`;
     const payload = {
       user_address: userAddress,
       token_id: args.tokenid,
@@ -173,24 +175,24 @@ task("withdraw")
 
     console.log("\nSubmitting withdrawal request to API...");
 
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const responseText = await response.text();
-
-    if (!response.ok) {
-      console.error("\nAPI Error:", response.status, response.statusText);
-      console.error("Response:", responseText);
-      throw new Error(`API request failed: ${response.status}`);
+    let result: Record<string, unknown>;
+    try {
+      const resp = await fetchJson(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!isJsonObject(resp) || typeof resp.submission_id !== "string") {
+        throw new Error("Unexpected response from API");
+      }
+      result = resp;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("\nAPI Error:", msg);
+      throw err;
     }
 
-    const result = JSON.parse(responseText);
-    const submissionId = result.submission_id;
+    const submissionId = result.submission_id as string;
 
     // Decode the CBOR response to check for errors
     const decoded = decodeSubmissionResponse(submissionId);
@@ -206,12 +208,15 @@ task("withdraw")
     await new Promise((r) => setTimeout(r, 30000)); // Wait for tx to be mined
 
     // Find our pending withdrawal
-    const pendingUrl = `${args.apiurl}/v1/accounting/withdraw/pending/${userAddress}`;
-    const pendingResponse = await fetch(pendingUrl);
-    const pendingData = await pendingResponse.json();
+    const pendingUrl = `${apiBaseUrl}/v1/accounting/withdraw/pending/${userAddress}`;
+    const pendingData = await fetchJson(pendingUrl);
+    const pendingWithdrawals =
+      isJsonObject(pendingData) && Array.isArray(pendingData.pending_withdrawals)
+        ? (pendingData.pending_withdrawals as Record<string, unknown>[])
+        : [];
     let withdrawalIndex: number | null = null;
 
-    if (!pendingData.pending_withdrawals || pendingData.pending_withdrawals.length === 0) {
+    if (pendingWithdrawals.length === 0) {
       console.log("No pending withdrawals returned by API. Confirming on-chain state...");
       const nonceAfter = await accounting.withdrawalNonces(userAddress);
 
@@ -255,7 +260,7 @@ task("withdraw")
       console.log(`Withdrawal #${withdrawalIndex} is pending. Watching for resolution...`);
     } else {
       // Get the most recent pending withdrawal for this user
-      const withdrawal = pendingData.pending_withdrawals[pendingData.pending_withdrawals.length - 1];
+      const withdrawal = pendingWithdrawals[pendingWithdrawals.length - 1];
       withdrawalIndex = Number(withdrawal.index);
       console.log(`Found withdrawal #${withdrawalIndex}`);
     }
