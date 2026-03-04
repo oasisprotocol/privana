@@ -543,6 +543,33 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
             );
     }
 
+    function signArbitraryTransaction(
+        uint256 chainId,
+        address to,
+        uint256 value,
+        bytes memory data,
+        uint64 gasLimit
+    ) internal returns (bytes memory output) {
+        if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+
+        uint64 nonce = getEVMNonceAndIncrement(chainId);
+
+        return
+            EIP155Signer.sign(
+                evmAddress,
+                secretKey,
+                EIP155Signer.EthTx({
+                    nonce: nonce,
+                    gasPrice: gasPrices[chainId],
+                    gasLimit: gasLimit,
+                    to: to,
+                    value: value,
+                    data: data,
+                    chainId: chainId
+                })
+            );
+    }
+
     /**
      * @notice Decodes EVM native token metadata to extract the chain ID.
      *

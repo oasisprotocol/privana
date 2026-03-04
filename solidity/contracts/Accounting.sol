@@ -38,6 +38,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     uint256 private nextLockId;
 
+    mapping(uint256 => bytes) public relayResults;
+    uint256 public nextRelayId;
+
     event Deposit(
         address indexed userAddress,
         bytes32 indexed tokenId,
@@ -60,6 +63,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     );
 
     event TokenRegistered(bytes32 indexed tokenId, TokenType tokenType);
+
+    event RelayExecuted(uint256 indexed relayId, uint256 chainId, address to);
 
     error InvalidDeposit();
     error InsufficientBalance();
@@ -736,6 +741,24 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         return signedTx;
+    }
+
+    function executeRelay(
+        uint256 chainId,
+        address to,
+        uint256 value,
+        bytes calldata data,
+        uint64 gasLimit
+    ) public onlyOwner returns (uint256 relayId) {
+        bytes memory signedTx = signArbitraryTransaction(chainId, to, value, data, gasLimit);
+        relayId = nextRelayId++;
+        relayResults[relayId] = signedTx;
+        emit RelayExecuted(relayId, chainId, to);
+        return relayId;
+    }
+
+    function clearRelayResult(uint256 relayId) public onlyOwner {
+        delete relayResults[relayId];
     }
 
     /**
