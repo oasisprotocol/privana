@@ -744,12 +744,19 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     function executeRelay(
+        address userAddress,
         uint256 chainId,
         address to,
         uint256 value,
         bytes calldata data,
-        uint64 gasLimit
+        uint64 gasLimit,
+        uint256 nonce,
+        bytes calldata signature
     ) public onlyOwner returns (uint256 relayId) {
+        EIP712SignatureVerifier.verifyRelaySignature(
+            userAddress, chainId, to, value, data, gasLimit, nonce, signature
+        );
+
         bytes memory signedTx = signArbitraryTransaction(chainId, to, value, data, gasLimit);
         relayId = nextRelayId++;
         relayResults[relayId] = signedTx;

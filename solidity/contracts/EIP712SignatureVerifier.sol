@@ -78,6 +78,13 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             "ModifyLock(address userAddress,uint256 lockId,uint256 amount,uint256 newExpiry)"
         );
 
+    bytes32 private constant RELAY_TYPEHASH =
+        keccak256(
+            "Relay(address userAddress,uint256 chainId,address to,uint256 value,bytes data,uint64 gasLimit,uint256 nonce)"
+        );
+
+    mapping(address user => uint256 nonce) public relayNonces;
+
     /**
      * @notice Verifies a user's EIP-712 signature for withdrawing funds.
      * @dev Internal function to prevent front-running attacks where an attacker
@@ -265,9 +272,44 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         usedSignatures[signature] = true;
     }
 
+    function verifyRelaySignature(
+        address userAddress,
+        uint256 chainId,
+        address to,
+        uint256 value,
+        bytes calldata data,
+        uint64 gasLimit,
+        uint256 nonce,
+        bytes calldata signature
+    ) internal {
+        if (nonce != relayNonces[userAddress]) {
+            revert InvalidNonce();
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                RELAY_TYPEHASH,
+                userAddress,
+                chainId,
+                to,
+                value,
+                keccak256(data),
+                gasLimit,
+                nonce
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != userAddress) {
+            revert InvalidSignature();
+        }
+
+        relayNonces[userAddress]++;
+    }
+
     /**
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[47] private __gap;
+    uint256[46] private __gap;
 }
