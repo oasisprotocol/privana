@@ -782,6 +782,61 @@ class AccountingContractService:
             "nonce": nonce,
         }
 
+    def get_relay_nonce(self, user_address: str) -> Dict[str, Any]:
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+        nonce = contract_reader.functions.relayNonces(checksum_user).call()
+        return {
+            "user_address": checksum_user,
+            "nonce": nonce,
+        }
+
+    def get_relay_result(self, relay_id: int) -> bytes:
+        contract_reader = self._get_reader_contract()
+        return contract_reader.functions.relayResults(relay_id).call()
+
+    def get_next_relay_id(self) -> int:
+        contract_reader = self._get_reader_contract()
+        return contract_reader.functions.nextRelayId().call()
+
+    def clear_relay_result(self, relay_id: int) -> SubmissionResult:
+        fn = self.contract.functions.clearRelayResult(relay_id)
+        return self._submit(fn._encode_transaction_data())
+
+    def relay_execute(self, payload: Dict) -> SubmissionResult:
+        user = self._require_address(payload["user_address"], "user_address")
+        chain_id = self._require_positive(payload["chain_id"], "chain_id")
+        to = self._require_address(payload["to"], "to")
+        value = self._require_positive(payload["value"], "value", allow_zero=True)
+        data = self._require_hex(payload["data"], "data") if payload.get("data", "0x") != "0x" else HexBytes("0x")
+        gas_limit = self._require_positive(payload["gas_limit"], "gas_limit")
+        token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
+        amount = self._require_positive(payload["amount"], "amount", allow_zero=True)
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
+        signature = self._require_hex(payload["signature"], "signature")
+
+        contract_reader = self._get_reader_contract()
+        expected_nonce = contract_reader.functions.relayNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"Relay nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
+
+        fn = self.contract.functions.executeRelay(
+            user,
+            chain_id,
+            to,
+            value,
+            bytes(data),
+            gas_limit,
+            bytes(token),
+            amount,
+            nonce,
+            bytes(signature),
+        )
+        return self._submit(fn._encode_transaction_data())
+
     def get_siwe_domain(self) -> Dict[str, Any]:
         contract_reader = self._get_siwe_auth_reader_contract()
         domain = contract_reader.functions.domain().call()
