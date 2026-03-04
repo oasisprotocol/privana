@@ -80,7 +80,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
 
     bytes32 private constant RELAY_TYPEHASH =
         keccak256(
-            "Relay(address userAddress,uint256 chainId,address to,uint256 value,bytes data,uint64 gasLimit,uint256 nonce)"
+            "Relay(address userAddress,uint256 chainId,address to,uint256 value,bytes data,uint64 gasLimit,bytes32 tokenId,uint256 amount,uint256 nonce)"
         );
 
     mapping(address user => uint256 nonce) public relayNonces;
@@ -279,6 +279,8 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 value,
         bytes calldata data,
         uint64 gasLimit,
+        bytes32 tokenId,
+        uint256 amount,
         uint256 nonce,
         bytes calldata signature
     ) internal {
@@ -295,6 +297,8 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
                 value,
                 keccak256(data),
                 gasLimit,
+                tokenId,
+                amount,
                 nonce
             )
         );

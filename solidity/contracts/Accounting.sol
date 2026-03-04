@@ -80,6 +80,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error InvalidAmount();
     error WithdrawalTooSoon();
     error Unauthorized();
+    error RelayTargetIsRegisteredToken();
     error DepositAlreadyProcessed();
     error ReceiptIndexMismatch();
     error InvalidSiweAuth();
@@ -750,18 +751,65 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 value,
         bytes calldata data,
         uint64 gasLimit,
+        bytes32 tokenId,
+        uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) public onlyOwner returns (uint256 relayId) {
+    ) public returns (uint256 relayId) {
         EIP712SignatureVerifier.verifyRelaySignature(
-            userAddress, chainId, to, value, data, gasLimit, nonce, signature
+            userAddress, chainId, to, value, data, gasLimit, tokenId, amount, nonce, signature
         );
+
+        TokenInfo memory tInfo = tokens[tokenId];
+        if (tInfo.data.length == 0) revert UnsupportedTokenType();
+
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+            if (tChainId != chainId) revert ChainIdMismatch();
+            if (value != amount) revert InvalidAmount();
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier.decodeEVMErc20TokenData(tInfo.data);
+            if (tChainId != chainId) revert ChainIdMismatch();
+
+            if (to == tokenAddress) {
+                _validateERC20RelayCalldata(data, amount);
+            } else {
+                if (amount != 0) revert InvalidAmount();
+                if (value != 0) revert InvalidAmount();
+                _ensureNotRegisteredToken(chainId, to);
+            }
+        }
+
+        if (amount > 0) {
+            if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
+            balances[userAddress][tokenId] -= amount;
+        }
 
         bytes memory signedTx = signArbitraryTransaction(chainId, to, value, data, gasLimit);
         relayId = nextRelayId++;
         relayResults[relayId] = signedTx;
         emit RelayExecuted(relayId, chainId, to);
         return relayId;
+    }
+
+    function _validateERC20RelayCalldata(bytes calldata data, uint256 amount) internal pure {
+        if (data.length != 68) revert InvalidTransactionData();
+
+        bytes4 selector = bytes4(data[:4]);
+        bytes4 transferSel = bytes4(keccak256("transfer(address,uint256)"));
+        bytes4 approveSel = bytes4(keccak256("approve(address,uint256)"));
+
+        if (selector != transferSel && selector != approveSel) revert InvalidTransactionData();
+
+        uint256 calldataAmount = abi.decode(data[36:68], (uint256));
+        if (calldataAmount != amount) revert InvalidAmount();
+    }
+
+    function _ensureNotRegisteredToken(uint256 chainId, address to) internal view {
+        bytes32 checkTokenId = keccak256(
+            abi.encode(TokenType.ERC20, abi.encodePacked(chainId, to))
+        );
+        if (tokens[checkTokenId].data.length != 0) revert RelayTargetIsRegisteredToken();
     }
 
     function clearRelayResult(uint256 relayId) public onlyOwner {
