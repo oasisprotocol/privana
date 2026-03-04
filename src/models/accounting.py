@@ -372,3 +372,55 @@ class TransferNonceResponse(BaseModel):
 
     user_address: str
     nonce: int
+
+
+class RelayExecuteRequest(BaseModel):
+    """Payload for executing a relay transaction on a destination chain."""
+
+    user_address: str = Field(..., min_length=1)
+    chain_id: int = Field(..., gt=0)
+    to: str = Field(..., min_length=1)
+    value: int = Field(..., ge=0)
+    data: str = Field("0x", description="Calldata hex string")
+    gas_limit: int = Field(..., gt=0)
+    token_id: str = Field(..., min_length=4)
+    amount: int = Field(..., ge=0)
+    nonce: int = Field(..., ge=0)
+    signature: str = Field(..., min_length=4)
+
+    @field_validator("value", "amount", "nonce", mode="before")
+    def _parse_relay_ints(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("token_id", "signature", "data")
+    def _normalise_relay_hex(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+    @field_validator("user_address", "to")
+    def _lowercase_relay_addresses(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class RelayExecuteResponse(BaseModel):
+    """Response after submitting a relay execution transaction."""
+
+    submission_id: str
+    relay_id: Optional[int] = None
+    status: str
+
+
+class RelayStatusResponse(BaseModel):
+    """Response containing relay transaction lifecycle status."""
+
+    relay_id: int
+    status: str
+    chain_id: Optional[int] = None
+    tx_hash: Optional[str] = None
+    error: Optional[str] = None
+
+
+class RelayNonceResponse(BaseModel):
+    """Response containing the current relay nonce for a user."""
+
+    user_address: str
+    nonce: int
