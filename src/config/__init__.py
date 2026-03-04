@@ -92,6 +92,9 @@ def load_settings(refresh: bool = False) -> Settings:
             min_withdrawal_gas_balance=_get_int(
                 "MIN_WITHDRAWAL_GAS_BALANCE", _defaults.min_withdrawal_gas_balance
             ),
+            relay_poll_interval=_get_int(
+                "RELAY_POLL_INTERVAL", _defaults.relay_poll_interval
+            ),
         )
     return _settings
 

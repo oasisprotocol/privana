@@ -23,3 +23,4 @@ class Settings:
     withdrawal_poll_interval: int = 12
     withdrawal_resolution_timeout: int = 60
     min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei
+    relay_poll_interval: int = 5
