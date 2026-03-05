@@ -57,7 +57,7 @@ jobs:
         run: cd solidity && bun install
 
       - name: Cache Hardhat compiler
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/hardhat-nodejs
           key: hardhat-${{ hashFiles('solidity/hardhat.config.ts') }}
