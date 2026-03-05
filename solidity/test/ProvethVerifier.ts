@@ -8,9 +8,10 @@ const RPC_URL = process.env.BASE_SEPOLIA_RPC_URL || "";
 describe('ProvethVerifier', function () {
   let provethVerifier: ProvethVerifier;
 
-  before(async () => {
+  before(async function () {
     if (!RPC_URL) {
-      throw new Error("BASE_SEPOLIA_RPC_URL environment variable is not set. Please set it to run ProvethVerifier tests.");
+      console.log("BASE_SEPOLIA_RPC_URL not set, skipping ProvethVerifier tests");
+      this.skip();
     }
     // Any eth passed to constructor will be sent to the random wallet
     const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
