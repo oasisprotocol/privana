@@ -120,6 +120,7 @@ class LockFundsRequest(BaseModel):
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
     expiry: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
     signature: str
 
     @field_validator("amount", "expiry", mode="before")
@@ -138,6 +139,7 @@ class ModifyLockRequest(BaseModel):
     lock_id: int = Field(..., ge=1)
     amount: int = Field(..., ge=0)
     new_expiry: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
     signature: str
 
     @field_validator("signature")
@@ -171,6 +173,8 @@ class TransferLockedFundsRequest(BaseModel):
     lock_id: int = Field(..., ge=1)
     to_address: str = Field(..., min_length=1)
     amount: int = Field(..., gt=0)
+    service_address: str = Field(..., min_length=1)
+    nonce: int = Field(..., ge=0)
     signature: str
 
     @field_validator("amount", mode="before")
@@ -371,4 +375,25 @@ class TransferNonceResponse(BaseModel):
     """Response containing the current transfer nonce for a user."""
 
     user_address: str
+    nonce: int
+
+
+class LockNonceResponse(BaseModel):
+    """Response containing the current createLock nonce for a user."""
+
+    user_address: str
+    nonce: int
+
+
+class ModifyLockNonceResponse(BaseModel):
+    """Response containing the current modifyLock nonce for a user."""
+
+    user_address: str
+    nonce: int
+
+
+class TransferLockedNonceResponse(BaseModel):
+    """Response containing the current transferFromLock nonce for a service."""
+
+    service_address: str
     nonce: int

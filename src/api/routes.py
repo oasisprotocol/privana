@@ -19,6 +19,8 @@ from src.models.accounting import (
     IncludeDepositResponse,
     LockedFundsResponse,
     LockFundsRequest,
+    LockNonceResponse,
+    ModifyLockNonceResponse,
     ModifyLockRequest,
     PendingWithdrawalsResponse,
     SiweDomainResponse,
@@ -29,6 +31,7 @@ from src.models.accounting import (
     TransactionSubmissionResponse,
     TransferFundsRequest,
     TransferLockedFundsRequest,
+    TransferLockedNonceResponse,
     TransferNonceResponse,
     UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
@@ -163,6 +166,53 @@ async def get_transfer_nonce(user_address: str) -> TransferNonceResponse:
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get transfer nonce")
         raise HTTPException(status_code=500, detail="Failed to retrieve transfer nonce") from exc
+
+
+@router.get("/funds/lock/nonce/{user_address}", response_model=LockNonceResponse)
+async def get_lock_nonce(user_address: str) -> LockNonceResponse:
+    """Get the current createLock nonce for a user."""
+
+    try:
+        result = await _service.get_lock_nonce(user_address)
+        return LockNonceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get lock nonce")
+        raise HTTPException(status_code=500, detail="Failed to retrieve lock nonce") from exc
+
+
+@router.get("/funds/modify-lock/nonce/{user_address}", response_model=ModifyLockNonceResponse)
+async def get_modify_lock_nonce(user_address: str) -> ModifyLockNonceResponse:
+    """Get the current modifyLock nonce for a user."""
+
+    try:
+        result = await _service.get_modify_lock_nonce(user_address)
+        return ModifyLockNonceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get modify lock nonce")
+        raise HTTPException(status_code=500, detail="Failed to retrieve modify lock nonce") from exc
+
+
+@router.get(
+    "/funds/transfer-locked/nonce/{service_address}",
+    response_model=TransferLockedNonceResponse,
+)
+async def get_transfer_locked_nonce(service_address: str) -> TransferLockedNonceResponse:
+    """Get the current transferFromLock nonce for a service."""
+
+    try:
+        result = await _service.get_transfer_locked_nonce(service_address)
+        return TransferLockedNonceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get transfer locked nonce")
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve transfer locked nonce"
+        ) from exc
 
 
 @router.post("/funds/transfer-locked", response_model=TransactionSubmissionResponse)
