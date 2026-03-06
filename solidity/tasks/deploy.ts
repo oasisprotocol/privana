@@ -1,15 +1,19 @@
 import { task } from "hardhat/config";
+import { parseRoflAppId } from "./utils/rofl";
 
 task("deploy")
   .addParam("shoyubashi", "The address of the ShoyuBashi oracle")
   .addParam("provethverifier", "The address of the ProvethVerifier contract")
-  .addParam("domain", "The SIWE domain for authenticated view calls")
+  .addParam("roflappid", "The ROFL app ID (hex 0x... or bech32 rofl1...)")
   .setAction(async (args, hre) => {
     const [deployer] = await hre.ethers.getSigners();
 
+    // Parse ROFL app ID (supports hex and bech32 formats)
+    const roflAppIdHex = parseRoflAppId(args.roflappid);
+
     // Deploy AccountingSiweAuth
     const AccountingSiweAuth = await hre.ethers.getContractFactory("AccountingSiweAuth");
-    const siweAuth = await AccountingSiweAuth.deploy(args.domain, {
+    const siweAuth = await AccountingSiweAuth.deploy(roflAppIdHex, {
       gasLimit: 10000000
     });
     await siweAuth.waitForDeployment();

@@ -32,10 +32,37 @@ async def lifespan(_app: FastAPI):
     Args:
         app: FastAPI application instance
     """
+    import os
+
+    from src.auth.auth_token_keys import get_auth_token_key_manager
+    from src.auth.jwt_keys import get_jwt_key_manager
     from src.services.deposit_listener import get_deposit_listener
     from src.services.withdrawal_processor import get_withdrawal_processor
 
     logger.info("Accounting Module API starting...")
+
+    # Initialize JWT key manager (derives keys from ROFL seed in TEE)
+    jwt_key_manager = get_jwt_key_manager()
+    jwt_key_manager.initialize()
+    logger.info("JWT key manager initialized")
+
+    # Initialize AuthToken encryption key manager and sync to contract
+    auth_token_key_manager = get_auth_token_key_manager()
+    auth_token_key_manager.initialize()
+    logger.info("AuthToken key manager initialized")
+
+    # Sync the encryption key to the contract (only in production with ROFL)
+    # TODO: Remove DISABLE_ROFL_KEYS check when Sapphire localnet e2e tests are available.
+    if not os.getenv("DISABLE_ROFL_KEYS") and os.getenv("ROFL_APP_ID"):
+        try:
+            await auth_token_key_manager.sync_key_to_contract()
+            logger.info("AuthToken encryption key synced to contract")
+        except Exception as e:
+            logger.warning(
+                f"Failed to sync AuthToken encryption key to contract: {e}. "
+                "Continuing startup - on fresh deployments the key will be set later, "
+                "on restarts the key may already be set."
+            )
 
     deposit_listener = get_deposit_listener()
     await deposit_listener.start()

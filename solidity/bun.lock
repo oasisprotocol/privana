@@ -19,7 +19,7 @@
         "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
         "@nomicfoundation/hardhat-toolbox": "^4.0.0",
         "@nomicfoundation/hardhat-verify": "^2.0.2",
-        "@oasisprotocol/sapphire-contracts": "^0.2.14",
+        "@oasisprotocol/sapphire-contracts": "0.2.15",
         "@oasisprotocol/sapphire-hardhat": "^2.22.2",
         "@oasisprotocol/sapphire-paratime": "^2.3.0",
         "@openzeppelin/hardhat-upgrades": "^3.0.0",

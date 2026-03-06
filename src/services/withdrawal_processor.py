@@ -317,10 +317,10 @@ class WithdrawalProcessor:
             # Step 2: If not resolved, submit resolveWithdrawal and wait
             if not is_resolved:
                 logger.info(f"Withdrawal #{index}: submitting resolveWithdrawal")
-                result = await self._rate_limited_call(
+                await self._rate_limited_call(
                     lambda: self.accounting_service.resolve_withdrawal(index)
                 )
-                logger.info(f"Withdrawal #{index}: submitted ({result.submission_id})")
+                logger.info(f"Withdrawal #{index}: submitted")
 
                 # Wait for resolution (poll until resolved)
                 for _ in range(self.settings.withdrawal_resolution_timeout):

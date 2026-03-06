@@ -334,15 +334,9 @@ class DepositListener:
 
             result = await self.accounting_service.include_deposit(payload)
             if is_erc20:
-                logger.info(
-                    f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
-                    f"status={result.status}"
-                )
+                logger.info(f"{token_name} deposit included successfully: status={result.status}")
             else:
-                logger.info(
-                    f"Deposit included successfully: submission_id={result.submission_id}, "
-                    f"status={result.status}"
-                )
+                logger.info(f"Deposit included successfully: status={result.status}")
 
             self._block_state.complete_pending_tx(chain_id, tx_hash)
 

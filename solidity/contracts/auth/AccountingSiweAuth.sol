@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-
 import {SignatureRSV, A13e} from "@oasisprotocol/sapphire-contracts/contracts/auth/A13e.sol";
-import {
-    ParsedSiweMessage,
-    SiweParser
-} from "@oasisprotocol/sapphire-contracts/contracts/SiweParser.sol";
 import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
+import {Subcall} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
 
 /// @title AuthToken structure for SIWE-based authentication
 struct AuthToken {
-    string domain; // [ scheme "://" ] domain.
+    /// @dev Domain from SIWE message (format: [ scheme "://" ] domain).
+    ///      Validated at API layer only; not checked on-chain.
+    string domain;
     address userAddr;
     uint256 validUntil; // in Unix timestamp.
     string statement; // Human-readable statement from the SIWE message.
@@ -31,29 +28,28 @@ struct AuthToken {
  * The authentication logic (login/authMsgSender) is only supported on Sapphire chains.
  */
 contract AccountingSiweAuth is A13e {
-    string internal _domain;
     bytes32 private _authTokenEncKey;
-    uint256 private constant DEFAULT_VALIDITY = 24 hours;
+    bytes21 private _roflAppId;
 
     error SiweAuth_UnsupportedChain();
-    error SiweAuth_ChainIdMismatch();
-    error SiweAuth_DomainMismatch();
-    error SiweAuth_AddressMismatch();
-    error SiweAuth_NotBeforeInFuture();
     error SiweAuth_Expired();
+    error SiweAuth_NotAuthorizedRofl();
+    error SiweAuth_LoginDisabled();
 
-    constructor(string memory inDomain) {
-        _domain = inDomain;
+    constructor(bytes21 inRoflAppId) {
+        _roflAppId = inRoflAppId;
 
-        if (_isSapphireChainId(block.chainid)) {
-            _authTokenEncKey = bytes32(Sapphire.randomBytes(32, ""));
-        } else {
+        // TODO: Remove non-Sapphire fallback when Sapphire localnet e2e tests are available.
+        // This allows deployment on Hardhat/local networks for unit testing.
+        if (!_isSapphireChainId(block.chainid)) {
             // Deterministic key for non-Sapphire local test networks (e.g., Hardhat).
             // Authentication is not expected to be used off-Sapphire.
+            // On Sapphire, the ROFL service will set the key via setAuthTokenEncKey().
             _authTokenEncKey = bytes32(uint256(1));
         }
     }
 
+    // TODO: Remove when Sapphire localnet e2e tests are available.
     function _isSapphireChainId(uint256 chainId) private pure returns (bool) {
         return chainId == 0x5afe || chainId == 0x5aff || chainId == 0x5afd;
     }
@@ -64,73 +60,30 @@ contract AccountingSiweAuth is A13e {
         }
     }
 
-    function login(string calldata siweMsg, SignatureRSV calldata sig)
+    /// @notice Set the AuthToken encryption key. Can only be called by the authorized ROFL app.
+    /// @dev The ROFL app ID is set at deployment. Only that app can call this function.
+    /// @param newKey The 32-byte Deoxys-II encryption key.
+    function setAuthTokenEncKey(bytes32 newKey) external {
+        if (Subcall.getRoflAppId() != _roflAppId) {
+            revert SiweAuth_NotAuthorizedRofl();
+        }
+        _authTokenEncKey = newKey;
+    }
+
+    /// @notice Login is disabled - use the REST API instead.
+    /// @dev This function is kept for A13e interface compatibility but always reverts.
+    ///      The REST service generates and encrypts AuthTokens directly.
+    function login(string calldata, SignatureRSV calldata)
         external
-        view
+        pure
         override
         returns (bytes memory)
     {
-        _requireSapphire();
-
-        AuthToken memory b;
-
-        // Derive the user's address from the signature.
-        bytes memory eip191msg = abi.encodePacked(
-            "\x19Ethereum Signed Message:\n",
-            Strings.toString(bytes(siweMsg).length),
-            siweMsg
-        );
-        address addr = ecrecover(
-            keccak256(eip191msg),
-            uint8(sig.v),
-            sig.r,
-            sig.s
-        );
-        b.userAddr = addr;
-
-        ParsedSiweMessage memory p = SiweParser.parseSiweMsg(bytes(siweMsg));
-
-        if (p.chainId != block.chainid) {
-            revert SiweAuth_ChainIdMismatch();
-        }
-
-        if (keccak256(p.schemeDomain) != keccak256(bytes(_domain))) {
-            revert SiweAuth_DomainMismatch();
-        }
-        b.domain = string(p.schemeDomain);
-
-        if (p.addr != addr) {
-            revert SiweAuth_AddressMismatch();
-        }
-
-        if (
-            p.notBefore.length != 0 &&
-            block.timestamp <= SiweParser.timestampFromIso(p.notBefore)
-        ) {
-            revert SiweAuth_NotBeforeInFuture();
-        }
-
-        if (p.expirationTime.length != 0) {
-            b.validUntil = SiweParser.timestampFromIso(p.expirationTime);
-        } else {
-            b.validUntil = block.timestamp + DEFAULT_VALIDITY;
-        }
-        if (block.timestamp >= b.validUntil) {
-            revert SiweAuth_Expired();
-        }
-
-        b.statement = string(p.statement);
-
-        b.resources = new string[](p.resources.length);
-        for (uint256 i = 0; i < p.resources.length; i++) {
-            b.resources[i] = string(p.resources[i]);
-        }
-
-        return Sapphire.encrypt(_authTokenEncKey, 0, abi.encode(b), "");
+        revert SiweAuth_LoginDisabled();
     }
 
-    function domain() public view returns (string memory) {
-        return _domain;
+    function roflAppId() public view returns (bytes21) {
+        return _roflAppId;
     }
 
     function authMsgSender(bytes memory token)
@@ -165,10 +118,6 @@ contract AccountingSiweAuth is A13e {
             ""
         );
         AuthToken memory b = abi.decode(authTokenEncoded, (AuthToken));
-
-        if (keccak256(bytes(b.domain)) != keccak256(bytes(_domain))) {
-            revert SiweAuth_DomainMismatch();
-        }
 
         if (b.validUntil < block.timestamp) {
             revert SiweAuth_Expired();

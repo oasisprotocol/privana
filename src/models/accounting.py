@@ -108,7 +108,6 @@ class IncludeDepositRequest(BaseModel):
 class IncludeDepositResponse(BaseModel):
     """Response after submitting a deposit inclusion transaction."""
 
-    submission_id: str
     status: str
 
 
@@ -243,7 +242,6 @@ class PendingWithdrawalsResponse(BaseModel):
 class TransactionSubmissionResponse(BaseModel):
     """Generic response for contract transaction submissions."""
 
-    submission_id: str
     status: str
     detail: Optional[str] = None
 
@@ -357,15 +355,43 @@ class SiweLoginRequest(BaseModel):
 
 
 class SiweLoginResponse(BaseModel):
-    """Response containing an opaque SIWE authentication token."""
+    """Response from successful SIWE login.
 
-    token: str
+    Contains both the on-chain SIWE token (for private reads from Sapphire)
+    and JWT tokens (for API authentication).
+    """
+
+    siwe_token: str = Field(..., description="Encrypted SIWE token for on-chain private reads")
+    jwt_access_token: str = Field(..., description="JWT access token for API authentication")
+    jwt_refresh_token: str = Field(
+        ..., description="JWT refresh token for obtaining new access tokens"
+    )
+    address: str = Field(..., description="Authenticated Ethereum address")
+    jwt_expires_in: int = Field(..., description="Access token expiry in seconds")
+    jwt_refresh_expires_in: int = Field(..., description="Refresh token expiry in seconds")
 
 
 class SiweDomainResponse(BaseModel):
     """Response containing the SIWE domain configured in the contract."""
 
     domain: str
+
+
+class SiweNonceResponse(BaseModel):
+    """Response containing a nonce for SIWE authentication.
+
+    Replay Protection:
+        Each nonce can only be used once. Clients must:
+
+        1. Request a nonce from /auth/nonce
+        2. Include this nonce in the SIWE message's nonce field
+        3. Submit the signed message to /auth/login before the nonce expires
+
+        Replay attempts with the same nonce will be rejected.
+    """
+
+    nonce: str = Field(..., description="Nonce to include in SIWE message")
+    expires_in: int = Field(..., description="Seconds until nonce expires")
 
 
 class WithdrawalNonceResponse(BaseModel):
