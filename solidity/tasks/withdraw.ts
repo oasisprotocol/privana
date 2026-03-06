@@ -276,7 +276,7 @@ task("withdraw")
 
     while (Date.now() - startTime < timeoutSeconds * 1000) {
       const withdrawalInfo = await accounting.withdrawals(withdrawalIndex);
-      const resolved = withdrawalInfo[4];
+      const resolved = withdrawalInfo[5];
 
       if (resolved) {
         const chainId = getChainIdFromTokenId(args.tokenid);
@@ -322,12 +322,13 @@ task("watchWithdrawal")
     const withdrawal = await accounting.withdrawals(index);
     console.log("\nWithdrawal details:");
     console.log("  User:", withdrawal[0]);
-    console.log("  Amount:", withdrawal[1].toString());
-    console.log("  Block:", withdrawal[2].toString());
-    console.log("  Token ID:", withdrawal[3]);
-    console.log("  Resolved:", withdrawal[4]);
+    console.log("  To:", withdrawal[1]);
+    console.log("  Amount:", withdrawal[2].toString());
+    console.log("  Block:", withdrawal[3].toString());
+    console.log("  Token ID:", withdrawal[4]);
+    console.log("  Resolved:", withdrawal[5]);
 
-    if (withdrawal[4]) {
+    if (withdrawal[5]) {
       console.log("\nWithdrawal already resolved!");
       return { resolved: true };
     }
@@ -338,7 +339,7 @@ task("watchWithdrawal")
 
     while (Date.now() - startTime < timeoutSeconds * 1000) {
       const current = await accounting.withdrawals(index);
-      if (current[4]) {
+      if (current[5]) {
         console.log("\n\n=== Withdrawal Resolved ===");
         console.log("The resolver has processed this withdrawal.");
         console.log("The broadcaster will now send it to the destination chain.");

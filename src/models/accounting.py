@@ -89,6 +89,12 @@ class IncludeDepositRequest(BaseModel):
     transaction_proof_stack: Optional[str] = Field(
         None, description="Optional proof stack data (hex)"
     )
+    receipt_index_rlp: Optional[str] = Field(
+        None, description="Optional RLP encoded receipt index proof (hex)"
+    )
+    receipt_proof_stack: Optional[str] = Field(
+        None, description="Optional receipt proof stack data (hex)"
+    )
 
     @field_validator("token_id", "evm_transaction_data")
     def _normalise_required_hex(cls, value: str) -> str:
@@ -98,6 +104,8 @@ class IncludeDepositRequest(BaseModel):
         "rlp_block_header",
         "transaction_index_rlp",
         "transaction_proof_stack",
+        "receipt_index_rlp",
+        "receipt_proof_stack",
     )
     def _normalise_optional_hex(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -190,6 +198,25 @@ class TransferLockedFundsRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class WithdrawFromLockRequest(BaseModel):
+    """Payload for withdrawing funds directly from a lock to an external address."""
+
+    user_address: str = Field(..., min_length=1)
+    to_address: str = Field(..., min_length=1)
+    lock_id: int = Field(..., ge=1)
+    amount: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
+    signature: str
+
+    @field_validator("amount", "nonce", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("signature")
+    def _normalise_wfl_signature(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
 class UnlockFundsRequest(BaseModel):
     """Payload for unlocking funds after expiry."""
 
@@ -220,11 +247,45 @@ class WithdrawalInfo(BaseModel):
 
     index: int
     user_address: str
+    to_address: str
     amount: str
     block_number: int
     token_id: str
     resolved: bool
     tx_identifier: str
+
+
+class CreditDepositToRequest(BaseModel):
+    """Payload for crediting a proven deposit to a beneficiary user."""
+
+    depositor_address: str = Field(..., min_length=1)
+    beneficiary_address: str = Field(..., min_length=1)
+    token_id: str = Field(..., min_length=4)
+    nonce: int = Field(..., ge=0)
+    depositor_signature: str = Field(..., min_length=1)
+    rlp_block_header: str = Field(..., min_length=1)
+    transaction_index_rlp: str = Field(..., min_length=1)
+    transaction_proof_stack: str = Field(..., min_length=1)
+    receipt_index_rlp: str = Field(..., min_length=1)
+    receipt_proof_stack: str = Field(..., min_length=1)
+
+    @field_validator("token_id", "depositor_signature")
+    def _normalise_cd_required_hex(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+    @field_validator("nonce", mode="before")
+    def _parse_cd_nonce(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator(
+        "rlp_block_header",
+        "transaction_index_rlp",
+        "transaction_proof_stack",
+        "receipt_index_rlp",
+        "receipt_proof_stack",
+    )
+    def _normalise_cd_proof_hex(cls, value: str) -> str:
+        return _normalise_hex(value)
 
 
 class WithdrawalInfoResponse(WithdrawalInfo):

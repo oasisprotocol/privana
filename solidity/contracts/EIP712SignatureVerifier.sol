@@ -47,6 +47,12 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /// @notice Mapping to track transferLocked nonces per service for replay protection
     mapping(address service => uint256 nonce) public transferLockedNonces;
 
+    /// @notice Mapping to track withdrawFromLock nonces per service
+    mapping(address service => uint256 nonce) public withdrawFromLockNonces;
+
+    /// @notice Mapping to track creditDepositTo nonces per depositor
+    mapping(address depositor => uint256 nonce) public creditDepositToNonces;
+
     /// @notice Thrown when signature recovery fails or signer doesn't match expected address
     error InvalidSignature();
     /// @notice Thrown when the provided nonce doesn't match the expected nonce
@@ -80,6 +86,18 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     bytes32 private constant MODIFY_LOCK_TYPEHASH =
         keccak256(
             "ModifyLock(address userAddress,uint256 lockId,uint256 amount,uint256 newExpiry,uint256 nonce)"
+        );
+
+    /// @notice EIP-712 type hash for withdrawing directly from a lock to an external address
+    bytes32 private constant WITHDRAW_FROM_LOCK_TYPEHASH =
+        keccak256(
+            "WithdrawFromLock(address userAddress,address toAddress,uint256 lockId,uint256 amount,uint256 nonce)"
+        );
+
+    /// @notice EIP-712 type hash for crediting a proven deposit to a beneficiary
+    bytes32 private constant CREDIT_DEPOSIT_FOR_USER_TYPEHASH =
+        keccak256(
+            "CreditDepositTo(address depositorAddress,address beneficiaryAddress,bytes32 tokenId,uint256 amount,uint256 chainId,bytes32 txHash,uint256 nonce)"
         );
 
     /**
@@ -247,6 +265,71 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         }
 
         transferLockedNonces[serviceAddress]++;
+    }
+
+    function verifyWithdrawFromLockSignature(
+        address serviceAddress,
+        address userAddress,
+        address toAddress,
+        uint256 lockId,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) internal {
+        if (nonce != withdrawFromLockNonces[serviceAddress]) {
+            revert InvalidNonce();
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                WITHDRAW_FROM_LOCK_TYPEHASH,
+                userAddress,
+                toAddress,
+                lockId,
+                amount,
+                nonce
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != serviceAddress) {
+            revert InvalidSignature();
+        }
+        withdrawFromLockNonces[serviceAddress]++;
+    }
+
+    function verifyCreditDepositToSignature(
+        address depositorAddress,
+        address beneficiaryAddress,
+        bytes32 tokenId,
+        uint256 amount,
+        uint256 chainId,
+        bytes32 txHash,
+        uint256 nonce,
+        bytes calldata signature
+    ) internal {
+        if (nonce != creditDepositToNonces[depositorAddress]) {
+            revert InvalidNonce();
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CREDIT_DEPOSIT_FOR_USER_TYPEHASH,
+                depositorAddress,
+                beneficiaryAddress,
+                tokenId,
+                amount,
+                chainId,
+                txHash,
+                nonce
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != depositorAddress) {
+            revert InvalidSignature();
+        }
+        creditDepositToNonces[depositorAddress]++;
     }
 
     /**

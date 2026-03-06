@@ -149,6 +149,10 @@ class AccountingContractService:
             raise ValueError(f"Invalid {field} provided")
         return _to_checksum(value)
 
+    @staticmethod
+    def _is_zero_address(value: str) -> bool:
+        return value.lower() == "0x0000000000000000000000000000000000000000"
+
     def _require_positive(self, value: Any, field: str, allow_zero: bool = False) -> int:
         try:
             parsed = int(value)
@@ -598,6 +602,51 @@ class AccountingContractService:
         )
         return await self._submit(fn._encode_transaction_data())
 
+    async def withdraw_from_lock(self, payload: Dict) -> SubmissionResult:
+        user = self._require_address(payload["user_address"], "user_address")
+        to_addr = self._require_address(payload["to_address"], "to_address")
+        lock_id = self._require_positive(payload["lock_id"], "lock_id")
+        amount = self._require_positive(payload["amount"], "amount")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
+        signature = self._require_hex(payload["signature"], "signature")
+
+        if self._is_zero_address(str(to_addr)):
+            raise ValueError("to_address must not be the zero address")
+
+        contract_reader = self._get_reader_contract()
+        user_locks = await contract_reader.functions.getUserLocks(user).call()
+        lock = next((entry for entry in user_locks if int(entry[0]) == lock_id), None)
+        if lock is None:
+            raise ValueError(f"lock_id {lock_id} not found for user {user}")
+
+        token = HexBytes(lock[2])
+        context = await self._get_token_context(token)
+
+        if context.chain_id not in self.settings.chain_rpc_urls:
+            raise ValueError(
+                f"No RPC URL configured for chain_id {context.chain_id}. "
+                f"Cannot process withdrawal - destination chain not supported."
+            )
+
+        await self._check_destination_balance(context.chain_id, context.is_native, amount)
+
+        fn = self.contract.functions.withdrawFromLock(
+            user,
+            to_addr,
+            lock_id,
+            amount,
+            nonce,
+            signature,
+        )
+        result = await self._submit(fn._encode_transaction_data())
+
+        detail_parts = [f"chain_id={context.chain_id}"]
+        if context.token_address:
+            detail_parts.append(f"token_address={context.token_address}")
+        result.detail = "; ".join(detail_parts)
+
+        return result
+
     async def unlock_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
@@ -626,6 +675,34 @@ class AccountingContractService:
         return await self._submit(
             fn._encode_transaction_data(), gas=3_000_000
         )  # leave 3m gas limit
+
+    async def credit_deposit_to(self, payload: Dict) -> SubmissionResult:
+        """Include a verified deposit and credit a beneficiary user."""
+        depositor = self._require_address(payload["depositor_address"], "depositor_address")
+        beneficiary = self._require_address(payload["beneficiary_address"], "beneficiary_address")
+        token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
+        depositor_signature = self._require_hex(
+            payload["depositor_signature"], "depositor_signature"
+        )
+
+        if self._is_zero_address(str(beneficiary)):
+            raise ValueError("beneficiary_address must not be the zero address")
+
+        self._validate_proof_data(payload)
+        tx_proof = self._build_tx_proof(payload)
+        receipt_proof = self._build_receipt_proof(payload)
+
+        fn = self.contract.functions.creditDepositTo(
+            depositor,
+            beneficiary,
+            token,
+            tx_proof,
+            receipt_proof,
+            nonce,
+            depositor_signature,
+        )
+        return await self._submit(fn._encode_transaction_data(), gas=3_000_000)
 
     async def request_withdrawal(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
@@ -692,11 +769,12 @@ class AccountingContractService:
         return {
             "index": index,
             "user_address": result[0],
-            "amount": str(result[1]),
-            "block_number": result[2],
-            "token_id": "0x" + result[3].hex(),
-            "resolved": result[4],
-            "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+            "to_address": result[1],
+            "amount": str(result[2]),
+            "block_number": result[3],
+            "token_id": "0x" + result[4].hex(),
+            "resolved": result[5],
+            "tx_identifier": "0x" + result[6].hex() if result[6] else "0x",
         }
 
     async def get_pending_withdrawals(self, user_address: str) -> Dict[str, Any]:
@@ -711,18 +789,19 @@ class AccountingContractService:
             try:
                 result = await contract_reader.functions.withdrawals(index).call()
                 withdrawal_user = result[0]
-                resolved = result[4]
+                resolved = result[5]
 
                 if withdrawal_user.lower() == checksum_user.lower() and not resolved:
                     pending.append(
                         {
                             "index": index,
                             "user_address": result[0],
-                            "amount": str(result[1]),
-                            "block_number": result[2],
-                            "token_id": "0x" + result[3].hex(),
-                            "resolved": result[4],
-                            "tx_identifier": "0x" + result[5].hex() if result[5] else "0x",
+                            "to_address": result[1],
+                            "amount": str(result[2]),
+                            "block_number": result[3],
+                            "token_id": "0x" + result[4].hex(),
+                            "resolved": result[5],
+                            "tx_identifier": "0x" + result[6].hex() if result[6] else "0x",
                         }
                     )
                 index += 1
@@ -763,7 +842,7 @@ class AccountingContractService:
                 result = await contract_reader.functions.withdrawals(index).call()
 
                 withdrawal_user = result[0]
-                resolved = result[4]
+                resolved = result[5]
 
                 # Skip if already resolved
                 if resolved:
@@ -773,8 +852,8 @@ class AccountingContractService:
                 if checksum_user and withdrawal_user.lower() != checksum_user.lower():
                     continue
 
-                block_number = result[2]
-                token_id_bytes = result[3]
+                block_number = result[3]
+                token_id_bytes = result[4]
 
                 # Get chain_id for this token
                 token_hex = HexBytes(token_id_bytes)
@@ -791,7 +870,8 @@ class AccountingContractService:
                     {
                         "index": index,
                         "user_address": withdrawal_user,
-                        "amount": str(result[1]),
+                        "to_address": result[1],
+                        "amount": str(result[2]),
                         "token_id": "0x" + token_id_bytes.hex(),
                         "block_number": block_number,
                         "can_resolve": current_block - block_number >= 1,

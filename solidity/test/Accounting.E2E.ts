@@ -47,7 +47,23 @@ const types = {
     { name: "tokenId", type: "bytes32" },
     { name: "amount", type: "uint256" },
     { name: "nonce", type: "uint256" },
-  ]
+  ],
+  WithdrawFromLock: [
+    { name: "userAddress", type: "address" },
+    { name: "toAddress", type: "address" },
+    { name: "lockId", type: "uint256" },
+    { name: "amount", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+  ],
+  CreditDepositTo: [
+    { name: "depositorAddress", type: "address" },
+    { name: "beneficiaryAddress", type: "address" },
+    { name: "tokenId", type: "bytes32" },
+    { name: "amount", type: "uint256" },
+    { name: "chainId", type: "uint256" },
+    { name: "txHash", type: "bytes32" },
+    { name: "nonce", type: "uint256" },
+  ],
 }
 
 const TEST_TOKEN = {
@@ -183,7 +199,6 @@ describe('Accounting', function () {
     console.log("tokenId", tokenId);
 
     expect(tokenId).to.equal(TEST_TOKEN.tokenId);
-    expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
   });
 
   it("User should be able to deposit", async function () {
@@ -682,6 +697,7 @@ describe('Accounting', function () {
 
     const withdrawals = await accounting.withdrawals(0);
     expect(withdrawals.userAddress).to.equal(userWallet1.address);
+    expect(withdrawals.toAddress).to.equal(userWallet1.address);
     expect(withdrawals.amount).to.equal(parseUsdt("0.1"));
     expect(withdrawals.tokenId).to.equal(TEST_TOKEN.tokenId);
     expect(withdrawals.resolved).to.equal(false);
@@ -697,6 +713,415 @@ describe('Accounting', function () {
     }
   });
 
+});
+
+describe('WithdrawFromLock + CreditDepositTo', function () {
+  let accounting: MockAccounting;
+  let mockShoyubashi: MockShoyuBashi;
+  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let userWallet1: Wallet;
+  let userWallet2: Wallet;
+  let userWallet3: Wallet;
+
+  const blockNumber = 32680090;
+  const transactionIndex = 45;
+
+  before(async () => {
+    const provider = ethers.provider;
+    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
+
+    userWallet1 = ethers.HDNodeWallet
+      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/0")
+      .connect(provider);
+    userWallet2 = ethers.HDNodeWallet
+      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/1")
+      .connect(provider);
+    userWallet3 = ethers.HDNodeWallet
+      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/2")
+      .connect(provider);
+  });
+
+  beforeEach(async () => {
+    const [deployer] = await ethers.getSigners();
+
+    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
+    const mockSiweAuth = await MockSiweAuthFactory.deploy('test');
+    await mockSiweAuth.waitForDeployment();
+
+    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
+    mockShoyubashi = await MockShoyubashiFactory.deploy();
+    await mockShoyubashi.waitForDeployment();
+
+    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
+    const provethVerifier = await ProvethVerifierFactory.deploy();
+    await provethVerifier.waitForDeployment();
+
+    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
+    accounting = await upgrades.deployProxy(
+      AccountingFactory,
+      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
+    ) as unknown as MockAccounting;
+    await accounting.waitForDeployment();
+
+    const domainTuple = await accounting.eip712Domain();
+    domain = {
+      name: domainTuple[1],
+      version: domainTuple[2],
+      chainId: Number(domainTuple[3]),
+      verifyingContract: domainTuple[4],
+    };
+
+    const data = ethers.concat([
+      ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+    ]);
+    await accounting.setTokenInfo({
+      tokenType: TEST_TOKEN.tokenType,
+      data: data
+    });
+    await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n);
+  });
+
+  async function createLockForService(lockAmount: bigint, serviceAddress: string): Promise<bigint> {
+    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("5"));
+    const expiry = await getBlockTimestamp() + 3600;
+    const lockSignature = await userWallet1.signTypedData(
+      domain,
+      { Lock: types.Lock },
+      {
+        userAddress: userWallet1.address,
+        serviceAddress,
+        tokenId: TEST_TOKEN.tokenId,
+        amount: lockAmount,
+        expiry,
+      }
+    );
+
+    await accounting.createLock(
+      userWallet1.address,
+      serviceAddress,
+      TEST_TOKEN.tokenId,
+      lockAmount,
+      expiry,
+      lockSignature
+    );
+
+    const userLocks = await accounting.getUserLocks(userWallet1.address, "0x");
+    return userLocks[0][0];
+  }
+
+  it("should withdraw from lock to external destination and store toAddress", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet3.address,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await accounting.withdrawFromLock(
+      userWallet1.address,
+      userWallet3.address,
+      lockId,
+      parseUsdt("1"),
+      nonce,
+      signature
+    );
+
+    const locksAfter = await accounting.getUserLocks(userWallet1.address, "0x");
+    expect(locksAfter[0][3]).to.equal(parseUsdt("1"));
+
+    const withdrawal = await accounting.withdrawals(0);
+    expect(withdrawal.userAddress).to.equal(userWallet1.address);
+    expect(withdrawal.toAddress).to.equal(userWallet3.address);
+    expect(withdrawal.amount).to.equal(parseUsdt("1"));
+    expect(withdrawal.tokenId).to.equal(TEST_TOKEN.tokenId);
+    expect(withdrawal.resolved).to.equal(false);
+  });
+
+  it("should reject withdrawFromLock with zero destination", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: ethers.ZeroAddress,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await expect(
+      accounting.withdrawFromLock(
+        userWallet1.address,
+        ethers.ZeroAddress,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.revertedWithCustomError(accounting, "AddressMismatch");
+  });
+
+  it("should reject withdrawFromLock signed by non-service", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet1.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet3.address,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await expect(
+      accounting.withdrawFromLock(
+        userWallet1.address,
+        userWallet3.address,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.revertedWithCustomError(accounting, "InvalidSignature");
+  });
+
+  it("should reject replay of withdrawFromLock signature", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet3.address,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await accounting.withdrawFromLock(
+      userWallet1.address,
+      userWallet3.address,
+      lockId,
+      parseUsdt("1"),
+      nonce,
+      signature
+    );
+
+    await expect(
+      accounting.withdrawFromLock(
+        userWallet1.address,
+        userWallet3.address,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.revertedWithCustomError(accounting, "InvalidNonce");
+  });
+
+  describe("creditDepositTo", function () {
+    let rlpBlockHeader: string;
+    let txProof: string[];
+    let receiptProof: string[];
+    let depositTxHash: string;
+
+    before(async () => {
+      const baseProvider = new ethers.JsonRpcProvider("https://sepolia.base.org");
+
+      ({ rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
+        baseProvider,
+        blockNumber,
+        transactionIndex
+      ));
+
+      ({ proof: receiptProof } = await getReceiptInclusionProof(
+        baseProvider,
+        blockNumber,
+        transactionIndex
+      ));
+
+      const block = await baseProvider.getBlock(blockNumber, true);
+      if (!block) {
+        throw new Error(`Block ${blockNumber} not found`);
+      }
+      const txEntry = block.transactions[transactionIndex];
+      if (!txEntry) {
+        throw new Error(`Transaction ${transactionIndex} not found in block ${blockNumber}`);
+      }
+      depositTxHash = typeof txEntry === "string" ? txEntry : txEntry.hash;
+    });
+
+    beforeEach(async () => {
+      await mockShoyubashi.setUnanimousHash(
+        TEST_TOKEN.chainId,
+        blockNumber,
+        keccak256(rlpBlockHeader)
+      );
+    });
+
+    it("should credit proven deposit to beneficiary with depositor signature", async function () {
+      const beneficiary = userWallet2.address;
+      const amount = parseUsdt("10");
+      const nonce = await accounting.creditDepositToNonces(userWallet1.address);
+
+      const signature = await userWallet1.signTypedData(
+        domain,
+        { CreditDepositTo: types.CreditDepositTo },
+        {
+          depositorAddress: userWallet1.address,
+          beneficiaryAddress: beneficiary,
+          tokenId: TEST_TOKEN.tokenId,
+          amount,
+          chainId: TEST_TOKEN.chainId,
+          txHash: depositTxHash,
+          nonce,
+        }
+      );
+
+      await accounting.creditDepositTo(
+        userWallet1.address,
+        beneficiary,
+        TEST_TOKEN.tokenId,
+        {
+          rlpBlockHeader,
+          transactionIndexRlp: getRlpUint(transactionIndex),
+          transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        },
+        {
+          receiptIndexRlp: getRlpUint(transactionIndex),
+          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+        },
+        nonce,
+        signature
+      );
+
+      expect(await accounting.getBalance(beneficiary, TEST_TOKEN.tokenId)).to.equal(amount);
+      expect(await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId)).to.equal(0);
+    });
+
+    it("should reject creditDepositTo with invalid beneficiary signature binding", async function () {
+      const amount = parseUsdt("10");
+      const nonce = await accounting.creditDepositToNonces(userWallet1.address);
+      const signature = await userWallet1.signTypedData(
+        domain,
+        { CreditDepositTo: types.CreditDepositTo },
+        {
+          depositorAddress: userWallet1.address,
+          beneficiaryAddress: userWallet2.address,
+          tokenId: TEST_TOKEN.tokenId,
+          amount,
+          chainId: TEST_TOKEN.chainId,
+          txHash: depositTxHash,
+          nonce,
+        }
+      );
+
+      await expect(
+        accounting.creditDepositTo(
+          userWallet1.address,
+          userWallet3.address,
+          TEST_TOKEN.tokenId,
+          {
+            rlpBlockHeader,
+            transactionIndexRlp: getRlpUint(transactionIndex),
+            transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+          },
+          {
+            receiptIndexRlp: getRlpUint(transactionIndex),
+            receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+          },
+          nonce,
+          signature
+        )
+      ).to.be.revertedWithCustomError(accounting, "InvalidSignature");
+    });
+
+    it("should reject replayed proof in creditDepositTo", async function () {
+      const amount = parseUsdt("10");
+      const nonce = await accounting.creditDepositToNonces(userWallet1.address);
+      const signature = await userWallet1.signTypedData(
+        domain,
+        { CreditDepositTo: types.CreditDepositTo },
+        {
+          depositorAddress: userWallet1.address,
+          beneficiaryAddress: userWallet2.address,
+          tokenId: TEST_TOKEN.tokenId,
+          amount,
+          chainId: TEST_TOKEN.chainId,
+          txHash: depositTxHash,
+          nonce,
+        }
+      );
+
+      const txProofPayload = {
+        rlpBlockHeader,
+        transactionIndexRlp: getRlpUint(transactionIndex),
+        transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      };
+      const receiptProofPayload = {
+        receiptIndexRlp: getRlpUint(transactionIndex),
+        receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
+      };
+
+      await accounting.creditDepositTo(
+        userWallet1.address,
+        userWallet2.address,
+        TEST_TOKEN.tokenId,
+        txProofPayload,
+        receiptProofPayload,
+        nonce,
+        signature
+      );
+
+      const secondNonce = await accounting.creditDepositToNonces(userWallet1.address);
+      const secondSignature = await userWallet1.signTypedData(
+        domain,
+        { CreditDepositTo: types.CreditDepositTo },
+        {
+          depositorAddress: userWallet1.address,
+          beneficiaryAddress: userWallet2.address,
+          tokenId: TEST_TOKEN.tokenId,
+          amount,
+          chainId: TEST_TOKEN.chainId,
+          txHash: depositTxHash,
+          nonce: secondNonce,
+        }
+      );
+
+      await expect(
+        accounting.creditDepositTo(
+          userWallet1.address,
+          userWallet2.address,
+          TEST_TOKEN.tokenId,
+          txProofPayload,
+          receiptProofPayload,
+          secondNonce,
+          secondSignature
+        )
+      ).to.be.revertedWithCustomError(accounting, "DepositAlreadyProcessed");
+    });
+  });
 });
 
 describe('ModifyLock', function () {

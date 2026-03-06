@@ -55,6 +55,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 indexed index,
         address indexed userAddress,
         bytes32 indexed tokenId,
+        address toAddress,
         uint256 amount,
         uint256 chainId
     );
@@ -81,6 +82,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     struct WithdrawalRequest {
         address userAddress;
+        address toAddress;
         uint256 amount;
         uint256 blockNumber;
         bytes32 tokenId;
@@ -144,6 +146,100 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (_authSender(token) != user) revert Unauthorized();
     }
 
+    function _verifyAndDecodeDeposit(
+        address expectedSender,
+        bytes32 tokenId,
+        EVMTransactionProof calldata txProof,
+        EVMReceiptProof calldata receiptProof
+    ) internal returns (uint256 amount, uint256 chainId, bytes32 txHash) {
+        if (
+            keccak256(txProof.transactionIndexRlp) !=
+            keccak256(receiptProof.receiptIndexRlp)
+        ) revert ReceiptIndexMismatch();
+
+        bytes memory evmTransactionData = provethVerifier.validateTxProof(
+            txProof
+        );
+
+        address from;
+        address to;
+        uint256 value;
+        bytes memory txData;
+        (
+            chainId,
+            txHash,
+            from,
+            to,
+            value,
+            txData,
+            ,
+            ,
+
+        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+
+        bytes32 depositKey = keccak256(abi.encodePacked(chainId, txHash));
+        if (processedDeposits[depositKey]) revert DepositAlreadyProcessed();
+
+        bytes memory rawReceipt = provethVerifier.validateReceiptProof(
+            txProof.rlpBlockHeader,
+            receiptProof
+        );
+
+        (uint256 status, ) = EVMSignerAndVerifier.decodeEVMTxReceipt(
+            rawReceipt
+        );
+
+        if (status != 1) revert InvalidDeposit();
+
+        uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
+            txProof.rlpBlockHeader
+        );
+
+        EVMSignerAndVerifier.verifyBlockHash(
+            keccak256(txProof.rlpBlockHeader),
+            blockNumber,
+            chainId
+        );
+
+        if (from != expectedSender) revert AddressMismatch();
+
+        TokenInfo memory tInfo = tokens[tokenId];
+
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
+                tInfo.data
+            );
+
+            if (tChainId != chainId) revert ChainIdMismatch();
+
+            if (to != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
+
+            if (txData.length != 0) revert InvalidTransactionData();
+
+            amount = value;
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
+                .decodeEVMErc20TokenData(tInfo.data);
+
+            if (tChainId != chainId) revert ChainIdMismatch();
+
+            if (to != tokenAddress) revert InvalidDeposit();
+
+            (address erc20To, uint256 erc20Amount) = EVMSignerAndVerifier
+                .decodeTxDataForErc20Transfer(txData);
+
+            if (erc20To != EVMSignerAndVerifier.evmAddress)
+                revert AddressMismatch();
+
+            amount = erc20Amount;
+        } else {
+            revert UnsupportedTokenType();
+        }
+
+        if (amount == 0) revert InvalidAmount();
+        processedDeposits[depositKey] = true;
+    }
+
     /**
      * @notice Credits user's account after verifying an EVM deposit transaction.
      *
@@ -179,93 +275,50 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         EVMTransactionProof calldata txProof,
         EVMReceiptProof calldata receiptProof
     ) public {
-        if (
-            keccak256(txProof.transactionIndexRlp) !=
-            keccak256(receiptProof.receiptIndexRlp)
-        ) revert ReceiptIndexMismatch();
-
-        bytes memory evmTransactionData = provethVerifier.validateTxProof(txProof);
-
-        (
-            uint256 chainId,
-            bytes32 txHash,
-            address from,
-            address to,
-            uint256 value,
-            bytes memory txData,
-            ,
-            ,
-
-        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
-
-        bytes32 depositKey = keccak256(abi.encodePacked(chainId, txHash));
-        if (processedDeposits[depositKey]) revert DepositAlreadyProcessed();
-
-        bytes memory rawReceipt = provethVerifier.validateReceiptProof(
-            txProof.rlpBlockHeader,
+        (uint256 amount, , ) = _verifyAndDecodeDeposit(
+            userAddress,
+            tokenId,
+            txProof,
             receiptProof
         );
-
-        (uint256 status, ) = EVMSignerAndVerifier.decodeEVMTxReceipt(
-            rawReceipt
-        );
-
-        if (status != 1) revert InvalidDeposit();
-
-        uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
-            txProof.rlpBlockHeader
-        );
-
-        EVMSignerAndVerifier.verifyBlockHash(
-            keccak256(txProof.rlpBlockHeader),
-            blockNumber,
-            chainId
-        );
-
-        if (from != userAddress) revert AddressMismatch();
-
-        TokenInfo memory tInfo = tokens[tokenId];
-
-        uint256 amount;
-
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
-                tInfo.data
-            );
-
-            if (tChainId != chainId) revert ChainIdMismatch();
-
-            if (to != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
-
-            if (txData.length != 0) revert InvalidTransactionData();
-
-            amount = value;
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
-                .decodeEVMErc20TokenData(tInfo.data);
-
-            if (tChainId != chainId) revert ChainIdMismatch();
-
-            if (to != tokenAddress) revert InvalidDeposit();
-
-            (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
-                .decodeTxDataForErc20Transfer(txData);
-
-            if (erc20To != EVMSignerAndVerifier.evmAddress)
-                revert AddressMismatch();
-
-            amount = erc20amount;
-        } else {
-            revert UnsupportedTokenType();
-        }
-
-        if (amount == 0) revert InvalidAmount();
-
-        processedDeposits[depositKey] = true;
 
         balances[userAddress][tokenId] += amount;
 
         emit Deposit(userAddress, tokenId, amount);
+    }
+
+    function creditDepositTo(
+        address depositorAddress,
+        address beneficiaryAddress,
+        bytes32 tokenId,
+        EVMTransactionProof calldata txProof,
+        EVMReceiptProof calldata receiptProof,
+        uint256 nonce,
+        bytes calldata depositorSignature
+    ) public {
+        if (beneficiaryAddress == address(0)) revert AddressMismatch();
+
+        (uint256 amount, uint256 chainId, bytes32 txHash) = _verifyAndDecodeDeposit(
+            depositorAddress,
+            tokenId,
+            txProof,
+            receiptProof
+        );
+
+        EIP712SignatureVerifier.verifyCreditDepositToSignature(
+            depositorAddress,
+            beneficiaryAddress,
+            tokenId,
+            amount,
+            chainId,
+            txHash,
+            nonce,
+            depositorSignature
+        );
+
+        balances[beneficiaryAddress][tokenId] += amount;
+
+        emit Deposit(beneficiaryAddress, tokenId, amount);
     }
 
     /**
@@ -353,6 +406,46 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             }
         }
         revert InvalidLockId();
+    }
+
+    function _scheduleWithdrawal(
+        address userAddress,
+        address toAddress,
+        bytes32 tokenId,
+        uint256 amount
+    ) internal {
+        TokenInfo memory tInfo = tokens[tokenId];
+
+        bytes memory txIdentifier;
+        uint256 chainId;
+
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+
+            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
+                tInfo.data
+            );
+
+            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+        } else {
+            revert UnsupportedTokenType();
+        }
+
+        withdrawals.push(
+            WithdrawalRequest({
+                userAddress: userAddress,
+                toAddress: toAddress,
+                amount: amount,
+                blockNumber: block.number,
+                tokenId: tokenId,
+                txIdentifier: txIdentifier,
+                resolved: false
+            })
+        );
+
+        emit Withdrawal(userAddress, tokenId, amount, chainId);
     }
 
     /**
@@ -552,6 +645,47 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
     }
 
+    function withdrawFromLock(
+        address userAddress,
+        address toAddress,
+        uint256 lockId,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) public {
+        if (amount == 0) revert InvalidAmount();
+        if (toAddress == address(0)) revert AddressMismatch();
+
+        UserInfo storage uInfo = userInfo[userAddress];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        uint256 lockIndex = _findLockIndex(locks, lockId);
+        FundLock storage lock = locks[lockIndex];
+
+        EIP712SignatureVerifier.verifyWithdrawFromLockSignature(
+            lock.serviceId,
+            userAddress,
+            toAddress,
+            lockId,
+            amount,
+            nonce,
+            signature
+        );
+
+        if (lock.amount < amount) revert InsufficientLockedAmount();
+
+        lock.amount -= amount;
+
+        bytes32 tokenId = lock.tokenId;
+
+        if (lock.amount == 0) {
+            locks[lockIndex] = locks[locks.length - 1];
+            locks.pop();
+        }
+
+        _scheduleWithdrawal(userAddress, toAddress, tokenId, amount);
+    }
+
     /**
      * @notice Transfers funds between users within the accounting system.
      *
@@ -644,40 +778,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         balances[userAddress][tokenId] -= amount;
 
-        TokenInfo memory tInfo = tokens[tokenId];
-
-        bytes memory txIdentifier;
-
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
-                tInfo.data
-            );
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
-
-            emit Withdrawal(userAddress, tokenId, amount, chainId);
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
-                tInfo.data
-            );
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
-
-            emit Withdrawal(userAddress, tokenId, amount, chainId);
-        } else {
-            revert UnsupportedTokenType();
-        }
-
-        withdrawals.push(
-            WithdrawalRequest({
-                userAddress: userAddress,
-                amount: amount,
-                blockNumber: block.number,
-                tokenId: tokenId,
-                txIdentifier: txIdentifier,
-                resolved: false
-            })
-        );
+        _scheduleWithdrawal(userAddress, userAddress, tokenId, amount);
     }
 
     /**
@@ -715,6 +816,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         address userAddress = withdrawalRequest.userAddress;
+        address destination = withdrawalRequest.toAddress;
         bytes32 tokenId = withdrawalRequest.tokenId;
         uint256 amount = withdrawalRequest.amount;
         TokenInfo memory tInfo = tokens[tokenId];
@@ -725,7 +827,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
             signedTx = EVMSignerAndVerifier.generateNativeTransfer(
                 chainId,
-                userAddress,
+                destination,
                 amount,
                 nonce
             );
@@ -736,7 +838,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
             signedTx = EVMSignerAndVerifier.generateERC20Transfer(
                 chainId,
-                userAddress,
+                destination,
                 tokenAddress,
                 amount,
                 nonce
@@ -748,7 +850,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         // Only mark resolved and emit event if not already resolved
         if (!withdrawalRequest.resolved) {
             withdrawalRequest.resolved = true;
-            emit WithdrawalResolved(index, userAddress, tokenId, amount, chainId);
+            emit WithdrawalResolved(
+                index,
+                userAddress,
+                tokenId,
+                destination,
+                amount,
+                chainId
+            );
         }
 
         return signedTx;

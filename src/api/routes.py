@@ -12,6 +12,7 @@ from src.models.accounting import (
     BalanceResponse,
     BatchBalancesRequest,
     BatchBalancesResponse,
+    CreditDepositToRequest,
     DepositQuoteRequest,
     DepositQuoteResponse,
     ExpiredLocksResponse,
@@ -38,6 +39,7 @@ from src.models.accounting import (
     WithdrawalInfoResponse,
     WithdrawalNonceResponse,
     WithdrawalRequest,
+    WithdrawFromLockRequest,
 )
 from src.services.accounting_contract import (
     SubmissionResult,
@@ -100,6 +102,25 @@ async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositRespo
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - network errors
         logger.exception("Failed to submit deposit inclusion")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/deposits/for-user", response_model=TransactionSubmissionResponse)
+async def credit_deposit_to(
+    payload: CreditDepositToRequest,
+) -> TransactionSubmissionResponse:
+    """Submit deposit inclusion and credit a beneficiary user."""
+
+    try:
+        submission = await asyncio.to_thread(_service.credit_deposit_to, payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Deposit-for-user transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.exception("Failed to submit deposit-for-user")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
@@ -231,6 +252,23 @@ async def transfer_locked_funds(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer locked funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/withdraw-from-lock", response_model=TransactionSubmissionResponse)
+async def withdraw_from_lock(payload: WithdrawFromLockRequest) -> TransactionSubmissionResponse:
+    """Withdraw locked funds directly to an external destination."""
+
+    try:
+        submission = await asyncio.to_thread(_service.withdraw_from_lock, payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Withdraw-from-lock transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to withdraw from lock")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
