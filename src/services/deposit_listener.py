@@ -9,9 +9,10 @@ from web3 import Web3
 from web3.types import BlockData
 
 from src.abi.rofl_adapter import ROFL_ADAPTER_ABI
+from src.clients.rofl import TransactionRevertedError
 from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
 from src.services.accounting_contract import AccountingContractService
-from src.services.block_state import get_block_state_manager
+from src.services.block_state import PendingTx, get_block_state_manager
 from src.services.proof_generator import get_proof_generator
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,16 @@ class DepositListener:
     """Monitors ETH and ERC20 token deposits to the ROFL deposit address."""
 
     TRANSFER_EVENT_SIGNATURE = Web3.keccak(text="Transfer(address,address,uint256)").hex()
+
+    # Retry worker configuration
+    RETRY_LOOP_INTERVAL = 30  # seconds between retry loop iterations
+    RETRY_WARNING_INTERVAL = 10  # log warning every N retry attempts
+    MAX_RETRY_ATTEMPTS = 100  # mark as dead after this many retries
+    STALE_PROCESSING_TIMEOUT = 900  # seconds before processing tx is considered stale
+
+    # Errors that indicate the deposit was already successfully processed.
+    # These should be treated as success, not failure.
+    SUCCESS_EQUIVALENT_ERRORS = {"DepositAlreadyProcessed"}
 
     def __init__(self):
         self.settings = load_settings()
@@ -32,6 +43,7 @@ class DepositListener:
         self._is_running = False
         self._tasks: Set[asyncio.Task] = set()
         self._deposit_tasks: Set[asyncio.Task] = set()
+        self._retry_task: Optional[asyncio.Task] = None
         self._deposit_address: Optional[str] = None
         self._last_processed_blocks: Dict[int, int] = {}
         self._native_token_ids: Dict[int, str] = {}
@@ -122,6 +134,42 @@ class DepositListener:
         task.add_done_callback(self._deposit_tasks.discard)
         return task
 
+    def _decode_contract_error_name(self, exc: Exception) -> Optional[str]:
+        if isinstance(exc, TransactionRevertedError) and exc.error_name:
+            return exc.error_name
+        return None
+
+    def _is_success_equivalent_error(self, exc: Exception) -> bool:
+        """Check if error indicates deposit was already processed successfully."""
+        error_name = self._decode_contract_error_name(exc)
+        return error_name in self.SUCCESS_EQUIVALENT_ERRORS
+
+    def _is_terminal_deposit_error(self, exc: Exception) -> bool:
+        """Check if error is a terminal failure that should not be retried."""
+        error_name = self._decode_contract_error_name(exc)
+        if error_name is None:
+            return False
+        # Success-equivalent errors are not terminal failures
+        if error_name in self.SUCCESS_EQUIVALENT_ERRORS:
+            return False
+        # Other contract reverts are deterministic business-logic failures
+        return True
+
+    def _mark_processing_exception(
+        self, chain_id: int, tx_hash: str, exc: Exception, is_erc20: bool = False
+    ) -> None:
+        if self._is_success_equivalent_error(exc):
+            # Deposit was already processed - treat as success
+            deposit_type = "ERC20 deposit" if is_erc20 else "deposit"
+            logger.info(
+                f"{deposit_type} {tx_hash} on chain {chain_id} was already processed, marking complete"
+            )
+            self._block_state.complete_pending_tx(chain_id, tx_hash)
+        elif self._is_terminal_deposit_error(exc):
+            self._block_state.mark_dead(chain_id, tx_hash, str(exc))
+        else:
+            self._block_state.mark_failed(chain_id, tx_hash, str(exc))
+
     def _query_block_hash(self, chain_id: int, block_number: int) -> bytes:
         return self._rofl_adapter_contract.functions.getHash(chain_id, block_number).call()
 
@@ -202,22 +250,54 @@ class DepositListener:
         self._erc20_token_ids[cache_key] = token_id
         return token_id
 
-    async def _process_deposit(
+    async def _process_pending_tx(
         self,
         chain_id: int,
         tx_hash: str,
         from_address: str,
-        value: int,
+        value: Optional[int],
         block_number: int,
+        token_address: Optional[str],
     ):
         try:
             chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
-            logger.info(
-                f"Processing deposit on {chain_name}: "
-                f"tx={tx_hash}, from={from_address}, value={value} wei, block={block_number}"
-            )
+            is_erc20 = token_address is not None
+            existing = self._block_state.get_pending_txs(chain_id).get(tx_hash)
+            if existing and existing.status == "dead":
+                deposit_type = "ERC20 deposit" if is_erc20 else "deposit"
+                logger.info(
+                    "%s %s on chain %s is marked dead, skipping reprocessing",
+                    deposit_type,
+                    tx_hash,
+                    chain_id,
+                )
+                return
+            is_already_tracked = existing is not None
+            token_name = None
+            if token_address:
+                token_name = ERC20_TOKENS.get(chain_id, {}).get(token_address, token_address)
+            retry_info = " (retry)" if is_already_tracked else ""
+            if is_erc20:
+                value_text = "unknown" if value is None else str(value)
+                logger.info(
+                    f"Processing {token_name} deposit on {chain_name}{retry_info}: "
+                    f"tx={tx_hash}, from={from_address}, value={value_text}, block={block_number}"
+                )
+            else:
+                value_text = "unknown" if value is None else f"{value} wei"
+                logger.info(
+                    f"Processing deposit on {chain_name}{retry_info}: "
+                    f"tx={tx_hash}, from={from_address}, value={value_text}, block={block_number}"
+                )
 
-            self._block_state.add_pending_tx(chain_id, tx_hash, block_number)
+            if not is_already_tracked:
+                self._block_state.add_pending_tx(
+                    chain_id,
+                    tx_hash,
+                    block_number,
+                    token_address=token_address,
+                    from_address=from_address,
+                )
 
             web3 = self._get_chain_web3(chain_id)
             tx_receipt = await self._rate_limited_rpc_call(
@@ -231,16 +311,22 @@ class DepositListener:
 
             hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
             if not hash_stored:
-                logger.error(
-                    f"Block hash not available for block {block_number}, skipping deposit {tx_hash}"
-                )
+                error = f"Block hash not available for block {block_number}"
+                deposit_type = "ERC20 deposit" if is_erc20 else "deposit"
+                logger.error(f"{error}, skipping {deposit_type} {tx_hash}")
+                self._block_state.mark_failed(chain_id, tx_hash, error)
                 return
 
             proofs = await asyncio.to_thread(
                 self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
             )
 
-            token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
+            if is_erc20:
+                token_id = await asyncio.to_thread(
+                    self._get_erc20_token_id, chain_id, token_address
+                )
+            else:
+                token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
 
             payload = {
                 "user_address": from_address,
@@ -249,74 +335,151 @@ class DepositListener:
             }
 
             result = self.accounting_service.include_deposit(payload)
-            logger.info(
-                f"Deposit included successfully: submission_id={result.submission_id}, "
-                f"status={result.status}"
-            )
+            if is_erc20:
+                logger.info(
+                    f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
+                    f"status={result.status}"
+                )
+            else:
+                logger.info(
+                    f"Deposit included successfully: submission_id={result.submission_id}, "
+                    f"status={result.status}"
+                )
 
             self._block_state.complete_pending_tx(chain_id, tx_hash)
 
-        except Exception:
-            logger.exception("Failed to process deposit %s on chain %s", tx_hash, chain_id)
+        except Exception as e:
+            deposit_type = "ERC20 deposit" if is_erc20 else "deposit"
+            logger.exception("Failed to process %s %s on chain %s", deposit_type, tx_hash, chain_id)
+            self._mark_processing_exception(chain_id, tx_hash, e, is_erc20=is_erc20)
 
-    async def _process_erc20_deposit(
+    def _get_retry_delay(self, retry_count: int) -> float:
+        """Calculate delay before next retry using exponential backoff.
+
+        Backoff schedule:
+        - Attempt 1: immediate (already happened)
+        - Attempt 2: 30s delay
+        - Attempt 3: 60s delay
+        - Attempt 4: 2min delay
+        - Attempt 5: 5min delay
+        - Attempt 6+: 10min delay (cap)
+        """
+        delays = [0, 30, 60, 120, 300, 600]  # seconds
+        if retry_count >= len(delays):
+            return delays[-1]
+        return delays[retry_count]
+
+    def _recover_stale_processing_txs(
         self,
         chain_id: int,
-        tx_hash: str,
-        token_address: str,
-        from_address: str,
-        value: int,
-        block_number: int,
-    ):
-        try:
-            chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
-            token_name = ERC20_TOKENS.get(chain_id, {}).get(token_address, token_address)
-            logger.info(
-                f"Processing {token_name} deposit on {chain_name}: "
-                f"tx={tx_hash}, from={from_address}, value={value}, block={block_number}"
+        chain_name: str,
+        pending_txs: Dict[str, PendingTx],
+        now: float,
+        stale_processing_timeout: int,
+    ) -> None:
+        """Mark stale or inconsistent processing entries as failed."""
+        for tx_hash, pending_tx in pending_txs.items():
+            if pending_tx.status != "processing":
+                continue
+
+            if pending_tx.processing_started_at <= 0:
+                error = "processing state missing start timestamp"
+            elif now - pending_tx.processing_started_at >= stale_processing_timeout:
+                error = f"processing timeout after {stale_processing_timeout}s"
+            else:
+                continue
+
+            logger.warning(
+                "%s: Marking stale processing deposit %s as failed: %s",
+                chain_name,
+                tx_hash,
+                error,
             )
+            self._block_state.mark_failed(chain_id, tx_hash, error)
 
-            self._block_state.add_pending_tx(chain_id, tx_hash, block_number)
+    def _is_retry_ready(self, pending_tx: PendingTx, now: float) -> bool:
+        required_delay = self._get_retry_delay(pending_tx.retry_count)
+        return pending_tx.last_retry_at <= 0 or (now - pending_tx.last_retry_at >= required_delay)
 
-            web3 = self._get_chain_web3(chain_id)
-            tx_receipt = await self._rate_limited_rpc_call(
-                chain_id, web3.eth.get_transaction_receipt, tx_hash
-            )
+    async def _retry_pending_deposits(self):
+        """Background task that periodically retries failed deposits sequentially."""
+        logger.info("Starting deposit retry worker")
 
-            if tx_receipt["status"] != 1:
-                logger.warning(f"Transaction {tx_hash} failed on chain {chain_id}, skipping")
-                self._block_state.complete_pending_tx(chain_id, tx_hash)
-                return
+        while self._is_running:
+            try:
+                await asyncio.sleep(self.RETRY_LOOP_INTERVAL)
 
-            hash_stored = await self._wait_for_block_hash_stored(block_number, chain_id)
-            if not hash_stored:
-                logger.error(
-                    f"Block hash not available for block {block_number}, skipping ERC20 deposit {tx_hash}"
-                )
-                return
+                if not self._is_running:
+                    break
 
-            proofs = await asyncio.to_thread(
-                self._proof_generator.generate_deposit_proofs, chain_id, tx_hash
-            )
+                for chain_id in self.chain_rpc_urls.keys():
+                    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
+                    now = time.time()
+                    pending_txs = self._block_state.get_pending_txs(chain_id)
+                    self._recover_stale_processing_txs(
+                        chain_id, chain_name, pending_txs, now, self.STALE_PROCESSING_TIMEOUT
+                    )
 
-            token_id = await asyncio.to_thread(self._get_erc20_token_id, chain_id, token_address)
+                    failed_txs = self._block_state.get_failed_txs(chain_id)
+                    for tx_hash, pending_tx in failed_txs.items():
+                        if not self._is_running:
+                            break
 
-            payload = {
-                "user_address": from_address,
-                "token_id": token_id,
-                **proofs,
-            }
+                        if pending_tx.retry_count >= self.MAX_RETRY_ATTEMPTS:
+                            error = f"max retries exceeded ({pending_tx.retry_count}/{self.MAX_RETRY_ATTEMPTS})"
+                            logger.error(
+                                "%s: Marking deposit %s as dead-letter: %s",
+                                chain_name,
+                                tx_hash,
+                                error,
+                            )
+                            self._block_state.mark_dead(chain_id, tx_hash, error)
+                            continue
 
-            result = self.accounting_service.include_deposit(payload)
-            logger.info(
-                f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
-                f"status={result.status}"
-            )
+                        if not self._is_retry_ready(pending_tx, now):
+                            continue
 
-            self._block_state.complete_pending_tx(chain_id, tx_hash)
+                        if not pending_tx.from_address:
+                            error = "missing from_address"
+                            logger.warning(f"{chain_name}: Cannot retry deposit {tx_hash}, {error}")
+                            self._block_state.mark_dead(chain_id, tx_hash, error)
+                            continue
 
-        except Exception:
-            logger.exception("Failed to process ERC20 deposit %s on chain %s", tx_hash, chain_id)
+                        # Claim for retry and increment retry count.
+                        retry_count = self._block_state.claim_retry(chain_id, tx_hash)
+                        if retry_count is None:
+                            continue
+
+                        # Log warning periodically for stuck deposits
+                        if retry_count > 0 and retry_count % self.RETRY_WARNING_INTERVAL == 0:
+                            logger.warning(
+                                f"{chain_name}: Deposit {tx_hash} has been retried {retry_count} times. "
+                                f"This may indicate a persistent issue."
+                            )
+
+                        logger.info(
+                            f"{chain_name}: Retrying deposit {tx_hash} "
+                            f"(attempt {retry_count + 1}, block={pending_tx.block_number})"
+                        )
+
+                        # Process retry sequentially
+                        await self._process_pending_tx(
+                            chain_id=chain_id,
+                            tx_hash=tx_hash,
+                            from_address=pending_tx.from_address,
+                            value=None,
+                            block_number=pending_tx.block_number,
+                            token_address=pending_tx.token_address,
+                        )
+
+            except asyncio.CancelledError:
+                logger.info("Deposit retry worker cancelled")
+                break
+            except Exception:
+                logger.exception("Error in deposit retry worker")
+                await asyncio.sleep(self.RETRY_LOOP_INTERVAL)
+
+        logger.info("Deposit retry worker stopped")
 
     async def _monitor_chain(self, chain_id: int):
         chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
@@ -416,16 +579,19 @@ class DepositListener:
                                         and tx_to.lower() == deposit_address
                                         and tx.get("value", 0) > 0
                                     ):
+                                        if tx_hash in self._block_state.get_pending_txs(chain_id):
+                                            continue
                                         logger.info(
                                             f"{chain_name}: Native deposit in block {block_num}"
                                         )
                                         self._spawn_deposit_task(
-                                            self._process_deposit(
-                                                chain_id,
-                                                tx_hash,
-                                                tx["from"],
-                                                tx["value"],
-                                                block_num,
+                                            self._process_pending_tx(
+                                                chain_id=chain_id,
+                                                tx_hash=tx_hash,
+                                                from_address=tx["from"],
+                                                value=tx["value"],
+                                                block_number=block_num,
+                                                token_address=None,
                                             ),
                                             f"deposit-{tx_hash[:10]}",
                                         )
@@ -445,19 +611,24 @@ class DepositListener:
                                                 and "0x" + log["topics"][2].hex()[-40:]
                                                 == deposit_address
                                             ):
+                                                if tx_hash in self._block_state.get_pending_txs(
+                                                    chain_id
+                                                ):
+                                                    continue
                                                 logger.info(
                                                     f"{chain_name}: {erc20_tokens[log['address'].lower()]} deposit in block {block_num}"
                                                 )
                                                 self._spawn_deposit_task(
-                                                    self._process_erc20_deposit(
-                                                        chain_id,
-                                                        tx_hash,
-                                                        log["address"].lower(),
-                                                        "0x" + log["topics"][1].hex()[-40:],
-                                                        int.from_bytes(
+                                                    self._process_pending_tx(
+                                                        chain_id=chain_id,
+                                                        tx_hash=tx_hash,
+                                                        from_address="0x"
+                                                        + log["topics"][1].hex()[-40:],
+                                                        value=int.from_bytes(
                                                             log["data"], byteorder="big"
                                                         ),
-                                                        block_num,
+                                                        block_number=block_num,
+                                                        token_address=log["address"].lower(),
                                                     ),
                                                     f"erc20-deposit-{tx_hash[:10]}",
                                                 )
@@ -489,6 +660,9 @@ class DepositListener:
             task = asyncio.create_task(self._monitor_chain(chain_id))
             self._tasks.add(task)
 
+        # Start the retry worker for failed deposits
+        self._retry_task = asyncio.create_task(self._retry_pending_deposits())
+
     async def stop(self):
         if not self._is_running:
             return
@@ -498,6 +672,15 @@ class DepositListener:
 
         for task in self._tasks:
             task.cancel()
+
+        # Cancel retry task
+        if self._retry_task:
+            self._retry_task.cancel()
+            try:
+                await self._retry_task
+            except asyncio.CancelledError:
+                pass
+            self._retry_task = None
 
         if self._deposit_tasks:
             logger.info(

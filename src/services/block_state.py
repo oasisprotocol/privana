@@ -6,9 +6,12 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
+
+TxStatus = Literal["processing", "failed", "dead"]
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +26,40 @@ class PendingTx:
 
     tx_hash: str
     block_number: int
+    retry_count: int = 0
+    last_retry_at: float = 0.0  # timestamp
+    status: TxStatus = "processing"
+    last_error: Optional[str] = None
+    processing_started_at: float = 0.0  # timestamp
+    token_address: Optional[str] = None  # for ERC20 deposits
+    from_address: Optional[str] = None  # original sender
 
     def to_dict(self) -> dict:
-        return {"tx_hash": self.tx_hash, "block_number": self.block_number}
+        return {
+            "tx_hash": self.tx_hash,
+            "block_number": self.block_number,
+            "retry_count": self.retry_count,
+            "last_retry_at": self.last_retry_at,
+            "status": self.status,
+            "last_error": self.last_error,
+            "processing_started_at": self.processing_started_at,
+            "token_address": self.token_address,
+            "from_address": self.from_address,
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "PendingTx":
-        return cls(tx_hash=data["tx_hash"], block_number=data["block_number"])
+        return cls(
+            tx_hash=data["tx_hash"],
+            block_number=data.get("block_number", 0),
+            retry_count=data.get("retry_count", 0),
+            last_retry_at=data.get("last_retry_at", 0.0),
+            status=data.get("status", "processing"),
+            last_error=data.get("last_error"),
+            processing_started_at=data.get("processing_started_at", 0.0),
+            token_address=data.get("token_address"),
+            from_address=data.get("from_address"),
+        )
 
 
 @dataclass
@@ -49,7 +79,15 @@ class ChainState:
     def from_dict(cls, data: dict) -> "ChainState":
         pending_txs_data = data.get("pending_txs", {})
         if isinstance(pending_txs_data, list):
-            pending_txs = {tx: PendingTx(tx, 0) for tx in pending_txs_data}
+            # Legacy state format only stored tx hashes. Mark as failed so these
+            # entries are recoverable by the retry worker and won't stay
+            # indefinitely in "processing" with no start timestamp.
+            pending_txs = {
+                tx: PendingTx(
+                    tx_hash=tx, block_number=0, status="failed", last_error="legacy state"
+                )
+                for tx in pending_txs_data
+            }
         else:
             pending_txs = {k: PendingTx.from_dict(v) for k, v in pending_txs_data.items()}
         return cls(
@@ -86,8 +124,20 @@ class BlockStateManager:
     consistency even during crashes. Stored in ROFL persistent storage
     which survives upgrades and node restarts.
 
-    Thread-safe through a combination of threading lock (for in-process)
-    and file lock (for cross-process).
+    Thread Safety:
+        This class uses a threading lock for file writes and a file lock for
+        cross-process synchronization. Individual state mutations are NOT
+        fully atomic - the mutation and save are separate operations. This
+        is acceptable because:
+
+        1. Initial deposit tasks may run concurrently but typically operate
+           on distinct transactions
+        2. The retry worker processes failed transactions sequentially
+        3. State methods handle re-entry gracefully (add_pending_tx updates
+           existing entries, claim_retry validates status before claiming)
+
+        If concurrent mutation of the same transaction becomes needed,
+        wrap operations in _thread_lock.
     """
 
     def __init__(self, state_dir: Optional[str] = None):
@@ -115,7 +165,7 @@ class BlockStateManager:
                 for chain_id, chain_state in self._state.chains.items():
                     logger.info(
                         f"  Chain {chain_id}: last_block={chain_state.last_processed_block}, "
-                        f"pending_txs={len(chain_state.pending_tx_hashes)}"
+                        f"pending_txs={len(chain_state.pending_txs)}"
                     )
             except Exception as e:
                 logger.warning(f"Failed to load block state, starting fresh: {e}")
@@ -167,12 +217,64 @@ class BlockStateManager:
         self._state.chains[chain_id].last_processed_block = block_number
         self._save_state()
 
-    def add_pending_tx(self, chain_id: int, tx_hash: str, block_number: int = 0) -> None:
+    def add_pending_tx(
+        self,
+        chain_id: int,
+        tx_hash: str,
+        block_number: int = 0,
+        token_address: Optional[str] = None,
+        from_address: Optional[str] = None,
+    ) -> None:
         """Mark a transaction as pending processing."""
         if chain_id not in self._state.chains:
             self._state.chains[chain_id] = ChainState()
-        self._state.chains[chain_id].pending_txs[tx_hash] = PendingTx(tx_hash, block_number)
+        self._state.chains[chain_id].pending_txs[tx_hash] = PendingTx(
+            tx_hash=tx_hash,
+            block_number=block_number,
+            processing_started_at=time.time(),
+            token_address=token_address,
+            from_address=from_address,
+        )
         self._save_state()
+
+    def mark_failed(self, chain_id: int, tx_hash: str, error: str) -> None:
+        """Mark a pending transaction as failed so it is eligible for retries."""
+        chain_state = self._state.chains.get(chain_id)
+        if chain_state is None or tx_hash not in chain_state.pending_txs:
+            return
+        pending_tx = chain_state.pending_txs[tx_hash]
+        pending_tx.status = "failed"
+        pending_tx.last_error = error[:500]
+        pending_tx.processing_started_at = 0.0
+        self._save_state()
+
+    def mark_dead(self, chain_id: int, tx_hash: str, error: str) -> None:
+        """Mark a pending transaction as terminally failed (no more retries)."""
+        chain_state = self._state.chains.get(chain_id)
+        if chain_state is None or tx_hash not in chain_state.pending_txs:
+            return
+        pending_tx = chain_state.pending_txs[tx_hash]
+        pending_tx.status = "dead"
+        pending_tx.last_error = error[:500]
+        pending_tx.processing_started_at = 0.0
+        self._save_state()
+
+    def claim_retry(self, chain_id: int, tx_hash: str) -> Optional[int]:
+        """Claim a failed tx for retry, returning updated retry count."""
+        chain_state = self._state.chains.get(chain_id)
+        if chain_state is None or tx_hash not in chain_state.pending_txs:
+            return None
+        pending_tx = chain_state.pending_txs[tx_hash]
+        if pending_tx.status != "failed":
+            return None
+        now = time.time()
+        pending_tx.retry_count += 1
+        pending_tx.last_retry_at = now
+        pending_tx.status = "processing"
+        pending_tx.last_error = None
+        pending_tx.processing_started_at = now
+        self._save_state()
+        return pending_tx.retry_count
 
     def complete_pending_tx(self, chain_id: int, tx_hash: str) -> None:
         """Mark a transaction as completed."""
@@ -188,12 +290,23 @@ class BlockStateManager:
             return {}
         return chain_state.pending_txs.copy()
 
+    def get_failed_txs(self, chain_id: int) -> Dict[str, PendingTx]:
+        """Get only failed transactions that should be considered for retries."""
+        chain_state = self._state.chains.get(chain_id)
+        if chain_state is None:
+            return {}
+        return {k: v for k, v in chain_state.pending_txs.items() if v.status == "failed"}
+
     def get_earliest_pending_block(self, chain_id: int) -> Optional[int]:
         """Get the earliest block number among pending transactions."""
         chain_state = self._state.chains.get(chain_id)
         if chain_state is None or not chain_state.pending_txs:
             return None
-        blocks = [tx.block_number for tx in chain_state.pending_txs.values() if tx.block_number > 0]
+        blocks = [
+            tx.block_number
+            for tx in chain_state.pending_txs.values()
+            if tx.block_number > 0 and tx.status != "dead"
+        ]
         return min(blocks) if blocks else None
 
     def get_backfill_start_block(
