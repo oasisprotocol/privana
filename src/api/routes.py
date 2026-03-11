@@ -1,6 +1,5 @@
 """FastAPI routes exposing the Accounting module flows."""
 
-import asyncio
 import logging
 from typing import Dict, Optional
 
@@ -76,8 +75,8 @@ async def create_deposit_quote(payload: DepositQuoteRequest) -> DepositQuoteResp
     """Return deposit destination details and transaction data for a user/token/amount."""
 
     try:
-        quote: Dict = await asyncio.to_thread(
-            _service.deposit_quote, payload.user_address, payload.token_id, payload.amount
+        quote: Dict = await _service.deposit_quote(
+            payload.user_address, payload.token_id, payload.amount
         )
         return DepositQuoteResponse(**quote)
     except ValueError as exc:
@@ -89,7 +88,7 @@ async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositRespo
     """Submit a deposit inclusion transaction (automatically detects native/ERC20)."""
 
     try:
-        result = await asyncio.to_thread(_service.include_deposit, payload.model_dump())
+        result = await _service.include_deposit(payload.model_dump())
         return IncludeDepositResponse(submission_id=result.submission_id, status=result.status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -106,7 +105,7 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
     """Lock user funds for a service with a signed authorization."""
 
     try:
-        submission = await asyncio.to_thread(_service.lock_funds, payload.model_dump())
+        submission = await _service.lock_funds(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -123,7 +122,7 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
     """Modify an existing lock by adding funds and/or extending the expiry."""
 
     try:
-        submission = await asyncio.to_thread(_service.modify_lock, payload.model_dump())
+        submission = await _service.modify_lock(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -140,7 +139,7 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
     """Transfer funds between accounting balances using a user signature."""
 
     try:
-        submission = await asyncio.to_thread(_service.transfer_funds, payload.model_dump())
+        submission = await _service.transfer_funds(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -157,7 +156,7 @@ async def get_transfer_nonce(user_address: str) -> TransferNonceResponse:
     """Get the current transfer nonce for a user."""
 
     try:
-        result = await asyncio.to_thread(_service.get_transfer_nonce, user_address)
+        result = await _service.get_transfer_nonce(user_address)
         return TransferNonceResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -173,7 +172,7 @@ async def transfer_locked_funds(
     """Transfer locked funds based on a casino service signature."""
 
     try:
-        submission = await asyncio.to_thread(_service.transfer_locked_funds, payload.model_dump())
+        submission = await _service.transfer_locked_funds(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -190,7 +189,7 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
     """Unlock funds when lock expiry has passed."""
 
     try:
-        submission = await asyncio.to_thread(_service.unlock_funds, payload.model_dump())
+        submission = await _service.unlock_funds(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -207,7 +206,7 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
     """Request a withdrawal by validating the user's signature. Must be resolved in a later block."""
 
     try:
-        submission = await asyncio.to_thread(_service.request_withdrawal, payload.model_dump())
+        submission = await _service.request_withdrawal(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -224,7 +223,7 @@ async def get_pending_withdrawals(user_address: str) -> PendingWithdrawalsRespon
     """Get all pending (unresolved) withdrawal requests for a user."""
 
     try:
-        result = await asyncio.to_thread(_service.get_pending_withdrawals, user_address)
+        result = await _service.get_pending_withdrawals(user_address)
         return PendingWithdrawalsResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -240,7 +239,7 @@ async def get_withdrawal_nonce(user_address: str) -> WithdrawalNonceResponse:
     """Get the current withdrawal nonce for a user."""
 
     try:
-        result = await asyncio.to_thread(_service.get_withdrawal_nonce, user_address)
+        result = await _service.get_withdrawal_nonce(user_address)
         return WithdrawalNonceResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -254,7 +253,7 @@ async def get_withdrawal_info(index: int) -> WithdrawalInfoResponse:
     """Get information about a specific withdrawal request."""
 
     try:
-        result = await asyncio.to_thread(_service.get_withdrawal, index)
+        result = await _service.get_withdrawal(index)
         return WithdrawalInfoResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -274,8 +273,7 @@ async def get_locked_funds(
 ) -> LockedFundsResponse:
     """Get locked funds for a user, optionally filtered by service address."""
     try:
-        result = await asyncio.to_thread(
-            _service.get_locked_funds,
+        result = await _service.get_locked_funds(
             user_address,
             service_address,
             siwe_token,
@@ -301,7 +299,7 @@ async def get_balance(
 ) -> BalanceResponse:
     """Get the user's balance for a specific token from the contract."""
     try:
-        result = await asyncio.to_thread(_service.get_balance, user_address, token_id, siwe_token)
+        result = await _service.get_balance(user_address, token_id, siwe_token)
         return BalanceResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -319,9 +317,7 @@ async def unlock_all_expired_locks(
     """Unlock all expired locks for a user."""
 
     try:
-        submission = await asyncio.to_thread(
-            _service.unlock_all_expired_locks, payload.model_dump()
-        )
+        submission = await _service.unlock_all_expired_locks(payload.model_dump())
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -343,7 +339,7 @@ async def get_expired_locks(
 ) -> ExpiredLocksResponse:
     """Get all expired locks for a user."""
     try:
-        result = await asyncio.to_thread(_service.get_expired_locks, user_address, siwe_token)
+        result = await _service.get_expired_locks(user_address, siwe_token)
         return ExpiredLocksResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -364,8 +360,8 @@ async def get_batch_balances(
 ) -> BatchBalancesResponse:
     """Get balances for multiple tokens for a user."""
     try:
-        result = await asyncio.to_thread(
-            _service.get_batch_balances, payload.user_address, payload.token_ids, siwe_token
+        result = await _service.get_batch_balances(
+            payload.user_address, payload.token_ids, siwe_token
         )
         return BatchBalancesResponse(**result)
     except ContractLogicError as exc:
@@ -388,9 +384,7 @@ async def get_total_locked_balance(
 ) -> TotalLockedBalanceResponse:
     """Get total locked balance for a specific token across all locks."""
     try:
-        result = await asyncio.to_thread(
-            _service.get_total_locked_balance, user_address, token_id, siwe_token
-        )
+        result = await _service.get_total_locked_balance(user_address, token_id, siwe_token)
         return TotalLockedBalanceResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -407,7 +401,7 @@ async def get_total_locked_balance(
 async def get_siwe_domain() -> SiweDomainResponse:
     """Fetch the SIWE domain bound to the contract."""
     try:
-        result = await asyncio.to_thread(_service.get_siwe_domain)
+        result = await _service.get_siwe_domain()
         return SiweDomainResponse(**result)
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get SIWE domain")
@@ -418,9 +412,7 @@ async def get_siwe_domain() -> SiweDomainResponse:
 async def siwe_login(payload: SiweLoginRequest) -> SiweLoginResponse:
     """Perform SIWE login and return an opaque auth token for private reads."""
     try:
-        result = await asyncio.to_thread(
-            _service.siwe_login, payload.siwe_message, payload.signature
-        )
+        result = await _service.siwe_login(payload.siwe_message, payload.signature)
         return SiweLoginResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=400, detail="SIWE login rejected") from exc
@@ -436,7 +428,7 @@ async def get_token_info(token_id: str) -> TokenInfoResponse:
     """Get information about a registered token."""
 
     try:
-        result = await asyncio.to_thread(_service.get_token_info, token_id)
+        result = await _service.get_token_info(token_id)
         return TokenInfoResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

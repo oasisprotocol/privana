@@ -20,15 +20,21 @@ class TestWithdrawalProcessor:
     def mock_accounting_service(self):
         """Create a mock accounting service."""
         service = MagicMock()
-        service.get_all_pending_withdrawals = MagicMock(
+        service.get_all_pending_withdrawals = AsyncMock(
             return_value={
                 "pending": [],
                 "current_block": 100,
             }
         )
-        service.resolve_withdrawal = MagicMock(return_value=MagicMock(submission_id="test-123"))
-        service._send_raw_transaction = MagicMock(return_value="0x" + "ab" * 32)
-        service._get_reader_contract = MagicMock()
+        service.resolve_withdrawal = AsyncMock(return_value=MagicMock(submission_id="test-123"))
+        service._send_raw_transaction = AsyncMock(return_value="0x" + "ab" * 32)
+        # Return a mock contract with async call methods
+        mock_contract = MagicMock()
+        mock_contract.functions.withdrawals.return_value.call = AsyncMock()
+        mock_contract.functions.resolveWithdrawal.return_value.call = AsyncMock()
+        mock_contract.functions.withdrawalCount.return_value.call = AsyncMock()
+        service._get_reader_contract = MagicMock(return_value=mock_contract)
+        service._get_token_context = AsyncMock()
         return service
 
     @pytest.fixture
@@ -37,19 +43,33 @@ class TestWithdrawalProcessor:
         with patch("src.services.withdrawal_processor.load_settings") as mock_settings:
             mock_settings.return_value = MagicMock(
                 withdrawal_poll_interval=1,
+                withdrawal_resolution_timeout=1,
                 sapphire_rpc_url="https://testnet.sapphire.oasis.io",
                 accounting_contract_address="0x" + "ab" * 20,
+                chain_rpc_urls={TEST_CHAIN_ID: "https://example.com"},
             )
             with patch(
                 "src.services.withdrawal_processor.AccountingContractService",
                 return_value=mock_accounting_service,
             ):
-                with patch("src.services.withdrawal_processor.Web3") as mock_web3:
-                    mock_web3.return_value.eth.block_number = 100
-                    mock_web3.to_checksum_address.return_value = "0x" + "Ab" * 20
-                    proc = WithdrawalProcessor()
-                    proc.accounting_service = mock_accounting_service
-                    return proc
+                with patch("src.services.withdrawal_processor.AsyncWeb3") as mock_async_web3:
+                    # Mock the AsyncWeb3 instance
+                    mock_w3_instance = MagicMock()
+                    mock_contract = MagicMock()
+                    mock_contract.functions.evmAddress.return_value.call = AsyncMock(
+                        return_value=TEST_USER_ADDRESS
+                    )
+                    mock_contract.functions.nonces.return_value.call = AsyncMock(return_value=0)
+                    mock_w3_instance.eth.contract.return_value = mock_contract
+                    mock_async_web3.return_value = mock_w3_instance
+
+                    with patch("src.services.withdrawal_processor.Web3") as mock_web3:
+                        mock_web3.to_checksum_address.return_value = "0x" + "Ab" * 20
+
+                        proc = WithdrawalProcessor()
+                        proc.accounting_service = mock_accounting_service
+                        proc._contract = mock_contract
+                        return proc
 
     @pytest.mark.asyncio
     async def test_get_pending_empty(self, processor):
@@ -227,7 +247,7 @@ class TestWithdrawalProcessor:
 
         withdrawal = {"index": 0, "chain_id": TEST_CHAIN_ID}
 
-        # Patch asyncio.sleep to avoid waiting 60 seconds
+        # Patch asyncio.sleep to avoid waiting
         with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
             result = await processor._resolve_and_broadcast(withdrawal)
 
@@ -284,12 +304,12 @@ class TestWithdrawalProcessor:
         processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
 
         # Contract nonce <= chain nonce means nothing missing
-        processor._contract.functions.nonces.return_value.call.return_value = 5
-        processor._get_evm_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=5)
+        processor._evm_address = TEST_USER_ADDRESS
 
         mock_dest_web3 = MagicMock()
-        mock_dest_web3.eth.get_transaction_count = MagicMock(return_value=5)
-        processor._get_destination_web3 = MagicMock(return_value=mock_dest_web3)
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=5)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
 
         await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
 
@@ -302,12 +322,12 @@ class TestWithdrawalProcessor:
         processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
 
         # Contract has nonce 2, chain has nonce 1 -> 1 missing
-        processor._contract.functions.nonces.return_value.call.return_value = 2
-        processor._get_evm_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=2)
+        processor._evm_address = TEST_USER_ADDRESS
 
         mock_dest_web3 = MagicMock()
-        mock_dest_web3.eth.get_transaction_count = MagicMock(return_value=1)
-        processor._get_destination_web3 = MagicMock(return_value=mock_dest_web3)
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=1)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
 
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
@@ -325,7 +345,7 @@ class TestWithdrawalProcessor:
         # Mock token context
         mock_context = MagicMock()
         mock_context.chain_id = TEST_CHAIN_ID
-        processor.accounting_service._get_token_context = MagicMock(return_value=mock_context)
+        processor.accounting_service._get_token_context = AsyncMock(return_value=mock_context)
 
         processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
 
@@ -338,12 +358,12 @@ class TestWithdrawalProcessor:
         """Test catch-up handles 'nonce too low' gracefully."""
         processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
 
-        processor._contract.functions.nonces.return_value.call.return_value = 2
-        processor._get_evm_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=2)
+        processor._evm_address = TEST_USER_ADDRESS
 
         mock_dest_web3 = MagicMock()
-        mock_dest_web3.eth.get_transaction_count = MagicMock(return_value=1)
-        processor._get_destination_web3 = MagicMock(return_value=mock_dest_web3)
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=1)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
 
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
@@ -359,7 +379,7 @@ class TestWithdrawalProcessor:
 
         mock_context = MagicMock()
         mock_context.chain_id = TEST_CHAIN_ID
-        processor.accounting_service._get_token_context = MagicMock(return_value=mock_context)
+        processor.accounting_service._get_token_context = AsyncMock(return_value=mock_context)
 
         # Simulate already broadcast
         processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")

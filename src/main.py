@@ -13,6 +13,11 @@ from src.config import load_settings
 
 logger = logging.getLogger(__name__)
 
+# Cache landing page HTML at module load to avoid disk I/O per request
+_LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read_text(
+    encoding="utf-8"
+)
+
 settings = load_settings()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -68,8 +73,7 @@ app.include_router(router)
 @app.get("/", response_class=HTMLResponse)
 async def landing_page():
     """Landing page for the Accounting Module API."""
-    template_path = Path(__file__).parent / "templates" / "landing.html"
-    return template_path.read_text(encoding="utf-8")
+    return _LANDING_HTML
 
 
 if __name__ == "__main__":

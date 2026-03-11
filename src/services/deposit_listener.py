@@ -122,9 +122,9 @@ class DepositListener:
                         continue
                 raise
 
-    def _get_deposit_address(self) -> str:
+    async def _get_deposit_address(self) -> str:
         if self._deposit_address is None:
-            self._deposit_address = self.accounting_service._get_deposit_address()
+            self._deposit_address = await self.accounting_service._get_deposit_address()
             logger.info(f"Monitoring deposit address: {self._deposit_address}")
         return self._deposit_address
 
@@ -217,30 +217,30 @@ class DepositListener:
         logger.error(f"Timeout waiting for block hash for block {block_number} on {chain_name}")
         return False
 
-    def _get_native_token_id(self, chain_id: int) -> str:
+    async def _get_native_token_id(self, chain_id: int) -> str:
         if chain_id in self._native_token_ids:
             return self._native_token_ids[chain_id]
 
         contract = self.accounting_service._get_reader_contract()
-        token_data = contract.functions.encodeEVMNativeTokenData(chain_id).call()
+        token_data = await contract.functions.encodeEVMNativeTokenData(chain_id).call()
         token_info = (0, token_data)
-        token_id = Web3.to_hex(contract.functions.getTokenId(token_info).call())
+        token_id = Web3.to_hex(await contract.functions.getTokenId(token_info).call())
 
         self._native_token_ids[chain_id] = token_id
         return token_id
 
-    def _get_erc20_token_id(self, chain_id: int, token_address: str) -> str:
+    async def _get_erc20_token_id(self, chain_id: int, token_address: str) -> str:
         cache_key = (chain_id, token_address.lower())
         if cache_key in self._erc20_token_ids:
             return self._erc20_token_ids[cache_key]
 
         contract = self.accounting_service._get_reader_contract()
         checksummed_address = Web3.to_checksum_address(token_address)
-        token_data = contract.functions.encodeEVMErc20TokenData(
+        token_data = await contract.functions.encodeEVMErc20TokenData(
             chain_id, checksummed_address
         ).call()
         token_info = (1, token_data)
-        token_id = Web3.to_hex(contract.functions.getTokenId(token_info).call())
+        token_id = Web3.to_hex(await contract.functions.getTokenId(token_info).call())
 
         chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
         logger.info(
@@ -322,11 +322,9 @@ class DepositListener:
             )
 
             if is_erc20:
-                token_id = await asyncio.to_thread(
-                    self._get_erc20_token_id, chain_id, token_address
-                )
+                token_id = await self._get_erc20_token_id(chain_id, token_address)
             else:
-                token_id = await asyncio.to_thread(self._get_native_token_id, chain_id)
+                token_id = await self._get_native_token_id(chain_id)
 
             payload = {
                 "user_address": from_address,
@@ -334,7 +332,7 @@ class DepositListener:
                 **proofs,
             }
 
-            result = self.accounting_service.include_deposit(payload)
+            result = await self.accounting_service.include_deposit(payload)
             if is_erc20:
                 logger.info(
                     f"{token_name} deposit included successfully: submission_id={result.submission_id}, "
@@ -503,7 +501,7 @@ class DepositListener:
 
                 if deposit_address is None:
                     try:
-                        deposit_address = await asyncio.to_thread(self._get_deposit_address)
+                        deposit_address = await self._get_deposit_address()
                         deposit_address = deposit_address.lower()
                         logger.info(
                             f"Retrieved deposit address for {chain_name}: {deposit_address}"

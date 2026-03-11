@@ -7,7 +7,8 @@ from typing import Dict, List, Optional, Set
 
 from eth_abi import decode
 from hexbytes import HexBytes
-from web3 import Web3
+from web3 import AsyncWeb3, Web3
+from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
 from src.config import CHAIN_NAMES, load_settings
@@ -47,22 +48,30 @@ class WithdrawalProcessor:
     def __init__(self):
         self.settings = load_settings()
         self.accounting_service = AccountingContractService(self.settings)
-        self._sapphire_web3 = Web3(Web3.HTTPProvider(self.settings.sapphire_rpc_url))
         self._contract_address = Web3.to_checksum_address(self.settings.accounting_contract_address)
+
+        self._sapphire_web3 = AsyncWeb3(AsyncHTTPProvider(self.settings.sapphire_rpc_url))
         self._contract = self._sapphire_web3.eth.contract(
             address=self._contract_address,
             abi=self.accounting_service.contract.abi,
         )
+
         self._is_running = False
         self._task: Optional[asyncio.Task] = None
         # Track highest processed withdrawal index per chain (for sequential processing)
         self._chain_high_water_mark: Dict[int, int] = {}
         self._last_rpc_call: float = 0
-        self._destination_web3: Dict[int, Web3] = {}
+        self._destination_web3: Dict[int, AsyncWeb3] = {}
         self._evm_address: Optional[str] = None
 
-    async def _rate_limited_call(self, func, *args, **kwargs):
-        """Execute an RPC call with rate limiting and retries."""
+    async def _rate_limited_call(self, coro_factory):
+        """Execute an async call with rate limiting and retries.
+
+        Args:
+            coro_factory: A callable that returns a coroutine. Must be a callable
+                          (not a pre-created coroutine) to allow retry logic to
+                          create fresh coroutines on each attempt.
+        """
         now = time.time()
         time_since_last = now - self._last_rpc_call
         if time_since_last < _MIN_RPC_INTERVAL:
@@ -74,7 +83,7 @@ class WithdrawalProcessor:
         for attempt in range(max_retries):
             try:
                 self._last_rpc_call = time.time()
-                return await asyncio.to_thread(func, *args, **kwargs)
+                return await coro_factory()
             except Exception as e:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
@@ -83,19 +92,21 @@ class WithdrawalProcessor:
                     continue
                 raise
 
-    def _get_destination_web3(self, chain_id: int) -> Web3:
-        """Get or create Web3 instance for a destination chain."""
+    def _get_destination_web3(self, chain_id: int) -> AsyncWeb3:
+        """Get or create AsyncWeb3 instance for a destination chain."""
         if chain_id not in self._destination_web3:
             rpc_url = self.settings.chain_rpc_urls.get(chain_id)
             if not rpc_url:
                 raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._destination_web3[chain_id] = Web3(Web3.HTTPProvider(rpc_url))
+            self._destination_web3[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
         return self._destination_web3[chain_id]
 
-    def _get_evm_address(self) -> str:
+    async def _get_evm_address(self) -> str:
         """Get the EVM address used for withdrawals."""
         if self._evm_address is None:
-            self._evm_address = self._contract.functions.evmAddress().call()
+            self._evm_address = await self._rate_limited_call(
+                lambda: self._contract.functions.evmAddress().call()
+            )
         return self._evm_address
 
     async def _catch_up_missing_broadcasts(self, chain_ids: Optional[List[int]] = None):
@@ -117,14 +128,14 @@ class WithdrawalProcessor:
 
                 # Get contract's next nonce (what it will use next)
                 contract_next_nonce = await self._rate_limited_call(
-                    self._contract.functions.nonces(chain_id).call
+                    lambda: self._contract.functions.nonces(chain_id).call()
                 )
 
                 # Get current nonce on destination chain (what's been broadcast)
-                evm_address = await self._rate_limited_call(self._get_evm_address)
+                evm_address = await self._get_evm_address()
                 dest_web3 = self._get_destination_web3(chain_id)
                 chain_current_nonce = await self._rate_limited_call(
-                    dest_web3.eth.get_transaction_count, evm_address
+                    lambda: dest_web3.eth.get_transaction_count(evm_address)
                 )
 
                 if contract_next_nonce <= chain_current_nonce:
@@ -159,7 +170,7 @@ class WithdrawalProcessor:
         # Get total withdrawal count from contract
         try:
             total_withdrawals = await self._rate_limited_call(
-                contract_reader.functions.withdrawalCount().call
+                lambda: contract_reader.functions.withdrawalCount().call()
             )
         except Exception as e:
             logger.error(f"{chain_name}: failed to get withdrawal count: {e}")
@@ -176,7 +187,7 @@ class WithdrawalProcessor:
 
             try:
                 result = await self._rate_limited_call(
-                    contract_reader.functions.withdrawals(index).call
+                    lambda idx=index: contract_reader.functions.withdrawals(idx).call()
                 )
             except Exception as exc:
                 logger.warning(f"Withdrawal #{index}: failed to read, skipping: {exc}")
@@ -200,7 +211,7 @@ class WithdrawalProcessor:
             # Get chain_id for this withdrawal
             token_id_bytes = result[3]
             try:
-                context = self.accounting_service._get_token_context(HexBytes(token_id_bytes))
+                context = await self.accounting_service._get_token_context(HexBytes(token_id_bytes))
                 withdrawal_chain_id = context.chain_id
             except Exception as e:
                 logger.warning(f"Withdrawal #{index}: failed to get token context - {e}")
@@ -212,13 +223,11 @@ class WithdrawalProcessor:
             # Found a missing one - broadcast it
             logger.info(f"Withdrawal #{index}: broadcasting missing nonce {nonce}")
             signed_tx = await self._rate_limited_call(
-                contract_reader.functions.resolveWithdrawal(index).call
+                lambda idx=index: contract_reader.functions.resolveWithdrawal(idx).call()
             )
             try:
                 tx_hash = await self._rate_limited_call(
-                    self.accounting_service._send_raw_transaction,
-                    chain_id,
-                    signed_tx,
+                    lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
                 )
                 logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
                 found_nonces.add(nonce)
@@ -243,7 +252,7 @@ class WithdrawalProcessor:
         """Get pending withdrawals grouped by chain for ordered processing."""
         try:
             result = await self._rate_limited_call(
-                self.accounting_service.get_all_pending_withdrawals,
+                lambda: self.accounting_service.get_all_pending_withdrawals()
             )
 
             pending = result.get("pending", [])
@@ -301,7 +310,7 @@ class WithdrawalProcessor:
             # Step 1: Check if already resolved
             contract_reader = self.accounting_service._get_reader_contract()
             withdrawal_data = await self._rate_limited_call(
-                contract_reader.functions.withdrawals(index).call
+                lambda: contract_reader.functions.withdrawals(index).call()
             )
             is_resolved = withdrawal_data[4]
 
@@ -309,8 +318,7 @@ class WithdrawalProcessor:
             if not is_resolved:
                 logger.info(f"Withdrawal #{index}: submitting resolveWithdrawal")
                 result = await self._rate_limited_call(
-                    self.accounting_service.resolve_withdrawal,
-                    index,
+                    lambda: self.accounting_service.resolve_withdrawal(index)
                 )
                 logger.info(f"Withdrawal #{index}: submitted ({result.submission_id})")
 
@@ -318,7 +326,7 @@ class WithdrawalProcessor:
                 for _ in range(self.settings.withdrawal_resolution_timeout):
                     await asyncio.sleep(1)
                     withdrawal_data = await self._rate_limited_call(
-                        contract_reader.functions.withdrawals(index).call
+                        lambda: contract_reader.functions.withdrawals(index).call()
                     )
                     if withdrawal_data[4]:  # resolved
                         is_resolved = True
@@ -334,15 +342,13 @@ class WithdrawalProcessor:
             # Step 3: Get signedTx by calling resolveWithdrawal (idempotent)
             logger.info(f"Withdrawal #{index}: getting signed transaction")
             signed_tx = await self._rate_limited_call(
-                contract_reader.functions.resolveWithdrawal(index).call
+                lambda: contract_reader.functions.resolveWithdrawal(index).call()
             )
 
             # Step 4: Broadcast to destination chain
             logger.info(f"Withdrawal #{index}: broadcasting to {chain_name}")
             tx_hash = await self._rate_limited_call(
-                self.accounting_service._send_raw_transaction,
-                chain_id,
-                signed_tx,
+                lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
             )
             logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
 
