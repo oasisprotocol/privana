@@ -19,7 +19,7 @@
         "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
         "@nomicfoundation/hardhat-toolbox": "^4.0.0",
         "@nomicfoundation/hardhat-verify": "^2.0.2",
-        "@oasisprotocol/sapphire-contracts": "^0.2.14",
+        "@oasisprotocol/sapphire-contracts": "^0.2.15",
         "@oasisprotocol/sapphire-hardhat": "^2.22.2",
         "@oasisprotocol/sapphire-paratime": "^2.3.0",
         "@openzeppelin/hardhat-upgrades": "^3.0.0",
@@ -290,7 +290,7 @@
 
     "@oasisprotocol/deoxysii": ["@oasisprotocol/deoxysii@0.0.6", "", {}, ""],
 
-    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.14", "", { "dependencies": { "@openzeppelin/contracts": "^5.0.2" } }, ""],
+    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.15", "", { "dependencies": { "@openzeppelin/contracts": "^5.0.2" } }, "sha512-4R0G46TYljkdwXLxWqXEiPfRKab9QK1gXrzgx9wjJFxlWh1uyMNkSGdKmuBmD3cWMgUW0wRLI0wJfQYgZTv/Yg=="],
 
     "@oasisprotocol/sapphire-hardhat": ["@oasisprotocol/sapphire-hardhat@2.22.2", "", { "dependencies": { "@oasisprotocol/sapphire-paratime": "^2.0.1" }, "peerDependencies": { "hardhat": "2.x" } }, ""],
 
