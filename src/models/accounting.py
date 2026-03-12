@@ -68,7 +68,7 @@ class DepositQuoteResponse(BaseModel):
 
     user_address: str
     token_id: str
-    amount: int
+    amount: str
     deposit_address: str
     transaction: TransactionData
     instructions: str
@@ -141,6 +141,10 @@ class ModifyLockRequest(BaseModel):
     new_expiry: int = Field(..., gt=0)
     nonce: int = Field(..., ge=0)
     signature: str
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
 
     @field_validator("signature")
     def _normalise_ml_signature(cls, value: str) -> str:
@@ -312,7 +316,7 @@ class LockInfo(BaseModel):
     user_address: str
     service_address: str
     token_id: str
-    amount: int
+    amount: str
     expiry: int
     is_expired: bool
 
@@ -323,7 +327,7 @@ class LockedFundsResponse(BaseModel):
     user_address: str
     service_address: Optional[str] = None
     locks: list[LockInfo]
-    total_locked: int
+    total_locked: str
 
 
 class ExpiredLocksResponse(BaseModel):
