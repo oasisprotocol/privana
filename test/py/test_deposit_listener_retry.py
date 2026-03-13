@@ -303,10 +303,12 @@ async def test_process_deposit_completes_when_already_processed(listener):
     listener._proof_generator.generate_deposit_proofs = MagicMock(
         return_value={"rlp_block_header": "0x01"}
     )
-    listener._get_native_token_id = MagicMock(return_value="0x" + "11" * 32)
+    listener._get_native_token_id = AsyncMock(return_value="0x" + "11" * 32)
     listener.accounting_service = MagicMock()
-    listener.accounting_service.include_deposit.side_effect = TransactionRevertedError(
-        "Transaction reverted: DepositAlreadyProcessed", error_name="DepositAlreadyProcessed"
+    listener.accounting_service.include_deposit = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: DepositAlreadyProcessed", error_name="DepositAlreadyProcessed"
+        )
     )
 
     with patch(
@@ -340,10 +342,12 @@ async def test_process_deposit_marks_dead_for_terminal_contract_error(listener):
     listener._proof_generator.generate_deposit_proofs = MagicMock(
         return_value={"rlp_block_header": "0x01"}
     )
-    listener._get_native_token_id = MagicMock(return_value="0x" + "11" * 32)
+    listener._get_native_token_id = AsyncMock(return_value="0x" + "11" * 32)
     listener.accounting_service = MagicMock()
-    listener.accounting_service.include_deposit.side_effect = TransactionRevertedError(
-        "Transaction reverted: InvalidProof", error_name="InvalidProof"
+    listener.accounting_service.include_deposit = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: InvalidProof", error_name="InvalidProof"
+        )
     )
 
     with patch(

@@ -5,7 +5,7 @@ import logging
 
 import cbor2
 from eth_account import Account
-from oasis_rofl_client import RoflClient
+from oasis_rofl_client import AsyncRoflClient
 from web3.types import TxParams
 
 from src.abi.accounting import get_error_name
@@ -66,7 +66,7 @@ class RoflAppdClient:
 
     This class provides a singleton interface to the ROFL app daemon for key
     management and transaction signing operations. It uses the official
-    oasis-rofl-client library.
+    oasis-rofl-client library with async support.
     """
 
     _instance = None
@@ -79,10 +79,10 @@ class RoflAppdClient:
         """
         if cls._instance is None:
             cls._instance = super(RoflAppdClient, cls).__new__(cls)
-            cls._instance._client = RoflClient()
+            cls._instance._client = AsyncRoflClient()
         return cls._instance
 
-    def get_keypair(self, key_id: str = ACCOUNTING_SERVICE_KEY):
+    async def get_keypair(self, key_id: str = ACCOUNTING_SERVICE_KEY):
         """Generate a secp256k1 keypair using ROFL's key management.
 
         Args:
@@ -100,7 +100,7 @@ class RoflAppdClient:
         try:
             logger.info(f"Generating keypair with ID: {key_id}")
 
-            key = self._client.generate_key(key_id)
+            key = await self._client.generate_key(key_id)
 
             if not key:
                 raise ValueError("Failed to generate key")
@@ -118,7 +118,7 @@ class RoflAppdClient:
             logger.error(f"Error generating keypair: {e}")
             raise
 
-    def submit_tx(self, tx: TxParams, encrypt: bool = False) -> str:
+    async def submit_tx(self, tx: TxParams, encrypt: bool = False) -> str:
         """Submit a transaction to the ROFL daemon for signing and relay.
 
         Args:
@@ -133,8 +133,6 @@ class RoflAppdClient:
             TransactionRevertedError: If the on-chain transaction reverted
             Exception: If submission fails
         """
-        from oasis_rofl_client.common import ENDPOINT_TX_SIGN_SUBMIT, get_tx_payload
-
         if "to" not in tx or "data" not in tx:
             raise ValueError("Transaction must include 'to' and 'data' fields")
 
@@ -145,52 +143,42 @@ class RoflAppdClient:
         )
 
         try:
-            payload = get_tx_payload(tx, encrypt)
-            response = self._client._appd_request("POST", ENDPOINT_TX_SIGN_SUBMIT, payload)
-            result = response.json()
-            submission_id = result.get("data")
-
-            if not submission_id:
-                raise ValueError(f"Unexpected ROFL response payload: {result}")
-
-            # Decode CBOR to check for transaction failure
+            # AsyncRoflClient.sign_submit returns decoded CBOR directly
             try:
-                decoded = cbor2.loads(bytes.fromhex(submission_id))
-                if isinstance(decoded, dict):
-                    if "fail" in decoded:
-                        fail_info = decoded["fail"]
-                        code = fail_info.get("code")
-                        module = fail_info.get("module")
-                        raw_message = fail_info.get("message")
+                result = await self._client.sign_submit(tx, encrypt)
+            except cbor2.CBORDecodeError as e:
+                raise ValueError(f"ROFL appd returned invalid CBOR response: {e}") from e
 
-                        # Decode the revert reason from the message
-                        error_name = _decode_revert_reason(raw_message)
+            if "fail" in result:
+                fail_info = result["fail"]
+                code = fail_info.get("code")
+                module = fail_info.get("module")
+                raw_message = fail_info.get("message")
 
-                        error_msg = f"Transaction reverted: {error_name}"
-                        if module:
-                            error_msg += f" (module: {module}, code: {code})"
+                # Decode the revert reason from the message
+                error_name = _decode_revert_reason(raw_message)
 
-                        logger.error(
-                            "Transaction reverted on-chain: error=%s, module=%s, code=%s, raw=%s",
-                            error_name,
-                            module,
-                            code,
-                            raw_message,
-                        )
-                        raise TransactionRevertedError(
-                            error_msg, code=code, module=module, error_name=error_name
-                        )
-                    elif "ok" not in decoded:
-                        # Unknown response format - could be an error in a different format
-                        logger.warning(
-                            "Unexpected CBOR response structure (keys: %s): %s",
-                            list(decoded.keys()),
-                            decoded,
-                        )
-            except cbor2.CBORDecodeError:
-                # Not valid CBOR, treat as opaque submission ID
-                pass
+                error_msg = f"Transaction reverted: {error_name}"
+                if module:
+                    error_msg += f" (module: {module}, code: {code})"
 
+                logger.error(
+                    "Transaction reverted on-chain: error=%s, module=%s, code=%s, raw=%s",
+                    error_name,
+                    module,
+                    code,
+                    raw_message,
+                )
+                raise TransactionRevertedError(
+                    error_msg, code=code, module=module, error_name=error_name
+                )
+
+            if "ok" not in result:
+                raise ValueError(
+                    f"Invalid ROFL response: missing 'ok' key. Response keys: {list(result.keys())}"
+                )
+
+            submission_id = cbor2.dumps(result).hex()
             logger.info("ROFL submission id: %s", submission_id)
             return submission_id
 
@@ -201,7 +189,7 @@ class RoflAppdClient:
             raise
 
 
-def get_keypair(key_id: str = ACCOUNTING_SERVICE_KEY):
+async def get_keypair(key_id: str = ACCOUNTING_SERVICE_KEY):
     """Get a keypair using the RoflAppdClient.
 
     Args:
@@ -213,4 +201,4 @@ def get_keypair(key_id: str = ACCOUNTING_SERVICE_KEY):
     Raises:
         Exception: If key generation fails
     """
-    return RoflAppdClient().get_keypair(key_id)
+    return await RoflAppdClient().get_keypair(key_id)
