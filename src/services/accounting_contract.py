@@ -480,7 +480,7 @@ class AccountingContractService:
         return {
             "user_address": checksum_user,
             "token_id": token_norm,
-            "amount": amount,
+            "amount": str(amount),
             "deposit_address": deposit_address,
             "transaction": transaction_data,
             "instructions": instructions,
@@ -791,7 +791,7 @@ class AccountingContractService:
                     {
                         "index": index,
                         "user_address": withdrawal_user,
-                        "amount": result[1],
+                        "amount": str(result[1]),
                         "token_id": "0x" + token_id_bytes.hex(),
                         "block_number": block_number,
                         "can_resolve": current_block - block_number >= 1,
@@ -967,7 +967,7 @@ class AccountingContractService:
             "user_address": user,
             "service_address": Web3.to_checksum_address(service_id),
             "token_id": _to_prefixed_hex(token_id),
-            "amount": int(amount),
+            "amount": str(int(amount)),
             "expiry": int(expiry),
             "is_expired": now >= int(expiry),
         }
@@ -1006,13 +1006,13 @@ class AccountingContractService:
         now = await self._get_chain_timestamp()
 
         lock_infos = [self._lock_to_info(user, lock, now) for lock in locks]
-        total_locked = sum(info["amount"] for info in lock_infos)
+        total_locked = sum(int(info["amount"]) for info in lock_infos)
 
         return {
             "user_address": user,
             "service_address": service,
             "locks": lock_infos,
-            "total_locked": int(total_locked),
+            "total_locked": str(total_locked),
         }
 
     async def get_expired_locks(self, user_address: str, siwe_token: bytes) -> Dict[str, Any]:

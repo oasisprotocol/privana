@@ -65,6 +65,7 @@ class TestHexSerialization:
         result = service._lock_to_info(user, (1, service_id, token_bytes, 100, 1000), 500)
 
         assert result["token_id"] == "0x" + "ab" * 32
+        assert result["amount"] == "100"
 
     @pytest.mark.asyncio
     async def test_get_balance_returns_prefixed_token_id(self):
