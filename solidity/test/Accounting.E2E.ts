@@ -18,18 +18,22 @@ const types = {
     { name: "tokenId", type: "bytes32" },
     { name: "amount", type: "uint256" },
     { name: "expiry", type: "uint256" },
+    { name: "nonce", type: "uint256" },
   ],
   ModifyLock: [
     { name: "userAddress", type: "address" },
     { name: "lockId", type: "uint256" },
     { name: "amount", type: "uint256" },
     { name: "newExpiry", type: "uint256" },
+    { name: "nonce", type: "uint256" },
   ],
   TransferLocked: [
     { name: "userAddress", type: "address" },
     { name: "toAddress", type: "address" },
     { name: "lockId", type: "uint256" },
     { name: "amount", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "serviceAddress", type: "address" },
   ],
   Transfer: [
     { name: "userAddress", type: "address" },
@@ -147,6 +151,13 @@ describe('Accounting', function () {
     await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n); // 1 gwei
 
     tokenId = TEST_TOKEN.tokenId;
+  });
+
+  it("Should expose createLockNonces, modifyLockNonces, transferLockedNonces", async function () {
+    expect(await accounting.createLockNonces(userWallet1.address)).to.equal(0n);
+    expect(await accounting.modifyLockNonces(userWallet1.address)).to.equal(0n);
+    // transferLockedNonces is keyed by service address; userWallet2 acts as the service in lock tests
+    expect(await accounting.transferLockedNonces(userWallet2.address)).to.equal(0n);
   });
 
   it("Admin adds tokenInfo for Test token", async function () {
@@ -427,6 +438,7 @@ describe('Accounting', function () {
 
   it("Test locking with EIP712", async function () {
     const expiry = await getBlockTimestamp() + 3600; // 1 hour from now
+    const lockNonce = await accounting.createLockNonces(userWallet1.address);
 
     const signature = await userWallet1.signTypedData(
       domain,
@@ -436,7 +448,8 @@ describe('Accounting', function () {
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("1"),
-        expiry
+        expiry,
+        nonce: lockNonce
       }
     );
 
@@ -451,6 +464,7 @@ describe('Accounting', function () {
       TEST_TOKEN.tokenId,
       parseUsdt("1"),
       expiry,
+      lockNonce,
       signature
     );
     await tx.wait();
@@ -508,6 +522,8 @@ describe('Accounting', function () {
   });
 
   it("The service should be able to resolve the lock", async function () {
+    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
+
     const signature = await userWallet2.signTypedData(
       domain,
       { TransferLocked: types.TransferLocked },
@@ -516,6 +532,8 @@ describe('Accounting', function () {
         toAddress: userWallet2.address,
         lockId: 1,
         amount: parseUsdt("0.5"),
+        nonce: transferLockedNonce,
+        serviceAddress: userWallet2.address,
       }
     );
 
@@ -528,6 +546,7 @@ describe('Accounting', function () {
       userWallet2.address,
       1,
       parseUsdt("0.5"),
+      transferLockedNonce,
       signature
     );
     await tx.wait();
@@ -551,6 +570,7 @@ describe('Accounting', function () {
     const expiry = await getBlockTimestamp() + 3600; // 1 hour from now
 
     for (let i = 0; i < 10; i++) {
+      const lockNonce = await accounting.createLockNonces(userWallet1.address);
       const signature = await userWallet1.signTypedData(
         domain,
         { Lock: types.Lock },
@@ -559,7 +579,8 @@ describe('Accounting', function () {
           serviceAddress: userWallet2.address,
           tokenId: TEST_TOKEN.tokenId,
           amount: parseUsdt("0.1"),
-          expiry: expiry + i
+          expiry: expiry + i,
+          nonce: lockNonce
         }
       );
 
@@ -570,6 +591,7 @@ describe('Accounting', function () {
         TEST_TOKEN.tokenId,
         parseUsdt("0.1"),
         expiry + i,
+        lockNonce,
         signature
       );
       await tx.wait();
@@ -579,6 +601,7 @@ describe('Accounting', function () {
     expect(userLocks.length).to.equal(10);
 
     // Try to create the 11th lock, should fail
+    const lockNonce = await accounting.createLockNonces(userWallet1.address);
     const signature = await userWallet1.signTypedData(
       domain,
       { Lock: types.Lock },
@@ -587,7 +610,8 @@ describe('Accounting', function () {
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("0.1"),
-        expiry: expiry + 11
+        expiry: expiry + 11,
+        nonce: lockNonce
       }
     );
 
@@ -597,8 +621,39 @@ describe('Accounting', function () {
       TEST_TOKEN.tokenId,
       parseUsdt("0.1"),
       expiry + 11,
+      lockNonce,
       signature
     )).to.be.revertedWithCustomError(accounting, "TooManyActiveLocks");
+  });
+
+  it("Should reject replay of createLock signature", async function () {
+    const timestamp = await getBlockTimestamp();
+    const expiry = timestamp + 3600;
+    // Use userWallet2 to avoid hitting userWallet1's full lock slots from the prior test
+    const lockNonce = await accounting.createLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { Lock: types.Lock },
+      {
+        userAddress: userWallet2.address,
+        serviceAddress: userWallet1.address,
+        tokenId: TEST_TOKEN.tokenId,
+        amount: parseUsdt("0.5"),
+        expiry,
+        nonce: lockNonce,
+      }
+    );
+
+    await accounting.createLock(
+      userWallet2.address, userWallet1.address, TEST_TOKEN.tokenId,
+      parseUsdt("0.5"), expiry, lockNonce, signature
+    );
+
+    await expect(accounting.createLock(
+      userWallet2.address, userWallet1.address, TEST_TOKEN.tokenId,
+      parseUsdt("0.5"), expiry, lockNonce, signature
+    )).to.be.revertedWithCustomError(accounting, "InvalidNonce");
   });
 
 
@@ -738,6 +793,7 @@ describe('ModifyLock', function () {
 
   it("User should be able to add funds to an existing lock", async function () {
     const expiry = await getBlockTimestamp() + 3600;
+    const lockNonce = await accounting.createLockNonces(userWallet1.address);
 
     const lockSignature = await userWallet1.signTypedData(
       domain,
@@ -747,7 +803,8 @@ describe('ModifyLock', function () {
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("1"),
-        expiry
+        expiry,
+        nonce: lockNonce
       }
     );
 
@@ -757,6 +814,7 @@ describe('ModifyLock', function () {
       TEST_TOKEN.tokenId,
       parseUsdt("1"),
       expiry,
+      lockNonce,
       lockSignature
     );
 
@@ -766,6 +824,7 @@ describe('ModifyLock', function () {
     expect(locksBefore[0][3]).to.equal(parseUsdt("1"));
 
     const newExpiry = expiry + 7200;
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
       { ModifyLock: types.ModifyLock },
@@ -773,7 +832,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: parseUsdt("2"),
-        newExpiry
+        newExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -782,6 +842,7 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("2"),
       newExpiry,
+      modifyNonce,
       modifyLockSignature
     );
     await tx.wait();
@@ -798,6 +859,7 @@ describe('ModifyLock', function () {
     const locks = await accounting.getUserLocks(userWallet1.address, "0x");
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -806,7 +868,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: parseUsdt("0.5"),
-        newExpiry: currentExpiry
+        newExpiry: currentExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -817,6 +880,7 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("0.5"),
       currentExpiry,
+      modifyNonce,
       modifyLockSignature
     );
 
@@ -831,6 +895,7 @@ describe('ModifyLock', function () {
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 3600;
     const lockAmountBefore = locks[0][3];
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -839,7 +904,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: 0,
-        newExpiry
+        newExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -850,6 +916,7 @@ describe('ModifyLock', function () {
       lockId,
       0,
       newExpiry,
+      modifyNonce,
       modifyLockSignature
     );
 
@@ -863,6 +930,7 @@ describe('ModifyLock', function () {
 
   it("Should reject modifyLock with invalid lock ID", async function () {
     const expiry = await getBlockTimestamp() + 3600;
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -871,7 +939,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: 999,
         amount: parseUsdt("1"),
-        newExpiry: expiry
+        newExpiry: expiry,
+        nonce: modifyNonce
       }
     );
 
@@ -880,6 +949,7 @@ describe('ModifyLock', function () {
       999,
       parseUsdt("1"),
       expiry,
+      modifyNonce,
       modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidLockId");
   });
@@ -889,6 +959,7 @@ describe('ModifyLock', function () {
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const earlierExpiry = currentExpiry - 1000;
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -897,7 +968,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: parseUsdt("1"),
-        newExpiry: earlierExpiry
+        newExpiry: earlierExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -906,6 +978,7 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("1"),
       earlierExpiry,
+      modifyNonce,
       modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidExpiry");
   });
@@ -914,6 +987,7 @@ describe('ModifyLock', function () {
     const locks = await accounting.getUserLocks(userWallet1.address, "0x");
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -922,7 +996,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: 0,
-        newExpiry: currentExpiry
+        newExpiry: currentExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -931,6 +1006,7 @@ describe('ModifyLock', function () {
       lockId,
       0,
       currentExpiry,
+      modifyNonce,
       modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidAmount");
   });
@@ -939,6 +1015,7 @@ describe('ModifyLock', function () {
     const locks = await accounting.getUserLocks(userWallet1.address, "0x");
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -947,7 +1024,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: parseUsdt("1000000"),
-        newExpiry: currentExpiry
+        newExpiry: currentExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -956,6 +1034,7 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("1000000"),
       currentExpiry,
+      modifyNonce,
       modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InsufficientBalance");
   });
@@ -964,6 +1043,7 @@ describe('ModifyLock', function () {
     const locks = await accounting.getUserLocks(userWallet1.address, "0x");
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet2.signTypedData(
       domain,
@@ -972,7 +1052,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: parseUsdt("0.1"),
-        newExpiry: currentExpiry
+        newExpiry: currentExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -981,6 +1062,7 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("0.1"),
       currentExpiry,
+      modifyNonce,
       modifyLockSignature
     )).to.be.revertedWithCustomError(accounting, "InvalidSignature");
   });
@@ -990,6 +1072,7 @@ describe('ModifyLock', function () {
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 100;
+    const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
       domain,
@@ -998,7 +1081,8 @@ describe('ModifyLock', function () {
         userAddress: userWallet1.address,
         lockId: lockId,
         amount: parseUsdt("0.1"),
-        newExpiry
+        newExpiry,
+        nonce: modifyNonce
       }
     );
 
@@ -1007,6 +1091,7 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("0.1"),
       newExpiry,
+      modifyNonce,
       modifyLockSignature
     );
 
@@ -1015,14 +1100,16 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("0.1"),
       newExpiry,
+      modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "UsedSignature");
+    )).to.be.revertedWithCustomError(accounting, "InvalidNonce");
   });
 
   it("Service should still be able to transfer from lock after funds are added", async function () {
     const locks = await accounting.getUserLocks(userWallet1.address, "0x");
     const lockId = locks[0][0];
     const lockAmount = locks[0][3];
+    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
 
     const signature = await userWallet2.signTypedData(
       domain,
@@ -1032,6 +1119,8 @@ describe('ModifyLock', function () {
         toAddress: userWallet2.address,
         lockId: lockId,
         amount: parseUsdt("0.5"),
+        nonce: transferLockedNonce,
+        serviceAddress: userWallet2.address,
       }
     );
 
@@ -1042,6 +1131,7 @@ describe('ModifyLock', function () {
       userWallet2.address,
       lockId,
       parseUsdt("0.5"),
+      transferLockedNonce,
       signature
     );
 
@@ -1050,6 +1140,36 @@ describe('ModifyLock', function () {
 
     expect(balance2After).to.equal(balance2Before + parseUsdt("0.5"));
     expect(locksAfter[0][3]).to.equal(lockAmount - parseUsdt("0.5"));
+  });
+
+  it("Should reject replay of transferFromLock signature", async function () {
+    // Service (userWallet2) transfers from its lock on userWallet1's account
+    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const lockId = locks[0][0];
+    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { TransferLocked: types.TransferLocked },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet2.address,
+        lockId,
+        amount: parseUsdt("0.1"),
+        nonce: transferLockedNonce,
+        serviceAddress: userWallet2.address,
+      }
+    );
+
+    await accounting.transferFromLock(
+      userWallet1.address, userWallet2.address, lockId,
+      parseUsdt("0.1"), transferLockedNonce, signature
+    );
+
+    await expect(accounting.transferFromLock(
+      userWallet1.address, userWallet2.address, lockId,
+      parseUsdt("0.1"), transferLockedNonce, signature
+    )).to.be.revertedWithCustomError(accounting, "InvalidNonce");
   });
 });
 
@@ -1114,6 +1234,9 @@ describe('Upgradability', function () {
     const ownerBefore = await accounting.owner();
     const transferNonceBefore = await accounting.transferNonces(user.address);
     const withdrawalNonceBefore = await accounting.withdrawalNonces(user.address);
+    const createLockNonceBefore = await accounting.createLockNonces(user.address);
+    const modifyLockNonceBefore = await accounting.modifyLockNonces(user.address);
+    const transferLockedNonceBefore = await accounting.transferLockedNonces(user.address);
     const gasPriceBefore = await accounting.gasPrices(testChainId);
     const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
     expect(balanceBefore).to.equal(initialBalance);
@@ -1131,6 +1254,9 @@ describe('Upgradability', function () {
     const ownerAfter = await upgraded.owner();
     const transferNonceAfter = await upgraded.transferNonces(user.address);
     const withdrawalNonceAfter = await upgraded.withdrawalNonces(user.address);
+    const createLockNonceAfter = await upgraded.createLockNonces(user.address);
+    const modifyLockNonceAfter = await upgraded.modifyLockNonces(user.address);
+    const transferLockedNonceAfter = await upgraded.transferLockedNonces(user.address);
     const gasPriceAfter = await upgraded.gasPrices(testChainId);
     const tokenInfoAfter = await upgraded.tokens(TEST_TOKEN.tokenId);
 
@@ -1139,6 +1265,9 @@ describe('Upgradability', function () {
     expect(ownerAfter).to.equal(ownerBefore, "Owner should be preserved after upgrade");
     expect(transferNonceAfter).to.equal(transferNonceBefore, "Transfer nonce should be preserved after upgrade");
     expect(withdrawalNonceAfter).to.equal(withdrawalNonceBefore, "Withdrawal nonce should be preserved after upgrade");
+    expect(createLockNonceAfter).to.equal(createLockNonceBefore, "createLock nonce should be preserved after upgrade");
+    expect(modifyLockNonceAfter).to.equal(modifyLockNonceBefore, "modifyLock nonce should be preserved after upgrade");
+    expect(transferLockedNonceAfter).to.equal(transferLockedNonceBefore, "transferLocked nonce should be preserved after upgrade");
     expect(gasPriceAfter).to.equal(gasPriceBefore, "Gas price should be preserved after upgrade");
     expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
     expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");

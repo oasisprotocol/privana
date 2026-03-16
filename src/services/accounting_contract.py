@@ -496,7 +496,16 @@ class AccountingContractService:
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         expiry = self._require_positive(payload["expiry"], "expiry")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
+
+        contract_reader = self._get_reader_contract()
+        expected_nonce = await contract_reader.functions.createLockNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"createLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
 
         fn = self.contract.functions.createLock(
             user,
@@ -504,6 +513,7 @@ class AccountingContractService:
             token,
             amount,
             expiry,
+            nonce,
             signature,
         )
         return await self._submit(fn._encode_transaction_data())
@@ -513,13 +523,23 @@ class AccountingContractService:
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
         amount = self._require_positive(payload["amount"], "amount", allow_zero=True)
         new_expiry = self._require_positive(payload["new_expiry"], "new_expiry")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
+
+        contract_reader = self._get_reader_contract()
+        expected_nonce = await contract_reader.functions.modifyLockNonces(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"modifyLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
 
         fn = self.contract.functions.modifyLock(
             user,
             lock_id,
             amount,
             new_expiry,
+            nonce,
             signature,
         )
         return await self._submit(fn._encode_transaction_data())
@@ -556,13 +576,24 @@ class AccountingContractService:
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
         to_addr = self._require_address(payload["to_address"], "to_address")
         amount = self._require_positive(payload["amount"], "amount")
+        service = self._require_address(payload["service_address"], "service_address")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
+
+        contract_reader = self._get_reader_contract()
+        expected_nonce = await contract_reader.functions.transferLockedNonces(service).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"transferFromLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
 
         fn = self.contract.functions.transferFromLock(
             user,
             to_addr,
             lock_id,
             amount,
+            nonce,
             signature,
         )
         return await self._submit(fn._encode_transaction_data())
@@ -829,6 +860,27 @@ class AccountingContractService:
             "user_address": checksum_user,
             "nonce": nonce,
         }
+
+    async def get_lock_nonce(self, user_address: str) -> Dict[str, Any]:
+        """Get the current createLock nonce for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+        nonce = await contract_reader.functions.createLockNonces(checksum_user).call()
+        return {"user_address": checksum_user, "nonce": nonce}
+
+    async def get_modify_lock_nonce(self, user_address: str) -> Dict[str, Any]:
+        """Get the current modifyLock nonce for a user."""
+        checksum_user = self._require_address(user_address, "user_address")
+        contract_reader = self._get_reader_contract()
+        nonce = await contract_reader.functions.modifyLockNonces(checksum_user).call()
+        return {"user_address": checksum_user, "nonce": nonce}
+
+    async def get_transfer_locked_nonce(self, service_address: str) -> Dict[str, Any]:
+        """Get the current transferFromLock nonce for a service."""
+        checksum_service = self._require_address(service_address, "service_address")
+        contract_reader = self._get_reader_contract()
+        nonce = await contract_reader.functions.transferLockedNonces(checksum_service).call()
+        return {"service_address": checksum_service, "nonce": nonce}
 
     async def get_siwe_domain(self) -> Dict[str, Any]:
         if self._siwe_domain is None:

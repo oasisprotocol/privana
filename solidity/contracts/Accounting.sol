@@ -296,6 +296,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param tokenId The identifier of the token to lock
      * @param amount The amount of tokens to lock
      * @param expiry The timestamp when the lock expires and funds can be reclaimed (must be in future)
+     * @param nonce The nonce for replay protection (must match user's current createLockNonces)
      * @param signature The EIP-712 signature from the user authorizing the lock
      */
     function createLock(
@@ -304,6 +305,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         bytes32 tokenId,
         uint256 amount,
         uint256 expiry,
+        uint256 nonce,
         bytes calldata signature
     ) public {
         if (expiry <= block.timestamp) revert InvalidExpiry();
@@ -315,6 +317,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             tokenId,
             amount,
             expiry,
+            nonce,
             signature
         );
 
@@ -352,11 +355,20 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         revert InvalidLockId();
     }
 
+    /**
+     * @param userAddress The address of the user whose lock is being modified
+     * @param lockId The unique identifier of the lock to modify
+     * @param amount The new amount for the lock
+     * @param newExpiry The new expiry timestamp for the lock
+     * @param nonce The nonce for replay protection (must match user's current modifyLockNonces)
+     * @param signature The EIP-712 signature from the user authorizing the modification
+     */
     function modifyLock(
         address userAddress,
         uint256 lockId,
         uint256 amount,
         uint256 newExpiry,
+        uint256 nonce,
         bytes calldata signature
     ) public {
         UserInfo storage uInfo = userInfo[userAddress];
@@ -374,6 +386,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             lockId,
             amount,
             newExpiry,
+            nonce,
             signature
         );
 
@@ -499,6 +512,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param toAddress The address receiving the transferred locked funds
      * @param lockId The unique identifier of the lock to transfer from
      * @param amount The amount of locked tokens to transfer
+     * @param nonce The nonce for replay protection (must match service's current transferLockedNonces)
      * @param signature The EIP-712 signature from the service authorizing the transfer
      */
     function transferFromLock(
@@ -506,6 +520,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         address toAddress,
         uint256 lockId,
         uint256 amount,
+        uint256 nonce,
         bytes calldata signature
     ) public {
         if (amount == 0) revert InvalidAmount();
@@ -522,6 +537,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             toAddress,
             lockId,
             amount,
+            nonce,
             signature
         );
 
