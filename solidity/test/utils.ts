@@ -1,190 +1,66 @@
+import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
+import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
+import { HttpNetworkConfig } from "hardhat/types/config";
+import { config, ethers, network, upgrades } from 'hardhat';
+import { JsonRpcProvider } from 'ethers';
+import { MockAccounting } from "../typechain-types";
 
-import { ethers } from 'hardhat';
-import { Signer, BigNumberish, Interface, parseUnits, Wallet, type BytesLike, JsonRpcProvider, JsonRpcApiProvider } from 'ethers';
-
-import assert from "assert";
-
-import { Trie } from "@ethereumjs/trie";
-import { encode } from "rlp";
-
-/**
- * Generates a legacy (pre-EIP-1559) native ETH transfer transaction, signed by the given signer.
- * @param signer Wallet or Signer to sign the transaction
- * @param to Recipient address
- * @param amount Amount in wei (BigNumberish)
- * @param chainId Chain ID
- * @param nonce Optional nonce (if not provided, will fetch from provider)
- * @returns Promise<SerializedTxHex>
- */
-export async function generateNativeTx({
-	signer,
-	to,
-	amount,
-	chainId,
-	nonce,
-	type,
-}: {
-	signer: Wallet,
-	to: string,
-	amount: BigNumberish,
-	chainId: number,
-	nonce: number,
-	type: number,
-}): Promise<string> {
-
-	const tx = {
-		to,
-		value: amount,
-		nonce,
-		gasLimit: 21000,
-		gasPrice: parseUnits('1', 'gwei'),
-		data: '0x',
-		chainId,
-		type // Transaction type
-	};
-	const signedTx = await signer.signTransaction(tx);
-	return signedTx;
-}
+export const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
 
 /**
- * Generates a legacy (pre-EIP-1559) ERC20 transfer transaction, signed by the given signer.
- * @param signer Wallet or Signer to sign the transaction
- * @param tokenAddress ERC20 contract address
- * @param to Recipient address
- * @param amount Amount in token's smallest unit (BigNumberish)
- * @param chainId Chain ID
- * @param nonce Optional nonce (if not provided, will fetch from provider)
- * @returns Promise<SerializedTxHex>
+ * Returns a signer configured with unwrapped provider (i.e. unencrypted transactions) for deploying or upgrading contracts.
+ * Uses the first derived account from the configured hardhat phrase.
+ * @returns HardhatEthersSigner
  */
-export async function generateERC20Tx({
-	signer,
-	tokenAddress,
-	to,
-	amount,
-	chainId,
-	nonce,
-	type,
-}: {
-	signer: Wallet,
-	tokenAddress: string,
-	to: string,
-	amount: BigNumberish,
-	chainId: number,
-	nonce: number,
-	type: number,
-}): Promise<string> {
-	// ERC20 transfer selector: a9059cbb
-	const iface = new Interface([
-		'function transfer(address to, uint256 amount)'
-	]);
-	const data = iface.encodeFunctionData('transfer', [to, amount]);
-	const tx = {
-		to: tokenAddress,
-		value: 0,
-		nonce,
-		gasLimit: 60000,
-		gasPrice: parseUnits('1', 'gwei'),
-		data,
-		chainId,
-		type // Transaction type
-	};
-	const signedTx = await signer.signTransaction(tx);
-	return signedTx;
-}
+export function getDeployer(index?: number): HardhatEthersSigner {
+	const accounts = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig);
+	const hdNode = ethers.HDNodeWallet.fromPhrase(accounts.mnemonic, undefined, `m/44'/60'/0'/0/${index ?? 0}`);
 
-// Inclusion proofs
-
-
-export function getMappingStorageSlot(mappingKey: BytesLike, mappingSlot: BytesLike): string {
-	return ethers.keccak256(
-		ethers.concat([ethers.zeroPadValue(mappingKey, 32), ethers.zeroPadValue(mappingSlot, 32)]),
-	);
-}
-
-export function getRpcUint(number: any): string {
-	return "0x" + BigInt(number).toString(16);
-}
-
-export function getRlpUint(number: any): string {
-	let hex_value = "0x" + number.toString(16);
-	if (hex_value.length % 2 != 0) {
-		hex_value = "0x0" + hex_value.slice(2);
+	// Only create unwrapped provider if chainId is between 0x5afd and 0x5aff (Sapphire networks)
+	if (network.config.chainId && network.config.chainId >= 0x5afd && network.config.chainId <= 0x5aff) {
+		const uwProvider = new JsonRpcProvider((network.config as HttpNetworkConfig).url);
+		uwProvider.pollingInterval = 50;
+		return hdNode.connect(uwProvider) as any;
 	}
-	return number > 0 ? ethers.encodeRlp(ethers.getBytes(hex_value)) : ethers.encodeRlp("0x");
+
+	return hdNode.connect(ethers.provider) as any;
 }
 
-export async function getTxInclusionProof(
-	provider: JsonRpcApiProvider,
-	blockNumber: number,
-	txIndex: number,
-): Promise<{ rlpBlockHeader: string; proof: string[] }> {
-	const rawBlock = await provider.send("debug_getRawBlock", [getRpcUint(blockNumber)]);
-	const blockRlp = ethers.decodeRlp(rawBlock);
-	// TODO: Review whether we can make this type conversion
-	const blockHeader: string[] = blockRlp[0] as string[];
-	const rawTransactions: string[] = blockRlp[1] as string[];
+/**
+ * Encodes the given wallet address as auth token consumable by MockSiweAuth.
+ * @param address Address of the account for authenticated calls
+ * @returns Hex string of 32-bytes long token abi decodable by MockSiweAuth.
+ */
+export function mockAuthToken(address: string) {
+	return ethers.hexlify(ethers.zeroPadValue(address, 32))
+}
 
-	// Build Merkle tree
-	const trie = new Trie();
-	for (let [i, rawTransaction] of rawTransactions.entries()) {
-		if (typeof rawTransaction == "object") {
-			await trie.put(ethers.getBytes(getRlpUint(i)), ethers.getBytes(encode(rawTransaction)));
-		} else {
-			await trie.put(ethers.getBytes(getRlpUint(i)), ethers.getBytes(rawTransaction));
+/**
+ * Helper to deploy the mock accounting contract with an unencrypted transaction and with workarounds for flaky UUPS wrapper errors.
+ * @param mockSiweAuthAddress SIWE auth contract to initialize Accounting with
+ */
+export async function deployMockAccounting(mockSiweAuthAddress: string) {
+	const deployer = getDeployer();
+	const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+	let accounting: MockAccounting;
+
+	let deploymentSucceeded = false;
+	while (!deploymentSucceeded) {
+		try {
+			// Deploy as UUPS proxy
+			accounting = await upgrades.deployProxy(
+				AccountingFactory,
+				[MOCK_ROFL_APP_ID, deployer.address],
+				{ kind: 'uups', initializer: 'initialize', constructorArgs: [mockSiweAuthAddress] }
+			) as unknown as MockAccounting;
+			await accounting.waitForDeployment();
+			accounting = (await ethers.getContractFactory('MockAccounting')).attach(await accounting.getAddress()) as unknown as MockAccounting;
+			//accounting = accounting.connect((await getSigners())[0]); // Use wrapped signer for sending txes.
+			deploymentSucceeded = true;
+		} catch (error) {
+			console.log('Deployment failed, retrying...', error);
+			await new Promise(resolve => setTimeout(resolve, 1000));
 		}
 	}
-
-	// Ensure the transaction root was constructed the same way
-	const txRoot = ethers.hexlify(trie.root());
-	if (txRoot != blockHeader[4]) {
-		throw new Error(
-			"Constructed transaction Merkle tree has a root inconsistent with the transactionsRoot in the block header",
-		);
-	}
-
-	if (txIndex >= rawTransactions.length) {
-		throw new Error("Transaction index is outside the range of this block");
-	}
-
-	// Generate the proof of the transaction
-	const txProof = await trie.createProof(ethers.getBytes(getRlpUint(txIndex)));
-	const txProofHex = txProof.map((x) => ethers.hexlify(x));
-	return {
-		rlpBlockHeader: ethers.encodeRlp(blockHeader),
-		proof: txProofHex,
-	};
-}
-
-export async function getReceiptInclusionProof(
-	provider: JsonRpcApiProvider,
-	blockNumber: number,
-	txIndex: number,
-) {
-	const rawReceipts = await provider.send("debug_getRawReceipts", [getRpcUint(blockNumber)]);
-
-	const trie = new Trie();
-	for (let i = 0; i < rawReceipts.length; i++) {
-		const key = ethers.getBytes(getRlpUint(i));   // RLP(k)
-		await trie.put(key, rawReceipts[i]);
-	}
-
-	const rawBlock = await provider.send("debug_getRawBlock", [getRpcUint(blockNumber)]);
-	const blockRlp = ethers.decodeRlp(rawBlock);
-	const blockHeader: string[] = blockRlp[0] as string[];
-
-	// Ensure the transaction root was constructed the same way
-	const receiptRoot = ethers.hexlify(trie.root());
-	if (receiptRoot != blockHeader[5]) {
-		throw new Error(
-			"Constructed receipts Merkle tree has a root inconsistent with the receiptsRoot in the block header",
-		);
-	}
-
-	//Generate the proof of the receipt
-	const receiptsProof = await trie.createProof(ethers.getBytes(getRlpUint(txIndex)));
-	const receiptsProofHex = receiptsProof.map((x) => ethers.hexlify(x));
-	return {
-		rlpBlockHeader: ethers.encodeRlp(blockHeader),
-		proof: receiptsProofHex,
-	};
+	return accounting!;
 }

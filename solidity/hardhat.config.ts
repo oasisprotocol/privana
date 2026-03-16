@@ -6,11 +6,12 @@ import {
 } from '@oasisprotocol/sapphire-hardhat';
 import '@nomicfoundation/hardhat-ignition-ethers';
 import '@nomicfoundation/hardhat-toolbox';
-import '@openzeppelin/hardhat-upgrades';
 import { HardhatUserConfig } from 'hardhat/config';
 import { HDAccountsUserConfig } from 'hardhat/types';
 import 'solidity-coverage';
 import './tasks';
+
+import '@openzeppelin/hardhat-upgrades'; // NB: Must be imported after hardhat packages to preserve network configuration!
 
 dotenvConfig();
 

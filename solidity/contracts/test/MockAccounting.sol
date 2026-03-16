@@ -10,25 +10,15 @@ import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
  * @dev Overrides the keypair generation to avoid calling Sapphire precompiles.
  */
 contract MockAccounting is Accounting {
-    // Address matching the test transaction on Base Sepolia (block 32680090, tx 45)
-    address private constant TEST_ADDRESS = 0x284a3Fe2939a4e4859e6321537d4264533E3D549;
-    bytes32 private constant TEST_SECRET = bytes32(uint256(1));
+    // Test keypair: #4 of "chimney theory present latin find behave ankle clock shadow earn suit reflect"
+    address private constant TEST_ADDRESS = 0xe6F321Fb3D912Db48DE460560B8bB99B57AeAcA2;
+    bytes32 private constant TEST_SECRET = bytes32(0x9147e5178b1ee427d704dcdb699f1adf9c8a3b58480a6118635a3486ad3a35ce);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address siweAuthAddress) Accounting(siweAuthAddress) {}
 
     function initialize(bytes21 _roflAppID, address _owner) external override initializer {
         __Accounting_init(_roflAppID, _owner);
-    }
-
-    function _deriveDepositKeypair(
-        address beneficiary,
-        ChainType /* chainType */,
-        uint256 /* version */
-    ) internal pure override returns (address depositAddr, bytes32 depositSecret) {
-        // Deterministic mock: derive from beneficiary address
-        depositSecret = keccak256(abi.encode(TEST_SECRET, beneficiary));
-        depositAddr = address(uint160(uint256(depositSecret)));
     }
 
     function _generateKeypair() internal pure override returns (address, bytes32) {
@@ -72,18 +62,6 @@ contract MockAccounting is Accounting {
             abi.encodePacked(tokenId, amount, depositId)
         );
         emit Deposit(tokenId, amount, depositId);
-    }
-
-    /**
-     * @notice Test helper: get deposit address for a beneficiary.
-     * @dev Bypasses EIP-712 sig verification for testing.
-     */
-    function mockGetDepositAddress(
-        address beneficiary,
-        ChainType chainType,
-        uint256 version
-    ) external pure returns (address depositAddr) {
-        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
     }
 
     /**

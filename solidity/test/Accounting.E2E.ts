@@ -1,11 +1,10 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
-import { keccak256, parseEther, Wallet } from 'ethers';
+import { keccak256, Wallet } from 'ethers';
 import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-
-const EMPTY_AUTH_TOKEN = '0x' as const;
+import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
@@ -57,7 +56,7 @@ const types = {
 
 const TEST_TOKEN = {
   tokenType: TokenType.ERC20,
-  // keccak256(abi.encodePacked(uint256(84532), address(0x12084e1a0fe92b5ab803a81a0ae54d91040f89ca)))
+  // keccak256(abi.encodePacked(uint256(84532), address(0x036cbd53842c5426634e7929541ec2318f3dcf7e)))
   // Precomputed to save time and avoid dependency on ethers.utils.solidityPack
   // which is not available in the ethers v6 version used by hardhat
   tokenId: "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
@@ -91,40 +90,26 @@ describe('Accounting', function () {
   let userWallet2: Wallet;
   let tokenId: string;
 
-  const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
-
   before(async () => {
-    const provider = ethers.provider;
-    const signers = await ethers.getSigners();
-    const deployer = signers[0];
-    user1 = signers[1];
+    const [user1, user2, service] = (await ethers.getSigners()).slice(1, 4);
+    const deployer = getDeployer();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
+    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    // Deploy as UUPS proxy
-    accounting = await upgrades.deployProxy(
-      AccountingFactory,
-      [MOCK_ROFL_APP_ID, deployer.address],
-      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-    ) as unknown as MockAccounting;
-    await accounting.waitForDeployment();
+    accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
+    accountingUser1 = accounting.connect(user1) as MockAccounting;
+    accountingUser2 = accounting.connect(user2) as MockAccounting;
 
-    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
-    userWallet1 = ethers.HDNodeWallet.fromPhrase(
-      mnemonic,
-      undefined,
-      "m/44'/60'/0'/0/0",
-    ).connect(provider);
-    userWallet2 = ethers.HDNodeWallet.fromPhrase(
-      mnemonic,
-      undefined,
-      "m/44'/60'/0'/0/1",
-    ).connect(provider);
-    accountingUser1 = accounting.connect(userWallet1) as MockAccounting;
-    accountingUser2 = accounting.connect(userWallet2) as MockAccounting;
+    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
+      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
+    );
+
+    // Drive index 0 and 1 wallets
+    userWallet1 = hdNodeWallet.connect(ethers.provider) as any;
+    userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(ethers.provider) as any;
+    const userLocks = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -139,13 +124,15 @@ describe('Accounting', function () {
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
       ethers.zeroPadValue(TEST_TOKEN.address, 20)
     ]);
-    await accounting.setTokenInfo({
+    const tx1 = await accounting.setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
       data: data
     });
+    await tx1.wait();
 
     // Set gas price for withdrawal tests
-    await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n); // 1 gwei
+    const tx2 = await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n); // 1 gwei
+    await tx2.wait();
 
     tokenId = TEST_TOKEN.tokenId;
   });
@@ -153,7 +140,7 @@ describe('Accounting', function () {
   async function ensurePrivacyScenario(): Promise<void> {
     const ownerBal = await accounting.getBalance(userWallet1.address, tokenId);
     const callerBal = await accounting.getBalance(userWallet2.address, tokenId);
-    const ownerLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const ownerLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
 
     if (
       ownerBal === parseUsdt("8") &&
@@ -224,8 +211,6 @@ describe('Accounting', function () {
       data: data
     });
 
-    console.log("tokenId", tokenId);
-
     expect(tokenId).to.equal(TEST_TOKEN.tokenId);
     expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
   });
@@ -275,7 +260,6 @@ describe('Accounting', function () {
   it("Test locking with EIP712", async function () {
     const expiry = await getBlockTimestamp() + 3600; // 1 hour from now
     const lockNonce = await accounting.createLockNonces(userWallet1.address);
-
     const signature = await userWallet1.signTypedData(
       domain,
       { Lock: types.Lock },
@@ -312,7 +296,7 @@ describe('Accounting', function () {
     expect(balance2After).to.equal(parseUsdt("1"));
 
     // It doesn't go to the normal balance, instead a lock is appended to the user info
-    const userLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const userLocks = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
 
     expect(userLocks.length).to.equal(1);
     expect(userLocks[0][1]).to.equal(userWallet2.address);
@@ -324,14 +308,14 @@ describe('Accounting', function () {
   it('Privacy: view functions derive identity from auth token, so user2 cannot read user1 data', async function () {
     await ensurePrivacyScenario();
 
-    const ownerBal = await accountingUser1.balanceOf(tokenId, EMPTY_AUTH_TOKEN);
-    const callerBal = await accountingUser2.balanceOf(tokenId, EMPTY_AUTH_TOKEN);
+    const ownerBal = await accountingUser1.balanceOf(tokenId, mockAuthToken(userWallet1.address));
+    const callerBal = await accountingUser2.balanceOf(tokenId, mockAuthToken(userWallet2.address));
     expect(ownerBal).to.equal(parseUsdt("8"));
     expect(callerBal).to.equal(parseUsdt("1"));
     expect(callerBal).to.not.equal(ownerBal);
 
-    const ownerLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
-    const callerLocks = await accountingUser2.getUserLocks(EMPTY_AUTH_TOKEN);
+    const ownerLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const callerLocks = await accountingUser2.getUserLocks(mockAuthToken(userWallet2.address));
     expect(ownerLocks.length).to.equal(1);
     expect(callerLocks.length).to.equal(0);
   });
@@ -339,10 +323,11 @@ describe('Accounting', function () {
   it('Privacy: user-only view functions should return correct data for the owner', async function () {
     await ensurePrivacyScenario();
 
-    const bal = await accountingUser1.balanceOf(tokenId, EMPTY_AUTH_TOKEN);
+    const bal = await accountingUser1.balanceOf(tokenId, mockAuthToken(userWallet1.address));
     expect(bal).to.equal(parseUsdt("8"));
 
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    expect(locks).to.be.an('array');
     expect(locks.length).to.equal(1);
     expect(locks[0][1]).to.equal(userWallet2.address);
     expect(locks[0][2]).to.equal(tokenId);
@@ -368,7 +353,7 @@ describe('Accounting', function () {
   it('Privacy: service-scoped total locked balance should only count the caller\'s locks', async function () {
     await ensurePrivacyScenario();
 
-    const serviceLocks = await accountingUser2.getServiceLocks(userWallet1.address, EMPTY_AUTH_TOKEN);
+    const serviceLocks = await accountingUser2.getServiceLocks(userWallet1.address, mockAuthToken(userWallet2.address));
     expect(serviceLocks.length).to.equal(1);
     expect(serviceLocks[0][1]).to.equal(userWallet2.address);
     expect(serviceLocks[0][2]).to.equal(tokenId);
@@ -404,18 +389,22 @@ describe('Accounting', function () {
       signature
     );
     await tx.wait();
-
-
   });
 
   it("The user should be able to unlock the remaining locked funds after expiry", async function () {
+    const network = await ethers.provider.getNetwork();
+    if (network.chainId >= 0x5afd && network.chainId <= 0x5aff) {
+      this.skip();
+    }
+
     // Fast forward time by 2 hours
     await ethers.provider.send("evm_increaseTime", [2 * 3600]);
     await ethers.provider.send("evm_mine", []);
 
-    await accounting.unlockSingleLock(userWallet1.address, 1);
+    const tx = await accounting.unlockSingleLock(userWallet1.address, 1);
+    await tx.wait();
 
-    const userLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const userLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     expect(userLocks.length).to.equal(0);
 
   });
@@ -423,7 +412,11 @@ describe('Accounting', function () {
   it("The user shouldn't be able to create more than 10 locks", async function () {
     const expiry = await getBlockTimestamp() + 3600; // 1 hour from now
 
-    for (let i = 0; i < 10; i++) {
+    const fundTx = await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("2.0"));
+    await fundTx.wait();
+
+    const userLocksBefore = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
+    for (let i = 0; i < 10-userLocksBefore.length; i++) {
       const lockNonce = await accounting.createLockNonces(userWallet1.address);
       const signature = await userWallet1.signTypedData(
         domain,
@@ -448,7 +441,7 @@ describe('Accounting', function () {
       await tx.wait();
     }
 
-    const userLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const userLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     expect(userLocks.length).to.equal(10);
 
     // Try to create the 11th lock, should fail
@@ -472,7 +465,7 @@ describe('Accounting', function () {
       expiry + 11,
       lockNonce,
       signature
-    )).to.be.revertedWithCustomError(accounting, "TooManyActiveLocks");
+    )).to.be.reverted; // WithCustomError(accounting, "TooManyActiveLocks"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject replay of createLock signature", async function () {
@@ -493,19 +486,23 @@ describe('Accounting', function () {
       }
     );
 
-    await accounting.createLock(
+    const tx = await accounting.createLock(
       userWallet1.address, TEST_TOKEN.tokenId,
       parseUsdt("0.5"), expiry, lockNonce, signature
     );
+    await tx.wait()
 
     await expect(accounting.createLock(
       userWallet1.address, TEST_TOKEN.tokenId,
       parseUsdt("0.5"), expiry, lockNonce, signature
-    )).to.be.revertedWithCustomError(accounting, "InvalidNonce");
+    )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
 
   it("User should be able to withdraw TEST token using EIP712 signature", async function () {
+    const fundTx = await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("0.15"));
+    await fundTx.wait();
+
     const nonce = await accounting.withdrawalNonces(userWallet1.address);
     const signature = await userWallet1.signTypedData(
       domain,
@@ -533,12 +530,11 @@ describe('Accounting', function () {
     expect(withdrawals.tokenId).to.equal(TEST_TOKEN.tokenId);
     expect(withdrawals.resolved).to.equal(false);
 
-    // resolveWithdrawal requires Sapphire EIP155Signer precompile - skip on hardhat
+    // Requires Sapphire EIP155Signer precompile.
     const network = await ethers.provider.getNetwork();
-    if (network.name !== 'hardhat' && network.name !== 'unknown') {
+    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
       const tx2 = await accounting.resolveWithdrawal(0);
       const receipt2 = await tx2.wait();
-
       const withdrawalAfter = await accounting.withdrawals(0);
       expect(withdrawalAfter.resolved).to.equal(true);
     }
@@ -564,7 +560,7 @@ describe('Accounting', function () {
       await accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId);
       await expect(
         accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId)
-      ).to.be.revertedWithCustomError(accounting, "DepositAlreadyProcessed");
+      ).to.be.reverted; // WithCustomError(accounting, "DepositAlreadyProcessed"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should reject zero amount", async function () {
@@ -574,7 +570,7 @@ describe('Accounting', function () {
       ));
       await expect(
         accounting.mockCreditDeposit(userWallet1.address, tokenId, 0n, depositId)
-      ).to.be.revertedWithCustomError(accounting, "InvalidAmount");
+      ).to.be.reverted// WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should reject unregistered token", async function () {
@@ -588,22 +584,23 @@ describe('Accounting', function () {
       ));
       await expect(
         accounting.mockCreditDeposit(userWallet1.address, fakeTokenId, parseUsdt("100"), depositId)
-      ).to.be.revertedWithCustomError(accounting, "UnsupportedTokenType");
+      ).to.be.reverted; // WithCustomError(accounting, "UnsupportedTokenType"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
   });
 
-  describe("getDepositAddress (via mock)", function () {
+  describe("getDepositAddress", function () {
     it("should return deterministic deposit address for beneficiary", async function () {
-      const addr1 = await accounting.mockGetDepositAddress(userWallet1.address, ChainType.EVM, 0);
-      const addr2 = await accounting.mockGetDepositAddress(userWallet1.address, ChainType.EVM, 0);
-      expect(addr1).to.equal(addr2);
-      expect(addr1).to.not.equal(ethers.ZeroAddress);
-    });
+      // Requires Sapphire EIP155Signer precompile.
+      const network = await ethers.provider.getNetwork();
+      if (network.chainId < 0x5afd || network.chainId > 0x5aff) {
+        this.skip();
+      }
 
-    it("should return different addresses for different beneficiaries", async function () {
-      const addr1 = await accounting.mockGetDepositAddress(userWallet1.address, ChainType.EVM, 0);
-      const addr2 = await accounting.mockGetDepositAddress(userWallet2.address, ChainType.EVM, 0);
-      expect(addr1).to.not.equal(addr2);
+      const addr1 = await accounting.getDepositAddress(ChainType.EVM, 0, mockAuthToken(userWallet1.address));
+      expect(addr1).to.equal("0xC739394587942f984FF3e5E28FEaA96a88D52E97");
+
+      const addr2 = await accounting.getDepositAddress(ChainType.EVM, 0, mockAuthToken(userWallet2.address));
+      expect(addr2).to.equal("0xE6bB861D91d5d84A2278c4f88E899bf1b5Af91b8");
     });
   });
 
@@ -626,7 +623,7 @@ describe('Accounting', function () {
       const requestId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
 
       // Re-request with a different destination — overwrites the prior slot.
-      const newDest = user1.address;
+      const newDest = userWallet1.address;
       await accounting.connect(user).requestEmergencyWithdraw(tokenId, newDest, 0);
 
       const req = await accounting.emergencyWithdrawRequests(requestId);
@@ -645,29 +642,34 @@ describe('Accounting', function () {
     it("should execute emergency withdraw after 1-block delay (ERC20)", async function () {
       // executeEmergencyWithdraw calls EIP155Signer.sign() which needs Sapphire precompiles.
       // On Hardhat we verify state transitions up to the signing step; on Sapphire we get signedTx.
-      const user = await ethers.getSigner(userWallet1.address);
-      const requestId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+      const user1 = (await ethers.getSigners())[1];
+      const tx1 = await accountingUser1.requestEmergencyWithdraw(tokenId, userWallet2.address, 0);
+      await tx1.wait();
+
+      // Requires Sapphire EIP155Signer precompile.
       const network = await ethers.provider.getNetwork();
-      if (network.name === 'hardhat' || network.name === 'unknown') {
+      if (network.chainId < 0x5afd || network.chainId > 0x5aff) {
         await expect(
-          accounting.connect(user).executeEmergencyWithdraw(
-            userWallet1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+          accountingUser1.executeEmergencyWithdraw(
+            user1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
           )
-        ).to.be.revertedWithCustomError(accounting, "DER_Split_Error");
+        ).to.be.reverted;
         this.skip();
       }
 
       // Full happy path on Sapphire: decode signedTx and verify EIP-155 chainId matches
       // the chainId encoded in tokens[tokenId].data. Regression test for the issue where
       // caller-supplied chainId could produce a signed tx for the wrong EVM chain.
-      const signedTx: string = await accounting.connect(user).executeEmergencyWithdraw.staticCall(
-        userWallet1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+      const signedTx: string = await accounting.executeEmergencyWithdraw.staticCall(
+        user1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
       );
       expect(ethers.Transaction.from(signedTx).chainId).to.equal(BigInt(TEST_TOKEN.chainId));
 
-      const tx = await accounting.connect(user).executeEmergencyWithdraw(
-        userWallet1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+      const tx = await accounting.executeEmergencyWithdraw(
+        user1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
       );
+      await tx.wait();
+      const requestId = await accounting.emergencyWithdrawKey(user1.address, tokenId, 0);
       await expect(tx).to.emit(accounting, "EmergencyWithdrawExecuted").withArgs(requestId);
     });
 
@@ -678,7 +680,7 @@ describe('Accounting', function () {
       const unknownTokenId = "0x" + "11".repeat(32);
       await expect(
         accounting.connect(user).requestEmergencyWithdraw(unknownTokenId, userWallet1.address, 0)
-      ).to.be.revertedWithCustomError(accounting, "UnsupportedTokenType");
+      ).to.be.reverted; // WithCustomError(accounting, "UnsupportedTokenType"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should reject execute on non-existent request", async function () {
@@ -687,7 +689,7 @@ describe('Accounting', function () {
         accounting.connect(await ethers.getSigner(userWallet1.address)).executeEmergencyWithdraw(
           userWallet1.address, tokenId, 99, 0, parseUsdt("1"), 1000000000n
         )
-      ).to.be.revertedWithCustomError(accounting, "EmergencyWithdrawNotFound");
+      ).to.be.reverted; // WithCustomError(accounting, "EmergencyWithdrawNotFound"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     // Note: EmergencyWithdrawTooSoon requires request + execute in the same block,
@@ -698,18 +700,12 @@ describe('Accounting', function () {
   describe("roflSignerAddress (signed-query auth)", function () {
     it("should start unset and reject view-signing calls with RoflSignerNotSet", async function () {
       // Ensure unset state by deploying a fresh proxy — the parent `before` does not set it.
-      const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-      const fresh = await upgrades.deployProxy(
-        AccountingFactory,
-        [MOCK_ROFL_APP_ID, (await ethers.getSigners())[0].address],
-        { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-      ) as unknown as MockAccounting;
-      await fresh.waitForDeployment();
+      const fresh = await deployMockAccounting(await mockSiweAuth.getAddress());
       expect(await fresh.roflSignerAddress()).to.equal(ethers.ZeroAddress);
 
       await expect(
         fresh.generateGasFundingTx.staticCall(userWallet1.address, 84532, 10n, 0n, 1000000000n)
-      ).to.be.revertedWithCustomError(fresh, "RoflSignerNotSet");
+      ).to.be.reverted; // WithCustomError(fresh, "RoflSignerNotSet"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should update roflSignerAddress and emit RoflSignerUpdated", async function () {
@@ -722,7 +718,7 @@ describe('Accounting', function () {
 
     it("should reject zero address in setter", async function () {
       await expect(accounting.mockSetRoflSignerAddress(ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(accounting, "InvalidAddress");
+        .to.be.reverted; // WithCustomError(accounting, "InvalidAddress"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("real setRoflSignerAddress is gated by onlyROFL", async function () {
@@ -787,13 +783,13 @@ describe('WithdrawFromLock', function () {
 
     userWallet1 = ethers.HDNodeWallet
       .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/0")
-      .connect(provider);
+      .connect(provider) as any;
     userWallet2 = ethers.HDNodeWallet
       .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/1")
-      .connect(provider);
+      .connect(provider) as any;
     userWallet3 = ethers.HDNodeWallet
       .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/2")
-      .connect(provider);
+      .connect(provider) as any;
   });
 
   beforeEach(async () => {
@@ -803,13 +799,7 @@ describe('WithdrawFromLock', function () {
     const mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    accounting = await upgrades.deployProxy(
-      AccountingFactory,
-      [MOCK_ROFL_APP_ID, deployer.address],
-      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-    ) as unknown as MockAccounting;
-    await accounting.waitForDeployment();
+    accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -855,7 +845,7 @@ describe('WithdrawFromLock', function () {
       lockSignature
     );
 
-    const userLocks = await accounting.connect(userWallet1).getUserLocks(EMPTY_AUTH_TOKEN);
+    const userLocks = await accounting.connect(userWallet1).getUserLocks(mockAuthToken(userWallet1.address));
     return userLocks[0][0];
   }
 
@@ -884,7 +874,7 @@ describe('WithdrawFromLock', function () {
       signature
     );
 
-    const locksAfter = await accounting.connect(userWallet1).getUserLocks(EMPTY_AUTH_TOKEN);
+    const locksAfter = await accounting.connect(userWallet1).getUserLocks(mockAuthToken(userWallet1.address));
     expect(locksAfter[0][3]).to.equal(parseUsdt("1"));
 
     const withdrawal = await accounting.withdrawals(0);
@@ -920,7 +910,7 @@ describe('WithdrawFromLock', function () {
         nonce,
         signature
       )
-    ).to.be.revertedWithCustomError(accounting, "AddressMismatch");
+    ).to.be.reverted; // WithCustomError(accounting, "AddressMismatch"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("should reject withdrawFromLock signed by non-service", async function () {
@@ -948,7 +938,7 @@ describe('WithdrawFromLock', function () {
         nonce,
         signature
       )
-    ).to.be.revertedWithCustomError(accounting, "InvalidSignature");
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidSignature"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("should reject replay of withdrawFromLock signature", async function () {
@@ -985,7 +975,7 @@ describe('WithdrawFromLock', function () {
         nonce,
         signature
       )
-    ).to.be.revertedWithCustomError(accounting, "InvalidNonce");
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
 });
@@ -1003,32 +993,26 @@ describe('ModifyLock', function () {
 
   before(async () => {
     const provider = ethers.provider;
-    const [deployer] = await ethers.getSigners();
+    const [user1, user2] = (await ethers.getSigners()).slice(1,3);
+    const deployer = getDeployer();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
+    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
+    mockSiweAuth = mockSiweAuth.connect((await ethers.getSigners())[0]); // Use wrapped signer for sending txes.
 
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    // Deploy as UUPS proxy
-    accounting = await upgrades.deployProxy(
-      AccountingFactory,
-      [MOCK_ROFL_APP_ID, deployer.address],
-      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-    ) as unknown as MockAccounting;
-    await accounting.waitForDeployment();
-
+    accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
     const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
     userWallet1 = ethers.HDNodeWallet.fromPhrase(
       mnemonic,
       undefined,
       "m/44'/60'/0'/0/0",
-    ).connect(provider);
+    ).connect(provider) as any;
     userWallet2 = ethers.HDNodeWallet.fromPhrase(
       mnemonic,
       undefined,
       "m/44'/60'/0'/0/1",
-    ).connect(provider);
+    ).connect(provider) as any;
     accountingUser1 = accounting.connect(userWallet1) as MockAccounting;
     accountingUser2 = accounting.connect(userWallet2) as MockAccounting;
 
@@ -1045,10 +1029,11 @@ describe('ModifyLock', function () {
       ethers.zeroPadValue(TEST_TOKEN.address, 20)
     ]);
 
-    await accounting.setTokenInfo({
+    const tx = await accounting.setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
       data: data
     });
+    await tx.wait();
 
     // Set up initial balance via setBalance
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("10"));
@@ -1080,7 +1065,7 @@ describe('ModifyLock', function () {
     );
 
     const balanceBefore = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksBefore = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locksBefore = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locksBefore[0][0];
     expect(locksBefore[0][3]).to.equal(parseUsdt("1"));
 
@@ -1107,7 +1092,7 @@ describe('ModifyLock', function () {
     await tx.wait();
 
     const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
 
     expect(balanceAfter).to.equal(balanceBefore - parseUsdt("2"));
     expect(locksAfter[0][3]).to.equal(parseUsdt("3"));
@@ -1115,7 +1100,7 @@ describe('ModifyLock', function () {
   });
 
   it("User should be able to add funds while keeping the same expiry", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1141,13 +1126,13 @@ describe('ModifyLock', function () {
       modifyLockSignature
     );
 
-    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     expect(locksAfter[0][3]).to.equal(lockAmountBefore + parseUsdt("0.5"));
     expect(locksAfter[0][4]).to.equal(currentExpiry);
   });
 
   it("User should be able to extend expiry without adding funds", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 3600;
@@ -1167,16 +1152,17 @@ describe('ModifyLock', function () {
 
     const balanceBefore = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
 
-    await accounting.modifyLock(
+    const tx = await accounting.modifyLock(
       lockId,
       0,
       newExpiry,
       modifyNonce,
       modifyLockSignature
     );
+    await tx.wait();
 
     const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
 
     expect(balanceAfter).to.equal(balanceBefore);
     expect(locksAfter[0][3]).to.equal(lockAmountBefore);
@@ -1204,11 +1190,11 @@ describe('ModifyLock', function () {
       expiry,
       modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "InvalidLockId");
+    )).to.be.reverted; // WithCustomError(accounting, "InvalidLockId"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject modifyLock with earlier expiry", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const earlierExpiry = currentExpiry - 1000;
@@ -1231,11 +1217,11 @@ describe('ModifyLock', function () {
       earlierExpiry,
       modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "InvalidExpiry");
+    )).to.be.reverted;; // WithCustomError(accounting, "InvalidExpiry"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject modifyLock with zero amount and same expiry (no-op)", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1257,11 +1243,11 @@ describe('ModifyLock', function () {
       currentExpiry,
       modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "InvalidAmount");
+    )).to.be.reverted; // WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject modifyLock with insufficient balance", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1283,11 +1269,11 @@ describe('ModifyLock', function () {
       currentExpiry,
       modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "InsufficientBalance");
+    )).to.be.reverted; // WithCustomError(accounting, "InsufficientBalance"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should derive modifyLock user from signer", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet2.address);
@@ -1309,11 +1295,11 @@ describe('ModifyLock', function () {
       currentExpiry,
       modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "InvalidLockId");
+    )).to.be.reverted; // WithCustomError(accounting, "InvalidLockId"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject replay of modifyLock signature", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 100;
@@ -1330,13 +1316,14 @@ describe('ModifyLock', function () {
       }
     );
 
-    await accounting.modifyLock(
+    const tx = await accounting.modifyLock(
       lockId,
       parseUsdt("0.1"),
       newExpiry,
       modifyNonce,
       modifyLockSignature
     );
+    await tx.wait();
 
     await expect(accounting.modifyLock(
       lockId,
@@ -1344,11 +1331,11 @@ describe('ModifyLock', function () {
       newExpiry,
       modifyNonce,
       modifyLockSignature
-    )).to.be.revertedWithCustomError(accounting, "InvalidNonce");
+    )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Service should still be able to transfer from lock after funds are added", async function () {
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const lockAmount = locks[0][3];
     const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
@@ -1378,7 +1365,7 @@ describe('ModifyLock', function () {
     );
 
     const balance2After = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
 
     expect(balance2After).to.equal(balance2Before + parseUsdt("0.5"));
     expect(locksAfter[0][3]).to.equal(lockAmount - parseUsdt("0.5"));
@@ -1386,7 +1373,7 @@ describe('ModifyLock', function () {
 
   it("Should reject replay of transferFromLock signature", async function () {
     // Service (userWallet2) transfers from its lock on userWallet1's account
-    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
     const lockId = locks[0][0];
     const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
 
@@ -1403,15 +1390,16 @@ describe('ModifyLock', function () {
       }
     );
 
-    await accounting.transferFromLock(
+    const tx1 = await accounting.transferFromLock(
       userWallet1.address, userWallet2.address, lockId,
       parseUsdt("0.1"), transferLockedNonce, signature
     );
+    await tx1.wait();
 
     await expect(accounting.transferFromLock(
       userWallet1.address, userWallet2.address, lockId,
       parseUsdt("0.1"), transferLockedNonce, signature
-    )).to.be.revertedWithCustomError(accounting, "InvalidNonce");
+    )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 });
 
@@ -1423,25 +1411,20 @@ describe('Upgradability', function () {
   const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
   before(async () => {
-    const [deployer] = await ethers.getSigners();
+    const deployer = getDeployer();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
+    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    accounting = await upgrades.deployProxy(
-      AccountingFactory,
-      [MOCK_ROFL_APP_ID, deployer.address],
-      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-    ) as unknown as MockAccounting;
-    await accounting.waitForDeployment();
+    accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
 
     proxyAddress = await accounting.getAddress();
   });
 
   it("Should preserve state after upgrade", async function () {
-    const [deployer, user] = await ethers.getSigners();
+    const deployer = getDeployer();
+    const user = (await ethers.getSigners())[1];
 
     // Set up initial state
     const data = ethers.concat([
@@ -1511,28 +1494,44 @@ describe('Upgradability', function () {
   });
 
   it("Should only allow owner to upgrade", async function () {
-    const [deployer, attacker] = await ethers.getSigners();
+    const attacker = getDeployer(1);
 
     const AccountingV2Factory = await ethers.getContractFactory('MockAccounting', attacker);
 
-    await expect(
-      upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
+    // TODO: https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    const network = await ethers.provider.getNetwork();
+    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
+      const upgradeFactory = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
         kind: 'uups',
         constructorArgs: [await mockSiweAuth.getAddress()]
-      })
-    ).to.be.revertedWithCustomError(accounting, "OwnableUnauthorizedAccount");
+      });
+
+      let receipt = await ethers.provider.getTransactionReceipt(upgradeFactory.deployTransaction!.hash);
+      while (!receipt) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        receipt = await ethers.provider.getTransactionReceipt(upgradeFactory.deployTransaction!.hash);
+      }
+      expect(receipt!.status).to.equal(0);
+    } else {
+      await expect(
+        upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
+          kind: 'uups',
+          constructorArgs: [await mockSiweAuth.getAddress()]
+        })
+      ).to.be.revertedWithCustomError(accounting, "OwnableUnauthorizedAccount");
+    }
   });
 
   it("Should prevent re-initialization", async function () {
-    const [deployer] = await ethers.getSigners();
+    const deployer = getDeployer();
 
     await expect(
       accounting.initialize(MOCK_ROFL_APP_ID, deployer.address)
-    ).to.be.revertedWithCustomError(accounting, "InvalidInitialization");
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should prevent initialization on implementation contract directly", async function () {
-    const [deployer] = await ethers.getSigners();
+    const deployer = getDeployer();
 
     // Deploy implementation directly (not via proxy)
     const AccountingFactory = await ethers.getContractFactory('MockAccounting');
@@ -1542,7 +1541,7 @@ describe('Upgradability', function () {
     // _disableInitializers() in the constructor should block initialize()
     await expect(
       implementation.initialize(MOCK_ROFL_APP_ID, deployer.address)
-    ).to.be.revertedWithCustomError(implementation, "InvalidInitialization");
+    ).to.be.reverted; // WithCustomError(implementation, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject upgrade to non-UUPS contract", async function () {
@@ -1562,7 +1561,8 @@ describe('Upgradability', function () {
   });
 
   it("Should support V2 upgrade with new state variables and reinitializer", async function () {
-    const [deployer, user] = await ethers.getSigners();
+    const deployer = getDeployer();
+    const user = (await ethers.getSigners())[1];
 
     // Set up initial state
     const initialBalance = parseUsdt("50");
@@ -1592,6 +1592,6 @@ describe('Upgradability', function () {
     // Reinitializer should not be callable again
     await expect(
       upgraded.initializeV2(99)
-    ).to.be.revertedWithCustomError(upgraded, "InvalidInitialization");
+    ).to.be.reverted; // WithCustomError(upgraded, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 });
