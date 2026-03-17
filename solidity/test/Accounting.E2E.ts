@@ -199,6 +199,7 @@ describe('Accounting', function () {
     console.log("tokenId", tokenId);
 
     expect(tokenId).to.equal(TEST_TOKEN.tokenId);
+    expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
   });
 
   it("User should be able to deposit", async function () {

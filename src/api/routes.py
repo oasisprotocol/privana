@@ -105,7 +105,7 @@ async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositRespo
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
-@router.post("/deposits/for-user", response_model=TransactionSubmissionResponse)
+@router.post("/deposits/to-beneficiary", response_model=TransactionSubmissionResponse)
 async def credit_deposit_to(
     payload: CreditDepositToRequest,
 ) -> TransactionSubmissionResponse:

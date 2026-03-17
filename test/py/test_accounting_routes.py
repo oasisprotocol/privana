@@ -55,7 +55,7 @@ def test_credit_deposit_to_route_wires_to_service(monkeypatch) -> None:
 
     client = _make_client()
     response = client.post(
-        "/v1/accounting/deposits/for-user",
+        "/v1/accounting/deposits/to-beneficiary",
         json={
             "depositor_address": "0x1234567890123456789012345678901234567890",
             "beneficiary_address": "0x9876543210987654321098765432109876543210",

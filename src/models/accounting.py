@@ -80,36 +80,22 @@ class IncludeDepositRequest(BaseModel):
     user_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     evm_transaction_data: str = Field(..., description="RLP encoded transaction payload (hex)")
-    rlp_block_header: Optional[str] = Field(
-        None, description="Optional RLP block header proof (hex)"
-    )
-    transaction_index_rlp: Optional[str] = Field(
-        None, description="Optional RLP encoded tx index proof (hex)"
-    )
-    transaction_proof_stack: Optional[str] = Field(
-        None, description="Optional proof stack data (hex)"
-    )
-    receipt_index_rlp: Optional[str] = Field(
-        None, description="Optional RLP encoded receipt index proof (hex)"
-    )
-    receipt_proof_stack: Optional[str] = Field(
-        None, description="Optional receipt proof stack data (hex)"
-    )
-
-    @field_validator("token_id", "evm_transaction_data")
-    def _normalise_required_hex(cls, value: str) -> str:
-        return _normalise_hex(value)
+    rlp_block_header: str = Field(..., min_length=1, description="RLP block header proof (hex)")
+    transaction_index_rlp: str = Field(..., min_length=1, description="RLP encoded tx index proof (hex)")
+    transaction_proof_stack: str = Field(..., min_length=1, description="Tx proof stack data (hex)")
+    receipt_index_rlp: str = Field(..., min_length=1, description="RLP encoded receipt index proof (hex)")
+    receipt_proof_stack: str = Field(..., min_length=1, description="Receipt proof stack data (hex)")
 
     @field_validator(
+        "token_id",
+        "evm_transaction_data",
         "rlp_block_header",
         "transaction_index_rlp",
         "transaction_proof_stack",
         "receipt_index_rlp",
         "receipt_proof_stack",
     )
-    def _normalise_optional_hex(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return value
+    def _normalise_required_hex(cls, value: str) -> str:
         return _normalise_hex(value)
 
 

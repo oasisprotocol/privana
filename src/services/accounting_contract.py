@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from eth_typing import ChecksumAddress
+from eth_utils.constants import ZERO_ADDRESS
 from hexbytes import HexBytes
 from sapphirepy import sapphire
 from web3 import AsyncWeb3, Web3
@@ -148,10 +149,6 @@ class AccountingContractService:
         if not isinstance(value, str) or not Web3.is_address(value):
             raise ValueError(f"Invalid {field} provided")
         return _to_checksum(value)
-
-    @staticmethod
-    def _is_zero_address(value: str) -> bool:
-        return value.lower() == "0x0000000000000000000000000000000000000000"
 
     def _require_positive(self, value: Any, field: str, allow_zero: bool = False) -> int:
         try:
@@ -610,7 +607,7 @@ class AccountingContractService:
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
 
-        if self._is_zero_address(str(to_addr)):
+        if str(to_addr).lower() == ZERO_ADDRESS:
             raise ValueError("to_address must not be the zero address")
 
         contract_reader = self._get_reader_contract()
@@ -686,7 +683,7 @@ class AccountingContractService:
             payload["depositor_signature"], "depositor_signature"
         )
 
-        if self._is_zero_address(str(beneficiary)):
+        if str(beneficiary).lower() == ZERO_ADDRESS:
             raise ValueError("beneficiary_address must not be the zero address")
 
         self._validate_proof_data(payload)
