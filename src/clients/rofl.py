@@ -3,7 +3,6 @@
 import base64
 import logging
 
-import cbor2
 from eth_account import Account
 from oasis_rofl_client import AsyncRoflClient
 from web3.types import TxParams
@@ -118,75 +117,47 @@ class RoflAppdClient:
             logger.error(f"Error generating keypair: {e}")
             raise
 
-    async def submit_tx(self, tx: TxParams, encrypt: bool = False) -> str:
+    async def submit_tx(self, tx: TxParams, encrypt: bool = False) -> None:
         """Submit a transaction to the ROFL daemon for signing and relay.
 
         Args:
             tx: Transaction parameters (must include 'to', 'data', 'gas', 'value')
             encrypt: Whether to encrypt the transaction (default: False)
 
-        Returns:
-            str: The submission ID from ROFL response
-
         Raises:
             ValueError: If required transaction fields are missing
             TransactionRevertedError: If the on-chain transaction reverted
-            Exception: If submission fails
         """
         if "to" not in tx or "data" not in tx:
             raise ValueError("Transaction must include 'to' and 'data' fields")
 
-        logger.info(
-            "Submitting transaction via ROFL to %s with gas %s",
-            tx["to"],
-            tx.get("gas"),
-        )
+        logger.info("Submitting transaction via ROFL to %s", tx["to"])
 
-        try:
-            # AsyncRoflClient.sign_submit returns decoded CBOR directly
-            try:
-                result = await self._client.sign_submit(tx, encrypt)
-            except cbor2.CBORDecodeError as e:
-                raise ValueError(f"ROFL appd returned invalid CBOR response: {e}") from e
+        result = await self._client.sign_submit(tx, encrypt)
 
-            if "fail" in result:
-                fail_info = result["fail"]
-                code = fail_info.get("code")
-                module = fail_info.get("module")
-                raw_message = fail_info.get("message")
+        if "fail" in result:
+            fail_info = result["fail"]
+            code = fail_info.get("code")
+            module = fail_info.get("module")
+            raw_message = fail_info.get("message")
+            error_name = _decode_revert_reason(raw_message)
 
-                # Decode the revert reason from the message
-                error_name = _decode_revert_reason(raw_message)
+            error_msg = f"Transaction reverted: {error_name}"
+            if module:
+                error_msg += f" (module: {module}, code: {code})"
 
-                error_msg = f"Transaction reverted: {error_name}"
-                if module:
-                    error_msg += f" (module: {module}, code: {code})"
+            logger.error(
+                "Transaction reverted: error=%s, module=%s, code=%s",
+                error_name,
+                module,
+                code,
+            )
+            raise TransactionRevertedError(
+                error_msg, code=code, module=module, error_name=error_name
+            )
 
-                logger.error(
-                    "Transaction reverted on-chain: error=%s, module=%s, code=%s, raw=%s",
-                    error_name,
-                    module,
-                    code,
-                    raw_message,
-                )
-                raise TransactionRevertedError(
-                    error_msg, code=code, module=module, error_name=error_name
-                )
-
-            if "ok" not in result:
-                raise ValueError(
-                    f"Invalid ROFL response: missing 'ok' key. Response keys: {list(result.keys())}"
-                )
-
-            submission_id = cbor2.dumps(result).hex()
-            logger.info("ROFL submission id: %s", submission_id)
-            return submission_id
-
-        except TransactionRevertedError:
-            raise
-        except Exception as e:
-            logger.error("ROFL submission exception: %s", str(e), exc_info=True)
-            raise
+        if "ok" not in result:
+            raise ValueError("Invalid ROFL response: missing 'ok' key")
 
 
 async def get_keypair(key_id: str = ACCOUNTING_SERVICE_KEY):

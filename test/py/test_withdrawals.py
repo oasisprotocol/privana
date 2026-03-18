@@ -26,7 +26,7 @@ class TestWithdrawalProcessor:
                 "current_block": 100,
             }
         )
-        service.resolve_withdrawal = AsyncMock(return_value=MagicMock(submission_id="test-123"))
+        service.resolve_withdrawal = AsyncMock(return_value=MagicMock(status="submitted"))
         service._send_raw_transaction = AsyncMock(return_value="0x" + "ab" * 32)
         # Return a mock contract with async call methods
         mock_contract = MagicMock()
@@ -241,9 +241,7 @@ class TestWithdrawalProcessor:
             False,
             b"",
         )
-        processor.accounting_service.resolve_withdrawal.return_value = MagicMock(
-            submission_id="test-123"
-        )
+        processor.accounting_service.resolve_withdrawal.return_value = MagicMock(status="submitted")
 
         withdrawal = {"index": 0, "chain_id": TEST_CHAIN_ID}
 

@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from src.models.types import Settings
 
@@ -42,6 +42,13 @@ def _get_int(name: str, default: int) -> int:
         return int(value, 0)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
+
+
+def _parse_chain_ids(value: Optional[str]) -> Set[int]:
+    """Parse comma-separated chain IDs (supports hex like 0x5afe)."""
+    if not value:
+        return set()
+    return {int(x.strip(), 0) for x in value.split(",") if x.strip()}
 
 
 def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
@@ -92,6 +99,11 @@ def load_settings(refresh: bool = False) -> Settings:
             min_withdrawal_gas_balance=_get_int(
                 "MIN_WITHDRAWAL_GAS_BALANCE", _defaults.min_withdrawal_gas_balance
             ),
+            auth_token_validity_seconds=_get_int(
+                "AUTH_TOKEN_VALIDITY_SECONDS", _defaults.auth_token_validity_seconds
+            ),
+            siwe_domain=os.getenv("SIWE_DOMAIN", _defaults.siwe_domain),
+            siwe_allowed_chain_ids=_parse_chain_ids(os.getenv("SIWE_ALLOWED_CHAIN_IDS")),
         )
     return _settings
 

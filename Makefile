@@ -10,7 +10,7 @@ run:
 	uv run python -m src.main
 
 test:
-	uv run pytest
+	DISABLE_ROFL_KEYS=1 uv run pytest
 
 lint:
 	uv run ruff check src test

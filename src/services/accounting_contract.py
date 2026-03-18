@@ -56,7 +56,6 @@ def _to_prefixed_hex(value: Any) -> str:
 class SubmissionResult:
     """Plain DTO for transaction submission results."""
 
-    submission_id: str
     status: str
     detail: Optional[str] = None
 
@@ -141,8 +140,8 @@ class AccountingContractService:
         self, data: bytes, value: int = 0, gas: Optional[int] = None
     ) -> SubmissionResult:
         tx = self._build_tx(data, value=value, gas=gas)
-        submission_id = await self.rofl_client.submit_tx(tx)
-        return SubmissionResult(submission_id=submission_id, status="submitted")
+        await self.rofl_client.submit_tx(tx)
+        return SubmissionResult(status="submitted")
 
     def _require_address(self, value: str, field: str) -> ChecksumAddress:
         if not isinstance(value, str) or not Web3.is_address(value):
@@ -669,16 +668,14 @@ class AccountingContractService:
             signature,
         )
 
-        submission_id = await self.rofl_client.submit_tx(
-            self._build_tx(fn._encode_transaction_data())
-        )
+        await self.rofl_client.submit_tx(self._build_tx(fn._encode_transaction_data()))
 
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:
             detail_parts.append(f"token_address={context.token_address}")
         detail = "; ".join(detail_parts)
 
-        return SubmissionResult(submission_id=submission_id, status="submitted", detail=detail)
+        return SubmissionResult(status="submitted", detail=detail)
 
     async def resolve_withdrawal(self, index: int) -> SubmissionResult:
         """Submit resolveWithdrawal transaction via ROFL."""
@@ -907,6 +904,38 @@ class AccountingContractService:
         r, s, v = self._parse_signature_rsv(signature)
         token = await contract_reader.functions.login(siwe_message, (r, s, v)).call()
         return {"token": _to_prefixed_hex(token)}
+
+    async def set_auth_token_enc_key(self, enc_key: bytes) -> SubmissionResult:
+        """Set the AuthToken encryption key in the contract.
+
+        This is called during startup to sync the ROFL-derived encryption key
+        with the contract. The contract verifies the ROFL origin.
+
+        Args:
+            enc_key: 32-byte Deoxys-II encryption key.
+
+        Returns:
+            Submission result with transaction ID.
+        """
+        if len(enc_key) != 32:
+            raise ValueError(f"Encryption key must be 32 bytes, got {len(enc_key)}")
+
+        # Build the transaction
+        siwe_auth_reader = await self._get_siwe_auth_reader_contract()
+        fn = siwe_auth_reader.functions.setAuthTokenEncKey(enc_key)
+
+        # Submit via ROFL
+        tx = {
+            "to": await self._get_siwe_auth_address(),
+            "value": 0,
+            "gas": self.gas_limit,
+            "data": Web3.to_hex(fn._encode_transaction_data()),
+        }
+
+        await self.rofl_client.submit_tx(tx)
+        logger.info("AuthToken encryption key submitted to contract")
+
+        return SubmissionResult(status="submitted")
 
     async def get_balance(
         self, user_address: str, token_id: str, siwe_token: bytes
