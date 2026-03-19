@@ -390,6 +390,7 @@ class SiweNonceResponse(BaseModel):
         Replay attempts with the same nonce will be rejected.
     """
 
+    address: str = Field(..., description="Checksummed Ethereum address associated with the nonce")
     nonce: str = Field(..., description="Nonce to include in SIWE message")
     expires_in: int = Field(..., description="Seconds until nonce expires")
 

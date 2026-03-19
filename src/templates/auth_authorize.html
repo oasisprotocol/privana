@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in with Flexvaults</title>
+    <link rel="stylesheet" href="__AUTH_CSS_HREF__" />
+  </head>
+  <body>
+    <main class="auth-shell">
+      <section class="auth-card" aria-live="polite">
+        <p class="eyebrow">Flexvaults Authentication</p>
+        <h1>Sign in to continue</h1>
+        <p class="subtitle">
+          Review the requesting app, connect your wallet, and sign a message on the Flexvaults domain.
+        </p>
+
+        <dl class="auth-meta">
+          <div>
+            <dt>Requesting App</dt>
+            <dd id="app-name">Loading…</dd>
+          </div>
+          <div>
+            <dt>Redirect Domain</dt>
+            <dd id="redirect-origin">Loading…</dd>
+          </div>
+          <div>
+            <dt>Wallet</dt>
+            <dd id="wallet-address">Not connected</dd>
+          </div>
+        </dl>
+
+        <p id="status-message" class="status-message">Ready to connect your wallet.</p>
+        <p id="error-message" class="error-message" hidden></p>
+
+        <div class="actions">
+          <button id="cancel-button" type="button" class="button button-secondary">Cancel</button>
+          <button id="connect-button" type="button" class="button button-primary">Connect Wallet</button>
+        </div>
+      </section>
+    </main>
+
+    <script id="auth-context" type="application/json">__AUTH_CONTEXT_JSON__</script>
+    <script type="module" src="__AUTH_JS_SRC__"></script>
+  </body>
+</html>

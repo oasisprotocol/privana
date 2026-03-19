@@ -21,6 +21,7 @@ DEFAULT_JWT_AUDIENCE = "flexvaults"
 
 # Token types
 TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_ID = "id"
 TOKEN_TYPE_REFRESH = "refresh"
 
 
@@ -42,8 +43,17 @@ class JWTService:
             f"access expiry: {self._expiry_hours}h, refresh expiry: {self._refresh_expiry_days}d"
         )
 
+    def _encode_token(self, payload: dict) -> str:
+        """Sign and encode a JWT payload."""
+        return jwt.encode(
+            payload,
+            self._key_manager.get_private_key_pem(),
+            algorithm=self._key_manager.algorithm,
+            headers={"kid": self._key_manager.key_id},
+        )
+
     def create_token(self, address: str) -> str:
-        """Create an access JWT for an authenticated user.
+        """Create an API access JWT for an authenticated user.
 
         Args:
             address: Ethereum address of the user (will be checksummed).
@@ -67,14 +77,30 @@ class JWTService:
             "type": TOKEN_TYPE_ACCESS,  # Token type
         }
 
-        token = jwt.encode(
-            payload,
-            self._key_manager.get_private_key_pem(),
-            algorithm=self._key_manager.algorithm,
-            headers={"kid": self._key_manager.key_id},
-        )
+        token = self._encode_token(payload)
 
         logger.debug(f"Created access JWT for {address}, expires at {expiry}")
+        return token
+
+    def create_id_token(self, address: str, audience: str) -> str:
+        """Create an identity JWT for a specific client audience."""
+        address = Web3.to_checksum_address(address)
+
+        now = datetime.now(timezone.utc)
+        expiry = now + timedelta(hours=self._expiry_hours)
+
+        payload = {
+            "sub": address,
+            "iss": self._issuer,
+            "aud": audience,
+            "iat": int(now.timestamp()),
+            "nbf": int(now.timestamp()),
+            "exp": int(expiry.timestamp()),
+            "type": TOKEN_TYPE_ID,
+        }
+
+        token = self._encode_token(payload)
+        logger.debug(f"Created id JWT for {address}, audience {audience}, expires at {expiry}")
         return token
 
     def create_refresh_token(self, address: str) -> str:
@@ -106,12 +132,7 @@ class JWTService:
             "jti": jti,
         }
 
-        token = jwt.encode(
-            payload,
-            self._key_manager.get_private_key_pem(),
-            algorithm=self._key_manager.algorithm,
-            headers={"kid": self._key_manager.key_id},
-        )
+        token = self._encode_token(payload)
 
         # Store refresh token for validation/revocation
         self._token_store.store_refresh_token(jti, address, expiry.timestamp())
@@ -119,7 +140,7 @@ class JWTService:
         logger.debug(f"Created refresh token for {address}, expires at {expiry}")
         return token
 
-    def verify_token(self, token: str) -> dict:
+    def verify_token(self, token: str, audience: Optional[str] = None) -> dict:
         """Verify a JWT and return its claims.
 
         Args:
@@ -137,7 +158,7 @@ class JWTService:
                 self._key_manager.get_public_key_pem(),
                 algorithms=[self._key_manager.algorithm],
                 issuer=self._issuer,
-                audience=self._audience,
+                audience=audience or self._audience,
             )
             logger.debug(f"Verified JWT for {payload.get('sub')}")
             return payload
@@ -171,6 +192,18 @@ class JWTService:
 
         if payload.get("type") != TOKEN_TYPE_ACCESS:
             raise ValueError("Expected access token")
+
+        address = payload.get("sub")
+        if not address:
+            raise ValueError("Token missing 'sub' claim")
+        return Web3.to_checksum_address(address)
+
+    def verify_id_token(self, token: str, audience: str) -> str:
+        """Verify an identity token for a specific audience and return the subject address."""
+        payload = self.verify_token(token, audience=audience)
+
+        if payload.get("type") != TOKEN_TYPE_ID:
+            raise ValueError("Expected id token")
 
         address = payload.get("sub")
         if not address:

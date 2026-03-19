@@ -6,14 +6,25 @@ Requests and responses are JSON. Hex strings must include the `0x` prefix. Signa
 
 ## Authentication (private reads)
 
-Balances and lock details are private. To read them via this API, clients must authenticate using SIWE and include the returned token in the `X-SIWE-Token` header.
+Balances and lock details are private.
 
-High-level flow:
-1. `GET /auth/domain` to fetch the SIWE domain bound to the contract.
-2. Create a SIWE message using that domain and the Sapphire chain ID (e.g., 23295 for Sapphire Testnet).
-3. Sign the message with the user's wallet (`signMessage`).
-4. `POST /auth/login` with `{ siwe_message, signature }` to receive a `token`.
-5. Include `X-SIWE-Token: <token>` on private read endpoints.
+Supported authentication modes:
+1. **Direct SIWE on the Flexvaults auth origin**
+   - `GET /auth/domain` to fetch the configured SIWE domain.
+   - `GET /auth/nonce?address=<user>` to fetch a single-use nonce.
+   - Sign a SIWE message on the current wallet chain using that domain and nonce.
+   - `POST /auth/login` with `{ siwe_message, signature }`.
+   - Use the returned `jwt_access_token` as `Authorization: Bearer <token>` on private read endpoints.
+   - The returned `siwe_token` can also be passed via `X-SIWE-Token` for direct token-based private reads.
+   - Browser requests to `/auth/nonce` and `/auth/login` must originate from the configured Flexvaults auth origin. Non-browser clients may omit the `Origin` header.
+2. **Cross-domain / third-party apps**
+   - Redirect or open a popup to `GET /auth/authorize` with `client_id`, exact `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `state`, and `response_mode`.
+   - The Flexvaults auth page performs SIWE on the canonical Flexvaults domain and returns a short-lived authorization code.
+   - Exchange that code at `POST /auth/token` with `grant_type=authorization_code`, the code, and the PKCE verifier to receive:
+     - `access_token` for Flexvaults API calls
+     - `id_token` for third-party backend identity verification
+     - `refresh_token` for Flexvaults access-token rotation
+   - Registered `redirect_uri` values must use `https`, except `http://localhost` / loopback development callbacks.
 
 ## Endpoints
 
@@ -80,7 +91,8 @@ Modify an existing lock by adding funds and/or extending the expiry.
 ### GET `/funds/locked/{user_address}`
 Get locked funds for a user, optionally filtered by `service_address`.
 - **Headers**
-  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
+  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
+  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 - **Query parameters**
   - `service_address` (string, optional) – Filter locks by service.
 - **Note**
@@ -125,7 +137,8 @@ Unlock all expired locks for a user in a single transaction.
 ### GET `/funds/expired/{user_address}`
 Get all expired locks for a user.
 - **Headers**
-  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
+  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
+  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 - **Response body**
   - `user_address` (string) – Checksummed user address.
   - `expired_locks` (array) – List of expired lock records:
@@ -190,12 +203,14 @@ Get information about a specific withdrawal request.
 ### GET `/balances/{user_address}/{token_id}`
 Get the user's balance for a specific token.
 - **Headers**
-  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
+  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
+  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 
 ### POST `/balances/batch`
 Get balances for multiple tokens for a user.
 - **Headers**
-  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
+  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
+  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 - **Request body**
   - `user_address` (string, required)
   - `token_ids` (array[string], required) – Bytes32 token identifiers (hex), max 100 items
@@ -203,18 +218,104 @@ Get balances for multiple tokens for a user.
 ### GET `/funds/locked/total/{user_address}/{token_id}`
 Get total locked balance for a specific token across all locks.
 - **Headers**
-  - `X-SIWE-Token` (string, required) – SIWE auth token from `POST /auth/login`.
+  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
+  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 
 ### GET `/auth/domain`
-Get the SIWE domain bound to the contract.
+Get the configured SIWE domain that clients must use in the SIWE message.
+
+### GET `/auth/nonce`
+Get a single-use nonce for SIWE login.
+- **Query parameters**
+  - `address` (string, required) – User's EVM address.
+- **Response body**
+  - `address` (string) – Checksummed Ethereum address associated with the nonce.
+  - `nonce` (string)
+  - `expires_in` (integer) – Nonce TTL in seconds.
+- **Browser restriction**
+  - Browser requests must originate from the configured Flexvaults auth origin.
 
 ### POST `/auth/login`
-Perform SIWE login and receive an opaque token for private reads.
+Perform SIWE login, mint an encrypted Sapphire auth token, and issue JWT credentials.
 - **Request body**
   - `siwe_message` (string, required)
   - `signature` (string, required) – `signMessage` signature for the SIWE message (hex)
+- **Browser restriction**
+  - Browser requests must originate from the configured Flexvaults auth origin.
 - **Response body**
-  - `token` (string) – SIWE auth token (hex). Include in `X-SIWE-Token`.
+  - `siwe_token` (string) – Encrypted SIWE token (hex) for direct `X-SIWE-Token` private reads.
+  - `jwt_access_token` (string) – JWT access token for `Authorization: Bearer`.
+  - `jwt_refresh_token` (string) – Refresh token for `POST /auth/jwt/refresh`.
+  - `address` (string) – Authenticated Ethereum address.
+  - `jwt_expires_in` (integer) – Access-token TTL in seconds.
+  - `jwt_refresh_expires_in` (integer) – Refresh-token TTL in seconds.
+
+### POST `/auth/jwt/refresh`
+Rotate a refresh token and obtain a fresh access token pair.
+- **Request body**
+  - `refresh_token` (string, required)
+- **Response body**
+  - `token` (string) – New JWT access token.
+  - `refresh_token` (string) – New refresh token.
+  - `expires_in` (integer)
+  - `refresh_expires_in` (integer)
+
+### POST `/auth/jwt/logout`
+Revoke one refresh token or all refresh tokens for the current JWT-authenticated user.
+- **Headers**
+  - `Authorization: Bearer <access_token>` (required)
+- **Request body**
+  - `refresh_token` (string, optional) – Specific refresh token to revoke.
+  - `revoke_all` (boolean, optional) – Revoke all refresh tokens belonging to the caller.
+
+### GET `/auth/jwt/jwks.json`
+Return the public JWKS document used to verify JWTs issued by this service.
+
+### GET `/auth/jwt/me`
+Return the authenticated Ethereum address for the provided access token.
+- **Headers**
+  - `Authorization: Bearer <access_token>` (required)
+
+### GET `/auth/authorize`
+Serve the Flexvaults authorization page used for cross-domain sign-in.
+- **Query parameters**
+  - `client_id` (string, required)
+  - `redirect_uri` (string, required) – Must exactly match a registered URI for the client.
+  - `code_challenge` (string, required)
+  - `code_challenge_method` (string, required) – Only `S256` is supported.
+  - `state` (string, required)
+  - `response_mode` (string, optional) – `web_message` or `redirect`. Defaults to `web_message`.
+
+### POST `/auth/authorize`
+Verify SIWE on the Flexvaults auth origin and mint a short-lived authorization code.
+- **Request body**
+  - `siwe_message` (string, required)
+  - `signature` (string, required)
+  - `client_id` (string, required)
+  - `redirect_uri` (string, required) – Must exactly match the registered URI.
+  - `code_challenge` (string, required)
+  - `code_challenge_method` (string, required) – Only `S256` is supported.
+- **Browser restriction**
+  - Browser requests must originate from the configured Flexvaults auth origin.
+- **Response body**
+  - `code` (string) – Single-use authorization code.
+
+### POST `/auth/token`
+Exchange an authorization code and PKCE verifier for JWT credentials.
+- **Request body**
+  - `grant_type` (string, required) – Must be `authorization_code`.
+  - `code` (string, required)
+  - `code_verifier` (string, required)
+  - `client_id` (string, required)
+  - `redirect_uri` (string, required) – Must exactly match the authorization request.
+- **Response body**
+  - `access_token` (string) – JWT access token for Flexvaults API calls only.
+  - `id_token` (string) – Client-scoped identity token for third-party backend verification. The audience comes from the configured auth client audience and defaults to `client_id`.
+  - `refresh_token` (string) – Refresh token for rotating the Flexvaults API access token.
+  - `token_type` (string) – `Bearer`
+  - `expires_in` (integer)
+  - `refresh_expires_in` (integer)
+  - `address` (string)
 
 ### GET `/tokens/{token_id}`
 Get information about a registered token.
