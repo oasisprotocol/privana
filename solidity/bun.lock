@@ -6,7 +6,8 @@
       "name": "onchain-signer",
       "dependencies": {
         "@openzeppelin/contracts": "~5.4.0",
-        "@openzeppelin/contracts-upgradeable": "~5.4.0",
+        "@openzeppelin/contracts-upgradeable": "~5.5.0",
+        "bech32": "^1.1.4",
         "cbor": "^10.0.11",
         "solidity-rlp": "^2.0.8",
       },
@@ -296,7 +297,7 @@
 
     "@openzeppelin/contracts": ["@openzeppelin/contracts@5.4.0", "", {}, "sha512-eCYgWnLg6WO+X52I16TZt8uEjbtdkgLC0SUX/xnAksjjrQI4Xfn4iBRoI5j55dmlOhDv1Y7BoR3cU7e3WWhC6A=="],
 
-    "@openzeppelin/contracts-upgradeable": ["@openzeppelin/contracts-upgradeable@5.4.0", "", { "peerDependencies": { "@openzeppelin/contracts": "5.4.0" } }, "sha512-STJKyDzUcYuB35Zub1JpWW58JxvrFFVgQ+Ykdr8A9PGXgtq/obF5uoh07k2XmFyPxfnZdPdBdhkJ/n2YxJ87HQ=="],
+    "@openzeppelin/contracts-upgradeable": ["@openzeppelin/contracts-upgradeable@5.5.0", "", { "peerDependencies": { "@openzeppelin/contracts": "5.5.0" } }, "sha512-Va5hKG5oaK0EE5bXTVWugcGimMHazxL+SL523dH6WVbGiuLXwuWr9oxtLyPHQSVGtgmlIgtKNR5V+OUpCIUwFQ=="],
 
     "@openzeppelin/defender-sdk-base-client": ["@openzeppelin/defender-sdk-base-client@2.7.1", "", { "dependencies": { "@aws-sdk/client-lambda": "^3.563.0", "amazon-cognito-identity-js": "^6.3.6", "async-retry": "^1.3.3", "axios": "^1.7.4" } }, "sha512-7gFCteA+V3396A3McgqzmirwmbPXuHJYN896O3AbsHX9XcxInN74C5Zv3tFHld0GmIX/VlaIvILNMhOpdISZjA=="],
 

@@ -70,7 +70,7 @@
   },
   "dependencies": {
     "@openzeppelin/contracts": "~5.4.0",
-    "@openzeppelin/contracts-upgradeable": "~5.4.0",
+    "@openzeppelin/contracts-upgradeable": "~5.5.0",
     "bech32": "^1.1.4",
     "cbor": "^10.0.11",
     "solidity-rlp": "^2.0.8"
