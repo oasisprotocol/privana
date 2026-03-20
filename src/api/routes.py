@@ -361,6 +361,12 @@ async def get_balance(
         result = await _service.get_balance(user_address, token_id, siwe_token)
         return BalanceResponse(**result)
     except ContractLogicError as exc:
+        logger.warning(
+            "SIWE token validation failed for %s: %s (token length: %d bytes)",
+            user_address,
+            exc,
+            len(siwe_token),
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

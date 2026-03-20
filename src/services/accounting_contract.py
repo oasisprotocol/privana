@@ -20,7 +20,7 @@ from web3.providers import AsyncHTTPProvider
 from src.abi.accounting import ACCOUNTING_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import RoflAppdClient
-from src.config import CHAIN_NAMES, ERC20_TOKENS, NATIVE_TOKEN_SYMBOLS, load_settings
+from src.config import CHAIN_NAMES, NATIVE_TOKEN_SYMBOLS, load_settings
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
 
@@ -384,6 +384,53 @@ class AccountingContractService:
             is_native=is_native,
         )
 
+    async def fetch_registered_erc20_tokens(self) -> Dict[int, Dict[str, str]]:
+        """
+        Fetch all registered ERC20 tokens from contract.
+
+        Returns a mapping of chain_id -> {token_address: token_id} for ERC20 tokens.
+        This allows the deposit listener to dynamically discover which tokens to watch.
+        """
+        contract = self._get_reader_contract()
+        if self.reader_w3 is None:
+            raise ValueError("SAPPHIRE_RPC_URL must be configured to fetch registered tokens")
+
+        erc20_tokens: Dict[int, Dict[str, str]] = {}
+
+        token_ids = await contract.functions.getRegisteredTokens().call()
+        logger.info(f"Fetched {len(token_ids)} registered tokens from contract")
+
+        for token_id in token_ids:
+            try:
+                # Fetch token data from contract
+                # tokenType: 0 = NativeEVM, 1 = ERC20
+                stored_type, token_data = await contract.functions.tokens(token_id).call()
+
+                # Only process ERC20 tokens (tokenType == 1)
+                if stored_type != 1 or len(token_data) < 52:
+                    continue
+
+                # Decode: first 32 bytes = chain_id, next 20 bytes = token address
+                chain_id = int.from_bytes(token_data[:32], byteorder="big")
+                token_address = "0x" + token_data[32:52].hex()
+                token_address = Web3.to_checksum_address(token_address)
+                token_id_hex = Web3.to_hex(token_id)
+
+                if chain_id not in erc20_tokens:
+                    erc20_tokens[chain_id] = {}
+
+                erc20_tokens[chain_id][token_address] = token_id_hex
+                logger.info(
+                    f"Discovered registered ERC20 token: chain={chain_id}, "
+                    f"address={token_address}, tokenId={token_id_hex}"
+                )
+
+            except Exception as e:
+                logger.warning(f"Failed to decode token {Web3.to_hex(token_id)}: {e}")
+                continue
+
+        return erc20_tokens
+
     async def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
         """Check that evmAddress has enough native balance on the destination chain for gas."""
         chain_w3 = await self._get_chain_web3(chain_id)
@@ -414,13 +461,6 @@ class AccountingContractService:
             return NATIVE_TOKEN_SYMBOLS.get(context.chain_id, "ETH")
 
         if context.token_address:
-            token_lower = context.token_address.lower()
-            erc20_mapping = ERC20_TOKENS.get(context.chain_id, {})
-
-            for addr, symbol in erc20_mapping.items():
-                if addr.lower() == token_lower:
-                    return symbol
-
             try:
                 chain_w3 = await self._get_chain_web3(context.chain_id)
                 erc20_abi = [
@@ -920,20 +960,44 @@ class AccountingContractService:
         if len(enc_key) != 32:
             raise ValueError(f"Encryption key must be 32 bytes, got {len(enc_key)}")
 
-        # Build the transaction
+        # Function selector: keccak256("setAuthTokenEncKey(bytes32)")[:4]
+        selector = Web3.keccak(text="setAuthTokenEncKey(bytes32)")[:4]
+        # enc_key is already 32 bytes, just concatenate
+        data = selector + enc_key
+
+        siwe_auth_address = await self._get_siwe_auth_address()
+
+        # Verify ROFL app ID matches before attempting to set key
         siwe_auth_reader = await self._get_siwe_auth_reader_contract()
-        fn = siwe_auth_reader.functions.setAuthTokenEncKey(enc_key)
+        contract_rofl_app_id = await siwe_auth_reader.functions.roflAppId().call()
+        our_rofl_app_id = await self.rofl_client._client.get_app_id()
+        logger.info(
+            "ROFL app ID check - contract expects: %s, we are: %s",
+            contract_rofl_app_id.hex()
+            if isinstance(contract_rofl_app_id, bytes)
+            else contract_rofl_app_id,
+            our_rofl_app_id,
+        )
+
+        # Compute and log the expected key hash for verification
+        expected_key_hash = Web3.keccak(enc_key)
+        logger.info(
+            "Syncing AuthToken encryption key to SIWE auth contract at %s (key prefix: %s..., expected hash: %s)",
+            siwe_auth_address,
+            enc_key[:4].hex(),
+            expected_key_hash.hex(),
+        )
 
         # Submit via ROFL
         tx = {
-            "to": await self._get_siwe_auth_address(),
+            "to": siwe_auth_address,
             "value": 0,
             "gas": self.gas_limit,
-            "data": Web3.to_hex(fn._encode_transaction_data()),
+            "data": Web3.to_hex(data),
         }
 
-        await self.rofl_client.submit_tx(tx)
-        logger.info("AuthToken encryption key submitted to contract")
+        await self.rofl_client.submit_tx(tx, encrypt=True)
+        logger.info("AuthToken encryption key submitted to contract at %s", siwe_auth_address)
 
         return SubmissionResult(status="submitted")
 

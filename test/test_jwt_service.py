@@ -383,9 +383,10 @@ class TestConfiguration:
         assert jwt_service.access_token_expiry_seconds == 24 * 3600
         assert jwt_service.refresh_token_expiry_seconds == 30 * 24 * 3600
 
-    def test_custom_issuer_audience_from_env(self, reset_auth_singletons, monkeypatch):
+    def test_custom_issuer_audience_from_env(
+        self, reset_auth_singletons, disable_rofl_keys, monkeypatch
+    ):
         """Test that issuer and audience can be configured via environment."""
-        monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
         monkeypatch.setenv("JWT_ISSUER", "custom-issuer")
         monkeypatch.setenv("JWT_AUDIENCE", "custom-audience")
 

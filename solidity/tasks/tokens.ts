@@ -1,4 +1,53 @@
 import { task } from "hardhat/config";
+import {
+  fetchBalance,
+  getSiweToken,
+  normalizeApiBaseUrl,
+} from "./utils/siwe";
+
+task("getBalance")
+  .addParam("tokenid", "Token ID (32-byte hex)")
+  .addOptionalParam(
+    "apiurl",
+    "API base URL",
+    "https://flexvaults-staging.rofl.build",
+  )
+  .addOptionalParam("chainid", "Chain ID for SIWE message", "84532")
+  .setDescription("Get user balance for a token (requires SIWE authentication)")
+  .setAction(async (args, hre) => {
+    const [signer] = await hre.ethers.getSigners();
+    const userAddress = signer.address;
+    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
+    const chainId = parseInt(args.chainid);
+
+    console.log("User address:", userAddress);
+    console.log("Token ID:", args.tokenid);
+    console.log("API URL:", apiBaseUrl);
+
+    console.log("\nAuthenticating with SIWE...");
+    const siweToken = await getSiweToken({
+      apiBaseUrl,
+      signer,
+      userAddress,
+      chainId,
+    });
+    console.log("SIWE authentication successful");
+
+    console.log("\nFetching balance...");
+    const balance = await fetchBalance({
+      apiBaseUrl,
+      userAddress,
+      tokenId: args.tokenid,
+      siweToken,
+    });
+
+    console.log("\n=== Balance ===");
+    console.log("Raw (base units):", balance.toString());
+    // Assume 6 decimals for USDC-like tokens, can be parameterized
+    console.log("Formatted (6 decimals):", (Number(balance) / 1e6).toFixed(6));
+
+    return balance;
+  });
 
 task("transferERC20")
   .addOptionalParam("token", "ERC20 token address", "0x12084e1a0fe92b5ab803a81a0ae54d91040f89ca")
@@ -69,6 +118,21 @@ task("transferERC20")
     console.log("Transaction hash:", tx.hash);
 
     return tx.hash;
+  });
+
+task("getAuthKeyHash")
+  .addParam("address", "The address of the SIWE Auth contract")
+  .setDescription("Get the hash of the stored encryption key from the SIWE Auth contract")
+  .setAction(async (args, hre) => {
+    const siweAuthContract = new hre.ethers.Contract(
+      args.address,
+      ["function getAuthTokenEncKeyHash() external view returns (bytes32)"],
+      hre.ethers.provider
+    );
+
+    const keyHash = await siweAuthContract.getAuthTokenEncKeyHash();
+    console.log("Encryption key hash on contract:", keyHash);
+    return keyHash;
   });
 
 task("addEVMNativeToken")

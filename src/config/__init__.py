@@ -27,12 +27,6 @@ NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     84532: "ETH",
 }
 
-ERC20_TOKENS: Dict[int, Dict[str, str]] = {
-    84532: {
-        "0x12084E1A0fe92b5ab803a81A0Ae54D91040F89ca": "USDC",
-    }
-}
-
 
 def _get_int(name: str, default: int) -> int:
     value = os.getenv(name)
@@ -42,6 +36,13 @@ def _get_int(name: str, default: int) -> int:
         return int(value, 0)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes")
 
 
 def _parse_chain_ids(value: Optional[str]) -> Set[int]:
@@ -90,6 +91,11 @@ def load_settings(refresh: bool = False) -> Settings:
             deposit_poll_interval=_get_int(
                 "DEPOSIT_POLL_INTERVAL", _defaults.deposit_poll_interval
             ),
+            deposit_batch_size=_get_int("DEPOSIT_BATCH_SIZE", _defaults.deposit_batch_size),
+            deposit_lookback_blocks=_get_int(
+                "DEPOSIT_LOOKBACK_BLOCKS", _defaults.deposit_lookback_blocks
+            ),
+            deposit_reset_state=_get_bool("DEPOSIT_RESET_STATE", _defaults.deposit_reset_state),
             withdrawal_poll_interval=_get_int(
                 "WITHDRAWAL_POLL_INTERVAL", _defaults.withdrawal_poll_interval
             ),
@@ -108,4 +114,4 @@ def load_settings(refresh: bool = False) -> Settings:
     return _settings
 
 
-__all__ = ["load_settings", "CHAIN_NAMES", "NATIVE_TOKEN_SYMBOLS", "ERC20_TOKENS"]
+__all__ = ["load_settings", "CHAIN_NAMES", "NATIVE_TOKEN_SYMBOLS"]

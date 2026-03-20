@@ -12,23 +12,27 @@ from src.auth.jwt_keys import JWTKeyManager, get_jwt_key_manager
 class TestJWTKeyManagerInitialization:
     """Tests for JWTKeyManager initialization."""
 
-    def test_fails_when_rofl_unavailable(self, reset_auth_singletons, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_fails_when_rofl_unavailable(self, reset_auth_singletons, monkeypatch):
         """Test that initialization fails when ROFL seed is unavailable."""
         manager = JWTKeyManager()
         monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
 
-        def _raise_missing_seed():
+        async def _raise_missing_seed():
             raise FileNotFoundError("rofl unavailable")
 
         monkeypatch.setattr(manager, "_get_rofl_seed", _raise_missing_seed)
 
         with pytest.raises(RuntimeError, match="Failed to derive JWT signing key from ROFL seed"):
-            manager.initialize()
+            await manager.initialize()
 
-    def test_uses_random_key_when_rofl_disabled(self, reset_auth_singletons, disable_rofl_keys):
+    @pytest.mark.asyncio
+    async def test_uses_random_key_when_rofl_disabled(
+        self, reset_auth_singletons, disable_rofl_keys
+    ):
         """Test that random key is used when ROFL is disabled."""
         manager = JWTKeyManager()
-        manager.initialize()
+        await manager.initialize()
         assert manager.private_key is not None
 
     def test_singleton_pattern(self, reset_auth_singletons, disable_rofl_keys):
@@ -96,10 +100,11 @@ class TestJWTKeyDerivation:
 class TestJWKS:
     """Tests for JWKS generation."""
 
-    def test_jwks_format_is_valid(self, reset_auth_singletons, disable_rofl_keys):
+    @pytest.mark.asyncio
+    async def test_jwks_format_is_valid(self, reset_auth_singletons, disable_rofl_keys):
         """Test that JWKS output has correct structure."""
         manager = JWTKeyManager()
-        manager.initialize()
+        await manager.initialize()
 
         jwks = manager.get_jwks()
 
@@ -122,10 +127,11 @@ class TestJWKS:
 class TestKeyFormat:
     """Tests for key format and properties."""
 
-    def test_pem_format(self, reset_auth_singletons, disable_rofl_keys):
+    @pytest.mark.asyncio
+    async def test_pem_format(self, reset_auth_singletons, disable_rofl_keys):
         """Test that PEM format keys are valid."""
         manager = JWTKeyManager()
-        manager.initialize()
+        await manager.initialize()
 
         private_pem = manager.get_private_key_pem()
         public_pem = manager.get_public_key_pem()
@@ -135,16 +141,18 @@ class TestKeyFormat:
         assert public_pem.startswith(b"-----BEGIN PUBLIC KEY-----")
         assert public_pem.endswith(b"-----END PUBLIC KEY-----\n")
 
-    def test_algorithm_is_eddsa(self, reset_auth_singletons, disable_rofl_keys):
+    @pytest.mark.asyncio
+    async def test_algorithm_is_eddsa(self, reset_auth_singletons, disable_rofl_keys):
         """Test that algorithm is EdDSA."""
         manager = JWTKeyManager()
-        manager.initialize()
+        await manager.initialize()
         assert manager.algorithm == "EdDSA"
 
-    def test_key_id_is_consistent(self, reset_auth_singletons, disable_rofl_keys):
+    @pytest.mark.asyncio
+    async def test_key_id_is_consistent(self, reset_auth_singletons, disable_rofl_keys):
         """Test that key ID is consistent across accesses."""
         manager = JWTKeyManager()
-        manager.initialize()
+        await manager.initialize()
 
         kid1 = manager.key_id
         kid2 = manager.key_id

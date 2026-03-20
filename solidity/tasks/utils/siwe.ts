@@ -1,5 +1,3 @@
-import { randomBytes } from "crypto";
-
 export type JsonObject = Record<string, unknown>;
 
 export function isJsonObject(value: unknown): value is JsonObject {
@@ -83,6 +81,7 @@ export async function getSiweToken(params: {
   userAddress: string;
   chainId: number;
 }): Promise<string> {
+  // Fetch domain from API
   const domainResp = await fetchJson(
     `${params.apiBaseUrl}/v1/accounting/auth/domain`,
   );
@@ -94,9 +93,20 @@ export async function getSiweToken(params: {
     throw new Error("API returned an invalid SIWE domain");
   }
 
-  const nonce = randomBytes(16).toString("hex");
+  // Fetch nonce from API (server-generated for replay protection)
+  const nonceResp = await fetchJson(
+    `${params.apiBaseUrl}/v1/accounting/auth/nonce?address=${params.userAddress}`,
+  );
+  const nonce =
+    isJsonObject(nonceResp) && typeof nonceResp.nonce === "string"
+      ? nonceResp.nonce
+      : null;
+  if (!nonce || nonce.length < 8) {
+    throw new Error("API returned an invalid SIWE nonce");
+  }
+
   const issuedAt = new Date().toISOString();
-  const expirationTime = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const expirationTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const siweMessage = buildSiweMessage({
     domain,
     address: params.userAddress,
@@ -120,8 +130,8 @@ export async function getSiweToken(params: {
   );
 
   const token =
-    isJsonObject(loginResp) && typeof loginResp.token === "string"
-      ? loginResp.token
+    isJsonObject(loginResp) && typeof loginResp.siwe_token === "string"
+      ? loginResp.siwe_token
       : null;
   if (!token || !token.startsWith("0x")) {
     throw new Error("API returned an invalid SIWE token");

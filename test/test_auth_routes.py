@@ -12,6 +12,7 @@ import src.api.routes as routes
 import src.auth.auth_token_keys
 import src.auth.auth_token_service
 import src.auth.dependencies as auth_dependencies
+import src.auth.jwt_keys
 import src.auth.token_store
 from src.auth.token_store import TokenStore
 from src.models.types import Settings
@@ -21,6 +22,14 @@ OTHER_ADDRESS = "0x0000000000000000000000000000000000000002"
 
 # Use the default auth token validity from Settings
 AUTH_TOKEN_VALIDITY_SECONDS = Settings().auth_token_validity_seconds
+
+
+async def _init_key_managers():
+    """Initialize auth key managers for testing."""
+    auth_key_manager = src.auth.auth_token_keys.get_auth_token_key_manager()
+    await auth_key_manager.initialize(use_rofl=False)
+    jwt_key_manager = src.auth.jwt_keys.get_jwt_key_manager()
+    await jwt_key_manager.initialize(use_rofl=False)
 
 
 def _build_siwe_message(
@@ -76,6 +85,7 @@ class TestSiweLogin:
         # Reset auth token singletons
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         # Ensure routes use our token store
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
@@ -132,6 +142,7 @@ class TestSiweLogin:
         # Reset auth token singletons
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         # Ensure routes use our token store
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
@@ -379,6 +390,7 @@ class TestSiweValidationEdgeCases:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -423,6 +435,7 @@ class TestSiweValidationEdgeCases:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -462,6 +475,7 @@ class TestSiweValidationEdgeCases:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -526,6 +540,7 @@ class TestSiweValidationEdgeCases:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -567,6 +582,7 @@ class TestSiweTimestampValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -610,6 +626,7 @@ class TestSiweTimestampValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -651,6 +668,7 @@ class TestSiweTimestampValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -692,6 +710,7 @@ class TestSiweTimestampValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -747,6 +766,7 @@ class TestSiweTimestampValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -885,6 +905,7 @@ class TestLoginRetryBehavior:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -944,6 +965,7 @@ class TestLoginRetryBehavior:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -998,6 +1020,7 @@ class TestMissingTimestampFields:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1060,6 +1083,7 @@ class TestMissingTimestampFields:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1116,6 +1140,7 @@ class TestChainIdValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1156,6 +1181,7 @@ class TestChainIdValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1208,6 +1234,7 @@ class TestChainIdValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1261,6 +1288,7 @@ class TestChainIdValidation:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1320,6 +1348,7 @@ class TestConfigErrors:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1354,6 +1383,7 @@ class TestLoginAddressNormalization:
 
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
@@ -1419,6 +1449,7 @@ class TestLoginFlowIntegration:
         src.auth.jwt_service._jwt_service_instance = None
         src.auth.auth_token_keys._auth_token_key_manager_instance = None
         src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
 
         token_store = TokenStore()
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)

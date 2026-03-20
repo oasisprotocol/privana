@@ -26,7 +26,7 @@ class JWTKeyManager:
         self._public_key: Optional[Ed25519PublicKey] = None
         self._key_id: str = "rofl-jwt-ed25519-1"
 
-    def _get_rofl_seed(self) -> bytes:
+    async def _get_rofl_seed(self) -> bytes:
         """Get deterministic seed from ROFL daemon.
 
         Returns:
@@ -36,7 +36,7 @@ class JWTKeyManager:
 
         client = RoflAppdClient()
         # generate_key returns a hex string of 32 bytes (64 chars)
-        seed_hex = client._client.generate_key(JWT_SIGNING_KEY_ID)
+        seed_hex = await client._client.generate_key(JWT_SIGNING_KEY_ID)
         return bytes.fromhex(seed_hex)
 
     def _derive_ed25519_keypair(self, seed: bytes) -> Ed25519PrivateKey:
@@ -62,7 +62,7 @@ class JWTKeyManager:
 
         return private_key
 
-    def initialize(self, use_rofl: bool = True) -> None:
+    async def initialize(self, use_rofl: bool = True) -> None:
         """Initialize the key manager by generating or loading keys.
 
         Args:
@@ -77,7 +77,7 @@ class JWTKeyManager:
         if use_rofl and not os.getenv("DISABLE_ROFL_KEYS"):
             try:
                 logger.info("Deriving Ed25519 JWT signing key from ROFL seed...")
-                seed = self._get_rofl_seed()
+                seed = await self._get_rofl_seed()
                 self._private_key = self._derive_ed25519_keypair(seed)
                 logger.info(
                     "Ed25519 JWT signing key derived from ROFL seed (TEE-bound, deterministic)"
@@ -98,16 +98,14 @@ class JWTKeyManager:
     def private_key(self) -> Ed25519PrivateKey:
         """Get the Ed25519 private key for signing JWTs."""
         if self._private_key is None:
-            self.initialize()
-        assert self._private_key is not None
+            raise RuntimeError("JWTKeyManager not initialized. Call await initialize() first.")
         return self._private_key
 
     @property
     def public_key(self) -> Ed25519PublicKey:
         """Get the Ed25519 public key for verifying JWTs."""
         if self._public_key is None:
-            self.initialize()
-        assert self._public_key is not None
+            raise RuntimeError("JWTKeyManager not initialized. Call await initialize() first.")
         return self._public_key
 
     @property

@@ -42,14 +42,17 @@ class AuthToken:
         """Encode the AuthToken as ABI-encoded bytes.
 
         This matches the Solidity abi.encode() output for the struct.
+        Solidity's abi.decode(data, (AuthToken)) expects tuple encoding,
+        not flat encoding of individual fields.
         """
         # Convert address from hex string to bytes
         user_addr_bytes = Web3.to_bytes(hexstr=self.user_addr)
 
-        # ABI encode: (string, address, uint256, string, string[])
+        # ABI encode as tuple to match Solidity struct decoding:
+        # abi.decode(data, (AuthToken)) expects tuple encoding
         return encode(
-            ["string", "address", "uint256", "string", "string[]"],
-            [self.domain, user_addr_bytes, self.valid_until, self.statement, self.resources],
+            ["(string,address,uint256,string,string[])"],
+            [(self.domain, user_addr_bytes, self.valid_until, self.statement, self.resources)],
         )
 
 
@@ -64,7 +67,10 @@ class AuthTokenService:
         self._aead: Optional[AEAD] = None
 
     def initialize(self) -> None:
-        """Initialize the service with the encryption key."""
+        """Initialize the service with the encryption key.
+
+        Note: AuthTokenKeyManager must be initialized first via await initialize().
+        """
         if self._aead is not None:
             logger.debug("AuthTokenService already initialized")
             return
@@ -72,17 +78,21 @@ class AuthTokenService:
         from src.auth.auth_token_keys import get_auth_token_key_manager
 
         key_manager = get_auth_token_key_manager()
-        key_manager.initialize()
-
-        self._aead = AEAD(key_manager.enc_key)
-        logger.info("AuthTokenService initialized")
+        # key_manager should already be initialized by main.py lifespan
+        enc_key = key_manager.enc_key
+        self._aead = AEAD(enc_key)
+        logger.info(
+            "AuthTokenService initialized with key prefix: %s...",
+            enc_key[:4].hex(),
+        )
 
     @property
     def aead(self) -> AEAD:
         """Get the AEAD instance for encryption."""
         if self._aead is None:
             self.initialize()
-        assert self._aead is not None
+        if self._aead is None:
+            raise RuntimeError("AuthTokenService not initialized.")
         return self._aead
 
     def create_auth_token(

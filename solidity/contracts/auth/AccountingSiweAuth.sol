@@ -86,6 +86,12 @@ contract AccountingSiweAuth is A13e {
         return _roflAppId;
     }
 
+    /// @notice Returns the keccak256 hash of the stored encryption key for debugging.
+    /// @dev This allows verifying the key was set correctly without exposing the key itself.
+    function getAuthTokenEncKeyHash() external view returns (bytes32) {
+        return keccak256(abi.encodePacked(_authTokenEncKey));
+    }
+
     function authMsgSender(bytes memory token)
         internal
         view

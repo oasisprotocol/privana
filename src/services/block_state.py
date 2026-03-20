@@ -217,6 +217,13 @@ class BlockStateManager:
         self._state.chains[chain_id].last_processed_block = block_number
         self._save_state()
 
+    def clear_chain(self, chain_id: int) -> None:
+        """Clear all state for a chain (used when DEPOSIT_RESET_STATE=true)."""
+        if chain_id in self._state.chains:
+            del self._state.chains[chain_id]
+            self._save_state()
+            logger.info(f"Cleared persisted state for chain {chain_id}")
+
     def add_pending_tx(
         self,
         chain_id: int,
