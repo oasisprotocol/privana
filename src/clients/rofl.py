@@ -134,6 +134,7 @@ class RoflAppdClient:
         logger.info("Submitting transaction via ROFL to %s", tx["to"])
 
         result = await self._client.sign_submit(tx, encrypt)
+        logger.info("ROFL transaction result: %s", result)
 
         if "fail" in result:
             fail_info = result["fail"]

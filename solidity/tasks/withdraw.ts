@@ -110,7 +110,7 @@ task("withdraw")
   .addOptionalParam(
     "apiurl",
     "API base URL",
-    "https://p8000.m1356.opf-testnet-rofl-25.rofl.app",
+    "https://flexvaults-staging.rofl.build",
   )
   .addOptionalParam("scanlimit", "How many latest withdrawals to scan when fallback-confirming on-chain", "250")
   .addOptionalParam("timeout", "Timeout in seconds to wait for resolution", "120")
@@ -134,8 +134,11 @@ task("withdraw")
 
     console.log("\nEIP-712 Domain:", domain);
 
-    // Get the current withdrawal nonce for the user
-    const nonce = await accounting.withdrawalNonces(userAddress);
+    // Get the current withdrawal nonce from the API
+    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
+    const nonceUrl = `${apiBaseUrl}/v1/accounting/withdraw/nonce/${userAddress}`;
+    const nonceData = await fetchJson(nonceUrl);
+    const nonce = BigInt((nonceData as { nonce: number }).nonce);
     console.log("Withdrawal nonce:", nonce.toString());
 
     // Define Withdraw type
@@ -163,7 +166,6 @@ task("withdraw")
     console.log("Signature:", signature);
 
     // Submit to API
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
     const apiUrl = `${apiBaseUrl}/v1/accounting/withdraw`;
     const payload = {
       user_address: userAddress,
@@ -182,7 +184,7 @@ task("withdraw")
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!isJsonObject(resp) || typeof resp.submission_id !== "string") {
+      if (!isJsonObject(resp) || typeof resp.status !== "string") {
         throw new Error("Unexpected response from API");
       }
       result = resp;
@@ -192,16 +194,7 @@ task("withdraw")
       throw err;
     }
 
-    const submissionId = result.submission_id as string;
-
-    // Decode the CBOR response to check for errors
-    const decoded = decodeSubmissionResponse(submissionId);
-    if (!decoded.ok) {
-      console.error("\nWithdrawal failed:", decoded.error);
-      throw new Error(decoded.error);
-    }
-
-    console.log("Withdrawal request submitted successfully");
+    console.log("Withdrawal request submitted successfully, status:", result.status);
 
     // Get the withdrawal index by checking pending withdrawals
     console.log("\nWaiting for withdrawal to be created on Sapphire...");

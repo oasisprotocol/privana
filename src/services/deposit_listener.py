@@ -10,7 +10,7 @@ from web3.types import BlockData
 
 from src.abi.rofl_adapter import ROFL_ADAPTER_ABI
 from src.clients.rofl import TransactionRevertedError
-from src.config import CHAIN_NAMES, ERC20_TOKENS, load_settings
+from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import AccountingContractService
 from src.services.block_state import PendingTx, get_block_state_manager
 from src.services.proof_generator import get_proof_generator
@@ -33,7 +33,15 @@ class DepositListener:
     # These should be treated as success, not failure.
     SUCCESS_EQUIVALENT_ERRORS = {"DepositAlreadyProcessed"}
 
+    # Token refresh configuration
+    TOKEN_REFRESH_INTERVAL = 300  # Refresh registered tokens every 5 minutes
+
     def __init__(self):
+        # Dynamic ERC20 tokens loaded from contract (chain_id -> {address: token_id})
+        self._registered_erc20_tokens: Dict[int, Dict[str, str]] = {}
+        self._tokens_initialized = False
+        self._last_token_refresh: float = 0
+        self._token_refresh_task: Optional[asyncio.Task] = None
         self.settings = load_settings()
         self.accounting_service = AccountingContractService(self.settings)
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
@@ -72,6 +80,67 @@ class DepositListener:
                 logger.warning("Sapphire connection failed on startup")
         except Exception as e:
             logger.warning(f"Sapphire/ROFL Adapter startup check failed: {type(e).__name__}: {e}")
+
+    async def _refresh_registered_tokens(self, force: bool = False) -> None:
+        """Fetch registered ERC20 tokens from the contract and merge with fallback config."""
+        now = time.time()
+
+        # Skip if recently refreshed (unless forced)
+        if not force and self._tokens_initialized:
+            if now - self._last_token_refresh < self.TOKEN_REFRESH_INTERVAL:
+                return
+
+        try:
+            logger.info("Refreshing registered ERC20 tokens from contract...")
+            contract_tokens = await self.accounting_service.fetch_registered_erc20_tokens()
+
+            # Build token mapping from contract
+            new_tokens: Dict[int, Dict[str, str]] = {}
+            for chain_id, tokens in contract_tokens.items():
+                if chain_id not in new_tokens:
+                    new_tokens[chain_id] = {}
+                for addr, token_id in tokens.items():
+                    new_tokens[chain_id][addr.lower()] = addr
+
+            # Atomic update
+            self._registered_erc20_tokens = new_tokens
+            self._last_token_refresh = now
+            self._tokens_initialized = True
+
+            total_tokens = sum(len(t) for t in self._registered_erc20_tokens.values())
+            logger.info(
+                f"Refreshed {total_tokens} ERC20 tokens across "
+                f"{len(self._registered_erc20_tokens)} chains from contract"
+            )
+
+        except Exception as e:
+            if not self._tokens_initialized:
+                # Block startup if initial fetch fails
+                raise RuntimeError(f"Failed to fetch tokens from contract on startup: {e}") from e
+            else:
+                logger.warning(f"Failed to refresh tokens from contract, keeping existing: {e}")
+
+    async def _token_refresh_worker(self) -> None:
+        """Background task to periodically refresh registered tokens."""
+        logger.info(f"Starting token refresh worker (interval: {self.TOKEN_REFRESH_INTERVAL}s)")
+
+        while self._is_running:
+            try:
+                await asyncio.sleep(self.TOKEN_REFRESH_INTERVAL)
+                if not self._is_running:
+                    break
+                await self._refresh_registered_tokens()
+            except asyncio.CancelledError:
+                logger.info("Token refresh worker cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in token refresh worker: {e}")
+
+        logger.info("Token refresh worker stopped")
+
+    def _get_erc20_tokens_for_chain(self, chain_id: int) -> Dict[str, str]:
+        """Get ERC20 tokens to monitor for a specific chain."""
+        return self._registered_erc20_tokens.get(chain_id, {})
 
     def _get_chain_web3(self, chain_id: int) -> Web3:
         if chain_id in self._chain_web3:
@@ -275,7 +344,9 @@ class DepositListener:
             is_already_tracked = existing is not None
             token_name = None
             if token_address:
-                token_name = ERC20_TOKENS.get(chain_id, {}).get(token_address, token_address)
+                token_name = self._registered_erc20_tokens.get(chain_id, {}).get(
+                    token_address.lower(), token_address
+                )
             retry_info = " (retry)" if is_already_tracked else ""
             if is_erc20:
                 value_text = "unknown" if value is None else str(value)
@@ -480,9 +551,10 @@ class DepositListener:
         poll_interval = self.settings.deposit_poll_interval
         web3 = None
         deposit_address = None
-        erc20_tokens = {addr.lower(): name for addr, name in ERC20_TOKENS.get(chain_id, {}).items()}
 
         while self._is_running:
+            # Refresh tokens on each iteration (picks up new tokens from background refresh)
+            erc20_tokens = self._get_erc20_tokens_for_chain(chain_id)
             try:
                 if web3 is None:
                     try:
@@ -512,31 +584,40 @@ class DepositListener:
                         current_block_number = await self._rate_limited_rpc_call(
                             chain_id, lambda: web3.eth.block_number
                         )
-                        lookback_blocks = 100
+                        lookback_blocks = self.settings.deposit_lookback_blocks
 
-                        start_block = self._block_state.get_backfill_start_block(
-                            chain_id, current_block_number, lookback_blocks
-                        )
-
-                        persisted_block = self._block_state.get_last_processed_block(chain_id)
-                        if persisted_block is not None:
-                            blocks_behind = current_block_number - start_block
+                        if self.settings.deposit_reset_state:
+                            start_block = current_block_number - lookback_blocks
                             logger.info(
-                                f"Restored {chain_name} from persisted state, starting scan from block {start_block}, "
-                                f"{blocks_behind} blocks to process"
+                                f"DEPOSIT_RESET_STATE=true: Ignoring persisted state for {chain_name}, "
+                                f"starting fresh from block {start_block}"
                             )
-
-                            pending_txs = self._block_state.get_pending_txs(chain_id)
-                            if pending_txs:
-                                logger.warning(
-                                    f"{chain_name}: {len(pending_txs)} pending transactions will be reprocessed: "
-                                    f"{list(pending_txs.keys())[:5]}{'...' if len(pending_txs) > 5 else ''}"
-                                )
-                        else:
-                            logger.info(
-                                f"Initialized {chain_name} at block {start_block}, scanning last {lookback_blocks} blocks"
-                            )
+                            self._block_state.clear_chain(chain_id)
                             self._block_state.set_last_processed_block(chain_id, start_block)
+                        else:
+                            start_block = self._block_state.get_backfill_start_block(
+                                chain_id, current_block_number, lookback_blocks
+                            )
+
+                            persisted_block = self._block_state.get_last_processed_block(chain_id)
+                            if persisted_block is not None:
+                                blocks_behind = current_block_number - start_block
+                                logger.info(
+                                    f"Restored {chain_name} from persisted state, starting scan from block {start_block}, "
+                                    f"{blocks_behind} blocks to process"
+                                )
+
+                                pending_txs = self._block_state.get_pending_txs(chain_id)
+                                if pending_txs:
+                                    logger.warning(
+                                        f"{chain_name}: {len(pending_txs)} pending transactions will be reprocessed: "
+                                        f"{list(pending_txs.keys())[:5]}{'...' if len(pending_txs) > 5 else ''}"
+                                    )
+                            else:
+                                logger.info(
+                                    f"Initialized {chain_name} at block {start_block}, scanning last {lookback_blocks} blocks"
+                                )
+                                self._block_state.set_last_processed_block(chain_id, start_block)
 
                         self._last_processed_blocks[chain_id] = start_block
                     except Exception as e:
@@ -552,7 +633,7 @@ class DepositListener:
                 last_processed = self._last_processed_blocks[chain_id]
 
                 if current_block > last_processed:
-                    to_block = min(current_block, last_processed + 20)
+                    to_block = min(current_block, last_processed + self.settings.deposit_batch_size)
 
                     try:
                         for block_num in range(last_processed + 1, to_block + 1):
@@ -648,12 +729,18 @@ class DepositListener:
         self._is_running = True
         logger.info(f"Starting deposit listener for {len(self.chain_rpc_urls)} chains")
 
+        # Initialize registered tokens from contract before starting monitors
+        await self._refresh_registered_tokens(force=True)
+
         for chain_id in self.chain_rpc_urls.keys():
             task = asyncio.create_task(self._monitor_chain(chain_id))
             self._tasks.add(task)
 
         # Start the retry worker for failed deposits
         self._retry_task = asyncio.create_task(self._retry_pending_deposits())
+
+        # Start the token refresh worker
+        self._token_refresh_task = asyncio.create_task(self._token_refresh_worker())
 
     async def stop(self):
         if not self._is_running:
@@ -673,6 +760,15 @@ class DepositListener:
             except asyncio.CancelledError:
                 pass
             self._retry_task = None
+
+        # Cancel token refresh task
+        if self._token_refresh_task:
+            self._token_refresh_task.cancel()
+            try:
+                await self._token_refresh_task
+            except asyncio.CancelledError:
+                pass
+            self._token_refresh_task = None
 
         if self._deposit_tasks:
             logger.info(

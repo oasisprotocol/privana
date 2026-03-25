@@ -1,7 +1,7 @@
 services:
   accounting-module:
     build: .
-    image: "docker.io/ahmedatoasis/accounting-module"
+    image: "docker.io/ptrusr/accounting-module:staging"
     platform: linux/amd64
     environment:
       - API_HOST=${API_HOST:-0.0.0.0}
@@ -15,13 +15,37 @@ services:
       - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
       - ACCOUNTING_GAS_LIMIT=${ACCOUNTING_GAS_LIMIT:-500000}
       - DEPOSIT_POLL_INTERVAL=${DEPOSIT_POLL_INTERVAL:-1}
+      - DEPOSIT_BATCH_SIZE=${DEPOSIT_BATCH_SIZE:-100}
+      - DEPOSIT_LOOKBACK_BLOCKS=${DEPOSIT_LOOKBACK_BLOCKS:-100}
+      - DEPOSIT_RESET_STATE=${DEPOSIT_RESET_STATE:-false}
+      # Withdrawal processor configuration
       - WITHDRAWAL_POLL_INTERVAL=${WITHDRAWAL_POLL_INTERVAL:-12}
-      - BLOCK_STATE_DIR=/data/deposit-listener
+      - WITHDRAWAL_RESOLUTION_TIMEOUT=${WITHDRAWAL_RESOLUTION_TIMEOUT:-60}
+      - MIN_WITHDRAWAL_GAS_BALANCE=${MIN_WITHDRAWAL_GAS_BALANCE:-10000000000000}
+      # JWT Authentication configuration
+      - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-12}
+      - JWT_REFRESH_EXPIRY_DAYS=${JWT_REFRESH_EXPIRY_DAYS:-7}
+      - JWT_ISSUER=${JWT_ISSUER:-flexvaults}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-flexvaults}
+      # SIWE configuration
+      - SIWE_DOMAIN=${SIWE_DOMAIN}
+      - SIWE_ALLOWED_CHAIN_IDS=${SIWE_ALLOWED_CHAIN_IDS:-}
+      # Auth token storage configuration
+      - AUTH_TOKEN_STORAGE_DIR=${AUTH_TOKEN_STORAGE_DIR:-.auth_tokens}
+      - SIWE_NONCE_EXPIRY_SECONDS=${SIWE_NONCE_EXPIRY_SECONDS:-300}
+      - AUTH_TOKEN_VALIDITY_SECONDS=${AUTH_TOKEN_VALIDITY_SECONDS:-86400}
+      - AUTH_TOKEN_KEY_ID=${AUTH_TOKEN_KEY_ID:-}
+      # Persistent state management
+      - BLOCK_STATE_DIR=${BLOCK_STATE_DIR:-/data/deposit-listener}
+      # ERC20 token addresses (format: ERC20_{SYMBOL}_{CHAIN_ID})
+      - ERC20_USDC_84532=${ERC20_USDC_84532}
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
       - deposit-listener-data:/data/deposit-listener
     ports:
       - "8000:8000"
+    annotations:
+      net.oasis.proxy.ports.8000.custom_domain: flexvaults-staging.rofl.build
     restart: on-failure
 
 volumes:

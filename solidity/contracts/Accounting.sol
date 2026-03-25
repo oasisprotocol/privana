@@ -38,6 +38,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     uint256 private nextLockId;
 
+    /// @dev Array of all registered token IDs for enumeration
+    bytes32[] private registeredTokenIds;
+
     event Deposit(
         address indexed userAddress,
         bytes32 indexed tokenId,
@@ -783,9 +786,30 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      */
     function setTokenInfo(TokenInfo calldata info) external onlyOwner {
         bytes32 tokenId = getTokenId(info);
+
+        // Track token for enumeration (check array to avoid duplicates)
+        bool found = false;
+        for (uint256 i = 0; i < registeredTokenIds.length; i++) {
+            if (registeredTokenIds[i] == tokenId) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            registeredTokenIds.push(tokenId);
+        }
+
         tokens[tokenId] = info;
 
         emit TokenRegistered(tokenId, info.tokenType);
+    }
+
+    /**
+     * @notice Returns all registered token IDs.
+     * @return Array of all registered token IDs
+     */
+    function getRegisteredTokens() external view returns (bytes32[] memory) {
+        return registeredTokenIds;
     }
 
     /**
@@ -850,5 +874,5 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[44] private __gap;
+    uint256[43] private __gap;
 }

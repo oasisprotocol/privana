@@ -107,15 +107,45 @@ npx hardhat deploy --network sapphire-testnet \
 
 ### Upgrade
 
-```shell
-npx hardhat upgrade --network sapphire-testnet --proxy <accounting-proxy-address>
-```
+The Accounting contract uses the UUPS upgradeable proxy pattern. To upgrade:
 
-If the task cannot resolve `siweAuth()` from the existing proxy (for older deployments), pass it explicitly:
+#### 1. Make contract changes and compile
 
 ```shell
-npx hardhat upgrade --network sapphire-testnet --proxy <accounting-proxy-address> --siweauth <accounting-siwe-auth-address>
+cd solidity
+pnpm build
 ```
+
+#### 2. Run the upgrade task
+
+For staging (Sapphire Testnet):
+```shell
+npx hardhat upgrade --network sapphire-testnet --proxy 0xFfB141bF8269E458b074A274bE6E8F971f08A401
+```
+
+For production (Sapphire Mainnet):
+```shell
+npx hardhat upgrade --network sapphire --proxy <accounting-proxy-address>
+```
+
+If the task cannot resolve `siweAuth()` from the existing proxy, pass it explicitly:
+```shell
+npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --siweauth <siwe-auth-address>
+```
+
+#### 3. Update the README
+
+After a successful upgrade, update the implementation address in the Contract Addresses section below.
+
+#### Troubleshooting
+
+If the proxy was deployed outside of hardhat-upgrades (or on a fresh machine), you may need to import it first:
+
+```shell
+npx hardhat force-import --network sapphire-testnet --proxy <accounting-proxy-address>
+```
+
+The upgrade task uses `redeployImplementation: 'always'` to ensure a fresh implementation is deployed. If you see the same implementation address after an upgrade, verify the contract was actually recompiled with your changes.
 
 ## Configuration
 
@@ -165,12 +195,28 @@ npx hardhat setGasPrice --network sapphire-localnet --chainid 1 --gas-price 2000
 
 ## Contract Addresses
 
-| Network | Contract | Address |
-|---------|----------|---------|
-| Sapphire Testnet | AccountingSiweAuth | TBD |
-| Sapphire Testnet | Accounting | TBD |
-| Sapphire Mainnet | AccountingSiweAuth | TBD |
-| Sapphire Mainnet | Accounting | TBD |
+### Staging (Sapphire Testnet)
+
+| Contract | Address |
+|----------|---------|
+| ProvethVerifier | `0x9Cf97f9EaC17a55B87E5A2aD4B1E935CB57027D9` |
+| AccountingSiweAuth | `0x8675DB981c1CE71c1F5346465C8E36daF3d05468` |
+| Accounting (Proxy) | `0xFfB141bF8269E458b074A274bE6E8F971f08A401` |
+| Accounting (Implementation) | `0x42fF2a35c4584040c6859e22d52E5b3aF4d996A2` |
+| EVM Signing Address | `0x1d5D19e0e68001624323f63c60479BD3AeE7E029` |
+| Deposit Address (Base Sepolia) | `0x1d5D19e0e68001624323f63c60479BD3AeE7E029` |
+
+**ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
+**ShoyuBashi Oracle:** `0x7D3B4dd07bd523E519e0A91afD8e3B325586fb5b`
+
+### Production (Sapphire Mainnet)
+
+| Contract | Address |
+|----------|---------|
+| ProvethVerifier | TBD |
+| AccountingSiweAuth | TBD |
+| Accounting (Proxy) | TBD |
+| Accounting (Implementation) | TBD |
 
 ## Security Considerations
 

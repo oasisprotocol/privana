@@ -6,11 +6,10 @@ import time
 import pytest
 from eth_abi import decode
 
-from src.auth.auth_token_keys import AuthTokenKeyManager, get_auth_token_key_manager
+from src.auth.auth_token_keys import get_auth_token_key_manager
 from src.auth.auth_token_service import (
     ZERO_NONCE,
     AuthToken,
-    AuthTokenService,
     get_auth_token_service,
 )
 
@@ -18,11 +17,14 @@ from src.auth.auth_token_service import (
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset singleton instances before each test."""
+    import src.auth.auth_token_keys as auth_token_keys
+    import src.auth.auth_token_service as auth_token_service_module
+
     # Reset AuthTokenKeyManager
-    AuthTokenKeyManager._instance = None
+    auth_token_keys._auth_token_key_manager_instance = None
 
     # Reset AuthTokenService
-    AuthTokenService._instance = None
+    auth_token_service_module._auth_token_service_instance = None
 
     # Ensure test mode (no ROFL)
     os.environ["DISABLE_ROFL_KEYS"] = "1"
@@ -30,8 +32,18 @@ def reset_singletons():
     yield
 
     # Cleanup
+    auth_token_keys._auth_token_key_manager_instance = None
+    auth_token_service_module._auth_token_service_instance = None
     if "DISABLE_ROFL_KEYS" in os.environ:
         del os.environ["DISABLE_ROFL_KEYS"]
+
+
+@pytest.fixture
+async def initialized_key_manager():
+    """Initialize the key manager for tests that need it."""
+    manager = get_auth_token_key_manager()
+    await manager.initialize(use_rofl=False)
+    return manager
 
 
 class TestAuthToken:
@@ -49,18 +61,18 @@ class TestAuthToken:
 
         encoded = token.to_abi_encoded()
 
-        # Decode and verify
+        # Decode and verify (tuple encoding for Solidity struct)
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             encoded,
         )
 
-        assert decoded[0] == "https://example.com"
+        assert decoded[0][0] == "https://example.com"
         # eth_abi returns addresses as checksummed hex strings
-        assert decoded[1].lower() == "0x1234567890123456789012345678901234567890"
-        assert decoded[2] == 1700000000
-        assert decoded[3] == "Sign in to example.com"
-        assert decoded[4] == ("https://example.com/api",)
+        assert decoded[0][1].lower() == "0x1234567890123456789012345678901234567890"
+        assert decoded[0][2] == 1700000000
+        assert decoded[0][3] == "Sign in to example.com"
+        assert decoded[0][4] == ("https://example.com/api",)
 
     def test_to_abi_encoded_empty_resources(self):
         """Should handle empty resources list."""
@@ -74,11 +86,11 @@ class TestAuthToken:
 
         encoded = token.to_abi_encoded()
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             encoded,
         )
 
-        assert decoded[4] == ()  # Empty tuple
+        assert decoded[0][4] == ()  # Empty tuple
 
     def test_address_checksum(self):
         """Should handle both checksummed and non-checksummed addresses."""
@@ -105,26 +117,27 @@ class TestAuthTokenKeyManager:
         manager2 = get_auth_token_key_manager()
         assert manager1 is manager2
 
-    def test_initialize_test_mode(self):
+    @pytest.mark.asyncio
+    async def test_initialize_test_mode(self):
         """Should initialize with deterministic test key."""
         manager = get_auth_token_key_manager()
-        manager.initialize(use_rofl=False)
+        await manager.initialize(use_rofl=False)
 
         # Test key should be bytes32(uint256(1))
         expected_key = (1).to_bytes(32, "big")
         assert manager.enc_key == expected_key
 
-    def test_enc_key_auto_initializes(self):
-        """Should auto-initialize when accessing enc_key."""
+    def test_enc_key_raises_when_not_initialized(self):
+        """Should raise error when accessing enc_key without initialization."""
         manager = get_auth_token_key_manager()
-        # Access enc_key without explicit initialize
-        key = manager.enc_key
-        assert len(key) == 32
+        with pytest.raises(RuntimeError, match="not initialized"):
+            _ = manager.enc_key
 
-    def test_enc_key_bytes32(self):
+    @pytest.mark.asyncio
+    async def test_enc_key_bytes32(self):
         """Should return key as bytes32."""
         manager = get_auth_token_key_manager()
-        manager.initialize(use_rofl=False)
+        await manager.initialize(use_rofl=False)
 
         key = manager.enc_key_bytes32
         assert len(key) == 32
@@ -172,8 +185,13 @@ class TestAuthTokenService:
         assert token.statement == ""
         assert token.resources == []
 
-    def test_encrypt_auth_token(self):
+    @pytest.mark.asyncio
+    async def test_encrypt_auth_token(self):
         """Should encrypt the token."""
+        # Initialize key manager first (required for service)
+        key_manager = get_auth_token_key_manager()
+        await key_manager.initialize(use_rofl=False)
+
         service = get_auth_token_service()
         service.initialize()
 
@@ -191,7 +209,8 @@ class TestAuthTokenService:
         encoded = token.to_abi_encoded()
         assert len(ciphertext) == len(encoded) + 16
 
-    def test_create_and_encrypt(self):
+    @pytest.mark.asyncio
+    async def test_create_and_encrypt(self, initialized_key_manager):
         """Should create and encrypt in one step."""
         service = get_auth_token_service()
 
@@ -205,8 +224,13 @@ class TestAuthTokenService:
 
         assert len(ciphertext) > 16  # At least tag size
 
-    def test_encrypted_token_can_be_decrypted(self):
+    @pytest.mark.asyncio
+    async def test_encrypted_token_can_be_decrypted(self):
         """Should be able to decrypt the token with the same key."""
+        # Initialize key manager first (required for service)
+        key_manager = get_auth_token_key_manager()
+        await key_manager.initialize(use_rofl=False)
+
         service = get_auth_token_service()
         service.initialize()
 
@@ -226,34 +250,36 @@ class TestAuthTokenService:
         # Should match the original encoding
         assert decrypted == token.to_abi_encoded()
 
-        # Verify the decoded values
+        # Verify the decoded values (tuple encoding for Solidity struct)
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[0] == token.domain
-        assert decoded[2] == token.valid_until
-        assert decoded[3] == token.statement
+        assert decoded[0][0] == token.domain
+        assert decoded[0][2] == token.valid_until
+        assert decoded[0][3] == token.statement
 
 
 class TestAuthTokenServiceWithTestKey:
     """Tests verifying compatibility with contract's test key."""
 
-    def test_test_key_matches_contract(self):
+    @pytest.mark.asyncio
+    async def test_test_key_matches_contract(self):
         """Test key should match contract's non-Sapphire test key.
 
         The contract uses bytes32(uint256(1)) for non-Sapphire chains.
         """
         key_manager = get_auth_token_key_manager()
-        key_manager.initialize(use_rofl=False)
+        await key_manager.initialize(use_rofl=False)
 
         # Contract's test key: bytes32(uint256(1))
         # In Solidity, this is 31 zero bytes followed by 0x01
         expected = (1).to_bytes(32, "big")
         assert key_manager.enc_key == expected
 
-    def test_token_format_matches_contract(self):
+    @pytest.mark.asyncio
+    async def test_token_format_matches_contract(self, initialized_key_manager):
         """Verify encrypted token format matches what contract expects.
 
         The contract decrypts using:
@@ -279,20 +305,21 @@ class TestAuthTokenServiceWithTestKey:
         aead = service.aead
         decrypted = aead.decrypt(ZERO_NONCE, ciphertext, b"")
 
-        # Decode the struct
+        # Decode the struct (tuple encoding for Solidity struct)
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[0] == "https://flexvaults.com"
-        assert decoded[2] == valid_until
+        assert decoded[0][0] == "https://flexvaults.com"
+        assert decoded[0][2] == valid_until
 
 
 class TestAuthTokenEdgeCases:
     """Tests for AuthToken field edge cases."""
 
-    def test_handles_maximum_length_domain(self):
+    @pytest.mark.asyncio
+    async def test_handles_maximum_length_domain(self, initialized_key_manager):
         """Should handle very long domain names."""
         service = get_auth_token_service()
 
@@ -310,13 +337,14 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[0] == long_domain
+        assert decoded[0][0] == long_domain
 
-    def test_handles_many_resources(self):
+    @pytest.mark.asyncio
+    async def test_handles_many_resources(self, initialized_key_manager):
         """Should handle many resource URIs."""
         service = get_auth_token_service()
 
@@ -334,15 +362,16 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert len(decoded[4]) == 1000
-        assert decoded[4][0] == "https://api.example.com/resource/0"
-        assert decoded[4][999] == "https://api.example.com/resource/999"
+        assert len(decoded[0][4]) == 1000
+        assert decoded[0][4][0] == "https://api.example.com/resource/0"
+        assert decoded[0][4][999] == "https://api.example.com/resource/999"
 
-    def test_handles_very_large_valid_until(self):
+    @pytest.mark.asyncio
+    async def test_handles_very_large_valid_until(self, initialized_key_manager):
         """Should handle very large validUntil timestamps."""
         service = get_auth_token_service()
 
@@ -360,13 +389,14 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[2] == far_future
+        assert decoded[0][2] == far_future
 
-    def test_handles_zero_address(self):
+    @pytest.mark.asyncio
+    async def test_handles_zero_address(self, initialized_key_manager):
         """Should handle zero address (though unusual)."""
         service = get_auth_token_service()
 
@@ -383,14 +413,15 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
         # eth_abi returns addresses as bytes, so convert for comparison
-        assert decoded[1] == zero_addr
+        assert decoded[0][1] == zero_addr
 
-    def test_handles_empty_statement(self):
+    @pytest.mark.asyncio
+    async def test_handles_empty_statement(self, initialized_key_manager):
         """Should handle empty statement string."""
         service = get_auth_token_service()
 
@@ -405,13 +436,14 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[3] == ""
+        assert decoded[0][3] == ""
 
-    def test_handles_unicode_in_statement(self):
+    @pytest.mark.asyncio
+    async def test_handles_unicode_in_statement(self, initialized_key_manager):
         """Should handle unicode characters in statement."""
         service = get_auth_token_service()
 
@@ -429,13 +461,14 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[3] == unicode_statement
+        assert decoded[0][3] == unicode_statement
 
-    def test_handles_unicode_in_resources(self):
+    @pytest.mark.asyncio
+    async def test_handles_unicode_in_resources(self, initialized_key_manager):
         """Should handle unicode characters in resource URIs."""
         service = get_auth_token_service()
 
@@ -456,14 +489,15 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[4][0] == "https://example.com/api/用户"
-        assert decoded[4][1] == "https://example.com/api/🎮"
+        assert decoded[0][4][0] == "https://example.com/api/用户"
+        assert decoded[0][4][1] == "https://example.com/api/🎮"
 
-    def test_handles_long_statement(self):
+    @pytest.mark.asyncio
+    async def test_handles_long_statement(self, initialized_key_manager):
         """Should handle very long statement strings."""
         service = get_auth_token_service()
 
@@ -481,14 +515,15 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[3] == long_statement
-        assert len(decoded[3]) == 10000
+        assert decoded[0][3] == long_statement
+        assert len(decoded[0][3]) == 10000
 
-    def test_handles_special_characters_in_domain(self):
+    @pytest.mark.asyncio
+    async def test_handles_special_characters_in_domain(self, initialized_key_manager):
         """Should handle special characters in domain."""
         service = get_auth_token_service()
 
@@ -506,13 +541,14 @@ class TestAuthTokenEdgeCases:
         # Verify decryption works
         decrypted = service.aead.decrypt(ZERO_NONCE, ciphertext, b"")
         decoded = decode(
-            ["string", "address", "uint256", "string", "string[]"],
+            ["(string,address,uint256,string,string[])"],
             decrypted,
         )
 
-        assert decoded[0] == domain
+        assert decoded[0][0] == domain
 
-    def test_consistent_encoding_across_calls(self):
+    @pytest.mark.asyncio
+    async def test_consistent_encoding_across_calls(self, initialized_key_manager):
         """Should produce consistent encoding for same inputs."""
         service = get_auth_token_service()
 

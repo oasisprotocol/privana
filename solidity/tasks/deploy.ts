@@ -1,6 +1,16 @@
 import { task } from "hardhat/config";
 import { parseRoflAppId } from "./utils/rofl";
 
+task("deploy-proveth-verifier")
+  .setAction(async (_, hre) => {
+    const ProvethVerifier = await hre.ethers.getContractFactory("ProvethVerifier");
+    const provethVerifier = await ProvethVerifier.deploy({ gasLimit: 5000000 });
+    await provethVerifier.waitForDeployment();
+    const address = await provethVerifier.getAddress();
+    console.log(`ProvethVerifier deployed at: ${address}`);
+    return address;
+  });
+
 task("deploy")
   .addParam("shoyubashi", "The address of the ShoyuBashi oracle")
   .addParam("provethverifier", "The address of the ProvethVerifier contract")
@@ -46,14 +56,53 @@ task("deploy")
     return proxyAddress;
   });
 
+task("deploy-siwe-auth")
+  .addParam("roflappid", "The ROFL app ID (hex 0x... or bech32 rofl1...)")
+  .setDescription("Deploy a new AccountingSiweAuth contract")
+  .setAction(async (args, hre) => {
+    const roflAppIdHex = parseRoflAppId(args.roflappid);
+
+    const AccountingSiweAuth = await hre.ethers.getContractFactory("AccountingSiweAuth");
+    const siweAuth = await AccountingSiweAuth.deploy(roflAppIdHex, {
+      gasLimit: 10000000
+    });
+    await siweAuth.waitForDeployment();
+    const siweAuthAddress = await siweAuth.getAddress();
+
+    console.log(`AccountingSiweAuth deployed at: ${siweAuthAddress}`);
+    console.log(`ROFL app ID: ${args.roflappid}`);
+
+    return siweAuthAddress;
+  });
+
+task("force-import")
+  .addParam("proxy", "The proxy contract address to import")
+  .setDescription("Force import an existing proxy into OpenZeppelin's deployment state")
+  .setAction(async (args, hre) => {
+    const Accounting = await hre.ethers.getContractFactory("Accounting");
+
+    // Get current siweAuth from proxy
+    const current = await hre.ethers.getContractAt("Accounting", args.proxy);
+    const siweAuthAddress = await current.siweAuth();
+    console.log(`Current siweAuth: ${siweAuthAddress}`);
+
+    await hre.upgrades.forceImport(args.proxy, Accounting, {
+      kind: 'uups',
+      constructorArgs: [siweAuthAddress],
+    });
+
+    console.log(`Proxy ${args.proxy} imported successfully`);
+  });
+
 task("upgrade")
   .addParam("proxy", "The proxy contract address to upgrade")
   .addOptionalParam(
     "siweauth",
     "The AccountingSiweAuth address for the new implementation. If omitted, reuse proxy's current siweAuth",
   )
+  .setDescription("Upgrade the Accounting proxy to a new implementation")
   .setAction(async (args, hre) => {
-    const AccountingV2 = await hre.ethers.getContractFactory("Accounting");
+    const Accounting = await hre.ethers.getContractFactory("Accounting");
     let siweAuthAddress: string = args.siweauth;
 
     if (!siweAuthAddress) {
@@ -72,9 +121,15 @@ task("upgrade")
       throw new Error(`Invalid siweAuth address: ${siweAuthAddress}`);
     }
 
-    const upgraded = await hre.upgrades.upgradeProxy(args.proxy, AccountingV2, {
+    // Get current implementation for comparison
+    const currentImpl = await hre.upgrades.erc1967.getImplementationAddress(args.proxy);
+    console.log(`Current implementation: ${currentImpl}`);
+
+    // Always redeploy implementation to avoid caching issues
+    const upgraded = await hre.upgrades.upgradeProxy(args.proxy, Accounting, {
       kind: 'uups',
       constructorArgs: [siweAuthAddress],
+      redeployImplementation: 'always',
       txOverrides: { gasLimit: 15000000 }
     });
 
@@ -82,6 +137,10 @@ task("upgrade")
 
     const newImplAddress = await hre.upgrades.erc1967.getImplementationAddress(args.proxy);
     console.log(`Upgraded! New implementation: ${newImplAddress}`);
+
+    if (currentImpl === newImplAddress) {
+      console.log(`Warning: Implementation address unchanged. Upgrade may have been a no-op.`);
+    }
 
     return upgraded;
   });

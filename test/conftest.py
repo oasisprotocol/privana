@@ -1,5 +1,7 @@
 """Shared pytest fixtures for auth tests."""
 
+import asyncio
+
 import pytest
 
 import src.auth.auth_token_keys as auth_token_keys
@@ -8,6 +10,21 @@ import src.auth.jwt_keys as jwt_keys
 import src.auth.jwt_service as jwt_service
 import src.auth.token_store as token_store
 import src.config
+
+
+def _run_async(coro):
+    """Run an async coroutine in sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # If there's already a running loop, create a task
+        return asyncio.ensure_future(coro)
+    else:
+        # Create new event loop for sync context
+        return asyncio.new_event_loop().run_until_complete(coro)
 
 
 @pytest.fixture
@@ -41,5 +58,13 @@ def reset_auth_singletons(monkeypatch, tmp_path):
 # Tests should run against a real Sapphire environment instead.
 @pytest.fixture
 def disable_rofl_keys(monkeypatch):
-    """Disable ROFL keys for testing."""
+    """Disable ROFL keys for testing and initialize key managers."""
     monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
+
+    # Initialize JWT key manager (required before JWTService can be used)
+    jwt_key_manager = jwt_keys.get_jwt_key_manager()
+    _run_async(jwt_key_manager.initialize(use_rofl=False))
+
+    # Initialize AuthToken key manager
+    auth_key_manager = auth_token_keys.get_auth_token_key_manager()
+    _run_async(auth_key_manager.initialize(use_rofl=False))

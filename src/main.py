@@ -43,17 +43,17 @@ async def lifespan(_app: FastAPI):
 
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()
-    jwt_key_manager.initialize()
+    await jwt_key_manager.initialize()
     logger.info("JWT key manager initialized")
 
     # Initialize AuthToken encryption key manager and sync to contract
     auth_token_key_manager = get_auth_token_key_manager()
-    auth_token_key_manager.initialize()
+    await auth_token_key_manager.initialize()
     logger.info("AuthToken key manager initialized")
 
-    # Sync the encryption key to the contract (only in production with ROFL)
+    # Sync the encryption key to the contract (skipped when DISABLE_ROFL_KEYS is set).
     # TODO: Remove DISABLE_ROFL_KEYS check when Sapphire localnet e2e tests are available.
-    if not os.getenv("DISABLE_ROFL_KEYS") and os.getenv("ROFL_APP_ID"):
+    if not os.getenv("DISABLE_ROFL_KEYS"):
         try:
             await auth_token_key_manager.sync_key_to_contract()
             logger.info("AuthToken encryption key synced to contract")
