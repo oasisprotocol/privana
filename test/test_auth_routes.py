@@ -5,8 +5,9 @@ from unittest.mock import patch
 
 import jwt
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request, Response
 from siwe import SiweMessage
+from web3 import Web3
 
 import src.api.routes as routes
 import src.auth.auth_token_keys
@@ -69,6 +70,59 @@ def _build_siwe_message(
     ).prepare_message()
 
 
+def _test_request(
+    *,
+    path: str,
+    method: str = "POST",
+    origin: str = "http://localhost:5173",
+) -> Request:
+    """Build a minimal FastAPI request object for direct route tests."""
+    headers = []
+    if origin:
+        headers.append((b"origin", origin.encode("utf-8")))
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("utf-8"),
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    return Request(scope)
+
+
+def _test_response() -> Response:
+    """Build a response object for direct route tests."""
+    return Response()
+
+
+async def _call_siwe_login(payload):
+    """Call the login route with explicit request/response objects."""
+    return await routes.siwe_login(
+        payload,
+        _test_request(path="/v1/accounting/auth/login"),
+        _test_response(),
+    )
+
+
+async def _call_get_siwe_nonce(address: str):
+    """Call the nonce route with explicit request/response objects."""
+    return await routes.get_siwe_nonce(
+        address,
+        _test_request(path="/v1/accounting/auth/nonce", method="GET"),
+        _test_response(),
+    )
+
+
+async def _call_refresh(payload):
+    """Call the refresh route with an explicit response object."""
+    return await routes.refresh(payload, _test_response())
+
+
 class TestSiweLogin:
     """Tests for the SIWE login endpoint."""
 
@@ -115,7 +169,7 @@ class TestSiweLogin:
 
         # Mock the siwe verify to pass (since we don't have a real signature)
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -175,12 +229,12 @@ class TestSiweLogin:
         # Mock the siwe verify to pass (since we don't have a real signature)
         with patch.object(SiweMessage, "verify"):
             # First login should succeed
-            response = await routes.siwe_login(request)
+            response = await _call_siwe_login(request)
             assert response.jwt_access_token == "jwt-access-token"
 
             # Second login with same nonce (replay) should fail
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(request)
+                await _call_siwe_login(request)
 
         assert exc.value.status_code == 400
         assert "Invalid or expired nonce" in exc.value.detail
@@ -212,7 +266,7 @@ class TestSiweLogin:
         from src.models.accounting import SiweLoginRequest
 
         with pytest.raises(HTTPException) as exc:
-            await routes.siwe_login(
+            await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -237,7 +291,7 @@ class TestRefreshEndpoint:
 
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
 
-        response = await routes.refresh(routes.RefreshRequest(refresh_token="old-refresh-token"))
+        response = await _call_refresh(routes.RefreshRequest(refresh_token="old-refresh-token"))
 
         assert response.token == "new-access-token"
         assert response.refresh_token == "new-refresh-token"
@@ -255,7 +309,7 @@ class TestRefreshEndpoint:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
 
         with pytest.raises(HTTPException) as exc:
-            await routes.refresh(routes.RefreshRequest(refresh_token="revoked-token"))
+            await _call_refresh(routes.RefreshRequest(refresh_token="revoked-token"))
 
         assert exc.value.status_code == 401
         assert exc.value.detail == "Refresh token has been revoked"
@@ -273,7 +327,7 @@ class TestRefreshEndpoint:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
 
         with pytest.raises(HTTPException) as exc:
-            await routes.refresh(routes.RefreshRequest(refresh_token="malformed-token"))
+            await _call_refresh(routes.RefreshRequest(refresh_token="malformed-token"))
 
         assert exc.value.status_code == 401
         assert "Invalid token format" in exc.value.detail
@@ -291,7 +345,7 @@ class TestRefreshEndpoint:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
 
         with pytest.raises(HTTPException) as exc:
-            await routes.refresh(routes.RefreshRequest(refresh_token="expired-token"))
+            await _call_refresh(routes.RefreshRequest(refresh_token="expired-token"))
 
         assert exc.value.status_code == 401
         assert "Signature has expired" in exc.value.detail
@@ -415,7 +469,7 @@ class TestSiweValidationEdgeCases:
 
         with patch.object(SiweMessage, "verify", side_effect=_verify_with_domain_check):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
+                await _call_siwe_login(
                     SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                 )
 
@@ -453,7 +507,7 @@ class TestSiweValidationEdgeCases:
         # Simulate expired message
         with patch.object(SiweMessage, "verify", side_effect=ExpiredMessage("Message has expired")):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
+                await _call_siwe_login(
                     SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                 )
 
@@ -495,7 +549,7 @@ class TestSiweValidationEdgeCases:
             SiweMessage, "verify", side_effect=InvalidSignature("Signature verification failed")
         ):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
+                await _call_siwe_login(
                     SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                 )
 
@@ -518,7 +572,7 @@ class TestSiweValidationEdgeCases:
 
         # Send a completely malformed message
         with pytest.raises(HTTPException) as exc:
-            await routes.siwe_login(
+            await _call_siwe_login(
                 SiweLoginRequest(
                     siwe_message="This is not a valid SIWE message", signature="0x" + "ab" * 65
                 )
@@ -560,7 +614,7 @@ class TestSiweValidationEdgeCases:
             SiweMessage, "verify", side_effect=MalformedSession("Malformed session data")
         ):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
+                await _call_siwe_login(
                     SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                 )
 
@@ -606,7 +660,7 @@ class TestSiweTimestampValidation:
 
         with patch.object(SiweMessage, "verify"):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
+                await _call_siwe_login(
                     SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                 )
 
@@ -614,10 +668,10 @@ class TestSiweTimestampValidation:
         assert "issued_at is outside acceptable time range" in exc.value.detail
 
     @pytest.mark.asyncio
-    async def test_rejects_wrong_expiration_time(
+    async def test_accepts_shorter_expiration_time(
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
-        """Test that login rejects SIWE messages with wrong expiration time."""
+        """Test that login accepts SIWE messages with shorter expiration windows."""
         storage_dir = tmp_path / "wrong_expiry_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -640,22 +694,32 @@ class TestSiweTimestampValidation:
             expiration_time=wrong_expiry,
         )
 
+        class _JwtService:
+            access_token_expiry_seconds = 12 * 3600
+            refresh_token_expiry_seconds = 7 * 24 * 3600
+
+            def create_token(self, address):
+                return "jwt-access-token"
+
+            def create_refresh_token(self, address):
+                return "jwt-refresh-token"
+
         class _MockAccountingService:
             def get_siwe_domain(self):
                 return {"domain": "localhost:5173"}
 
+        monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
-                    SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
-                )
+            response = await _call_siwe_login(
+                SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
+            )
 
-        assert exc.value.status_code == 400
-        assert "expiration_time must be" in exc.value.detail
+        assert response.siwe_token.startswith("0x")
+        assert response.jwt_access_token == "jwt-access-token"
 
     @pytest.mark.asyncio
     async def test_rejects_expiration_too_long(self, reset_auth_singletons, monkeypatch, tmp_path):
@@ -692,12 +756,12 @@ class TestSiweTimestampValidation:
 
         with patch.object(SiweMessage, "verify"):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(
+                await _call_siwe_login(
                     SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                 )
 
         assert exc.value.status_code == 400
-        assert "expiration_time must be" in exc.value.detail
+        assert "maximum allowed validity window" in exc.value.detail
 
     @pytest.mark.asyncio
     async def test_accepts_valid_timestamps(self, reset_auth_singletons, monkeypatch, tmp_path):
@@ -745,7 +809,7 @@ class TestSiweTimestampValidation:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -802,7 +866,7 @@ class TestSiweTimestampValidation:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -822,8 +886,9 @@ class TestNonceEndpoint:
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         src.auth.token_store._token_store_instance = None
 
-        response = await routes.get_siwe_nonce(TEST_ADDRESS)
+        response = await _call_get_siwe_nonce(TEST_ADDRESS)
 
+        assert response.address == TEST_ADDRESS
         assert response.nonce is not None
         assert len(response.nonce) > 0
         assert response.expires_in > 0
@@ -837,8 +902,8 @@ class TestNonceEndpoint:
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         src.auth.token_store._token_store_instance = None
 
-        response1 = await routes.get_siwe_nonce(TEST_ADDRESS)
-        response2 = await routes.get_siwe_nonce(TEST_ADDRESS)
+        response1 = await _call_get_siwe_nonce(TEST_ADDRESS)
+        response2 = await _call_get_siwe_nonce(TEST_ADDRESS)
 
         assert response1.nonce == response2.nonce
 
@@ -851,8 +916,8 @@ class TestNonceEndpoint:
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         src.auth.token_store._token_store_instance = None
 
-        response1 = await routes.get_siwe_nonce(TEST_ADDRESS)
-        response2 = await routes.get_siwe_nonce(OTHER_ADDRESS)
+        response1 = await _call_get_siwe_nonce(TEST_ADDRESS)
+        response2 = await _call_get_siwe_nonce(OTHER_ADDRESS)
 
         assert response1.nonce != response2.nonce
 
@@ -864,7 +929,7 @@ class TestNonceEndpoint:
         src.auth.token_store._token_store_instance = None
 
         with pytest.raises(HTTPException) as exc:
-            await routes.get_siwe_nonce("not-an-address")
+            await _call_get_siwe_nonce("not-an-address")
 
         assert exc.value.status_code == 400
         assert "Invalid Ethereum address" in exc.value.detail
@@ -878,12 +943,14 @@ class TestNonceEndpoint:
 
         # Use lowercase version of a valid address
         lowercase_addr = "0xabcdef1234567890abcdef1234567890abcdef12"
-        checksum_addr = "0xAbcdEF1234567890aBcDeF1234567890AbCdEf12"
+        checksum_addr = Web3.to_checksum_address(lowercase_addr)
 
         # Both should work and return the same nonce (normalized internally)
-        response1 = await routes.get_siwe_nonce(lowercase_addr)
-        response2 = await routes.get_siwe_nonce(checksum_addr)
+        response1 = await _call_get_siwe_nonce(lowercase_addr)
+        response2 = await _call_get_siwe_nonce(checksum_addr)
 
+        assert response1.address == checksum_addr
+        assert response2.address == checksum_addr
         assert response1.nonce == response2.nonce
 
 
@@ -936,7 +1003,7 @@ class TestLoginRetryBehavior:
         # First attempt: signature fails
         with patch.object(SiweMessage, "verify", side_effect=InvalidSignature("Bad signature")):
             with pytest.raises(HTTPException) as exc:
-                await routes.siwe_login(request)
+                await _call_siwe_login(request)
             assert exc.value.status_code == 400
             assert "Invalid signature" in exc.value.detail
 
@@ -945,7 +1012,7 @@ class TestLoginRetryBehavior:
 
         # Second attempt: signature succeeds
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(request)
+            response = await _call_siwe_login(request)
 
         assert response.jwt_access_token == "jwt-access-token"
 
@@ -998,7 +1065,7 @@ class TestLoginRetryBehavior:
 
         # Successful login
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(request)
+            response = await _call_siwe_login(request)
 
         assert response.jwt_access_token == "jwt-access-token"
 
@@ -1063,7 +1130,7 @@ class TestMissingTimestampFields:
 
             with patch.object(SiweMessage, "from_message", patched_from_message):
                 with pytest.raises(HTTPException) as exc:
-                    await routes.siwe_login(
+                    await _call_siwe_login(
                         SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                     )
 
@@ -1112,7 +1179,7 @@ class TestMissingTimestampFields:
 
             with patch.object(SiweMessage, "from_message", patched_from_message):
                 with pytest.raises(HTTPException) as exc:
-                    await routes.siwe_login(
+                    await _call_siwe_login(
                         SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
                     )
 
@@ -1157,7 +1224,7 @@ class TestChainIdValidation:
         from src.models.accounting import SiweLoginRequest
 
         with pytest.raises(HTTPException) as exc:
-            await routes.siwe_login(
+            await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -1208,7 +1275,7 @@ class TestChainIdValidation:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -1262,7 +1329,7 @@ class TestChainIdValidation:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -1316,7 +1383,7 @@ class TestChainIdValidation:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -1358,7 +1425,7 @@ class TestConfigErrors:
         from src.models.accounting import SiweLoginRequest
 
         with pytest.raises(HTTPException) as exc:
-            await routes.siwe_login(
+            await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -1418,7 +1485,7 @@ class TestLoginAddressNormalization:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            response = await routes.siwe_login(
+            response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 
@@ -1467,7 +1534,7 @@ class TestLoginFlowIntegration:
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
         # Step 1: Get nonce
-        nonce_response = await routes.get_siwe_nonce(TEST_ADDRESS)
+        nonce_response = await _call_get_siwe_nonce(TEST_ADDRESS)
         assert nonce_response.nonce is not None
 
         # Step 2: Build SIWE message
@@ -1477,7 +1544,7 @@ class TestLoginFlowIntegration:
         from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
-            login_response = await routes.siwe_login(
+            login_response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
             )
 

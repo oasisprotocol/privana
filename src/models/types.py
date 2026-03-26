@@ -12,6 +12,7 @@ class Settings:
     api_port: int = 8000
     log_level: str = "INFO"
     environment: str = "development"
+    cors_allowed_origins: str = ""
 
     accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
     rofl_adapter_address: str = "0x0000000000000000000000000000000000000000"
@@ -27,14 +28,18 @@ class Settings:
     withdrawal_resolution_timeout: int = 60
     min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei
 
-    # Auth token validity period in seconds (default: 24 hours)
-    # This is the lifetime of SIWE-based auth tokens for contract view calls
     auth_token_validity_seconds: int = 24 * 60 * 60
-
-    # SIWE domain for authentication (required)
-    # This should match the domain in client SIWE messages
     siwe_domain: str = ""
 
     # Allowed chain IDs for SIWE authentication
     # If empty, defaults to chain_rpc_urls keys + sapphire_chain_id
     siwe_allowed_chain_ids: Set[int] = field(default_factory=set)
+    auth_token_storage_dir: str = ".auth_tokens"
+    auth_clients_json: str = "[]"
+    auth_code_ttl_seconds: int = 120
+    auth_rate_limit_window_seconds: int = 60
+    auth_nonce_rate_limit: int = 30
+    auth_login_rate_limit: int = 10
+    auth_authorize_rate_limit: int = 10
+    auth_token_rate_limit: int = 20
+    trust_x_forwarded_for: bool = False

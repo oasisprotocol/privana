@@ -8,6 +8,7 @@ import src.auth.auth_token_keys as auth_token_keys
 import src.auth.auth_token_service as auth_token_service
 import src.auth.jwt_keys as jwt_keys
 import src.auth.jwt_service as jwt_service
+import src.auth.rate_limiter as rate_limiter
 import src.auth.token_store as token_store
 import src.config
 
@@ -35,6 +36,9 @@ def reset_auth_singletons(monkeypatch, tmp_path):
     token_store._token_store_instance = None
     auth_token_keys._auth_token_key_manager_instance = None
     auth_token_service._auth_token_service_instance = None
+    if rate_limiter._auth_rate_limiter_instance is not None:
+        rate_limiter._auth_rate_limiter_instance.close()
+    rate_limiter._auth_rate_limiter_instance = None
     src.config._settings = None
 
     # Use temp directory for token storage in tests
@@ -51,6 +55,9 @@ def reset_auth_singletons(monkeypatch, tmp_path):
     token_store._token_store_instance = None
     auth_token_keys._auth_token_key_manager_instance = None
     auth_token_service._auth_token_service_instance = None
+    if rate_limiter._auth_rate_limiter_instance is not None:
+        rate_limiter._auth_rate_limiter_instance.close()
+    rate_limiter._auth_rate_limiter_instance = None
     src.config._settings = None
 
 

@@ -7,8 +7,12 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
+from src.api.auth_routes import auth_router
 from src.api.routes import router
+from src.auth.client_registry import get_client_registry
+from src.auth.siwe_config import get_siwe_config
 from src.config import load_settings
 
 logger = logging.getLogger(__name__)
@@ -22,6 +26,33 @@ settings = load_settings()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger().setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+
+
+def _parse_cors_origins(raw_origins: str) -> set[str]:
+    return {origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()}
+
+
+def _build_cors_origins() -> list[str]:
+    origins = _parse_cors_origins(settings.cors_allowed_origins)
+
+    if settings.environment.lower() == "development":
+        origins.update(
+            {
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:4173",
+                "http://127.0.0.1:5173",
+                "http://localhost:3000",
+                "http://localhost:4173",
+                "http://localhost:5173",
+            }
+        )
+
+    if settings.siwe_domain:
+        origins.add(get_siwe_config(settings).origin)
+
+    origins.update(get_client_registry().allowed_origins())
+
+    return sorted(origins)
 
 
 @asynccontextmanager
@@ -88,13 +119,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_build_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(router)
+app.include_router(auth_router)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)

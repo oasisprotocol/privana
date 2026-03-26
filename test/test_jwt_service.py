@@ -16,6 +16,7 @@ from web3 import Web3
 from src.auth.jwt_service import (
     DEFAULT_JWT_AUDIENCE,
     DEFAULT_JWT_ISSUER,
+    TOKEN_TYPE_ID,
     JWTService,
     get_jwt_service,
 )
@@ -115,6 +116,35 @@ class TestRefreshTokenCreation:
 
         address = jwt_service.verify_refresh_token(refresh_token)
         assert address == TEST_ADDRESS
+
+
+class TestIdTokenCreation:
+    """Tests for client-scoped identity token creation."""
+
+    def test_creates_valid_id_token(self, reset_auth_singletons, disable_rofl_keys):
+        jwt_service = JWTService()
+        token = jwt_service.create_id_token(TEST_ADDRESS, audience="casino-web")
+
+        payload = jwt.decode(token, options={"verify_signature": False})
+
+        assert payload["sub"] == TEST_ADDRESS
+        assert payload["type"] == TOKEN_TYPE_ID
+        assert payload["iss"] == DEFAULT_JWT_ISSUER
+        assert payload["aud"] == "casino-web"
+        assert "iat" in payload
+        assert "exp" in payload
+        assert "nbf" in payload
+
+    def test_verify_id_token_checks_expected_audience(
+        self, reset_auth_singletons, disable_rofl_keys
+    ):
+        jwt_service = JWTService()
+        token = jwt_service.create_id_token(TEST_ADDRESS, audience="casino-web")
+
+        assert jwt_service.verify_id_token(token, "casino-web") == TEST_ADDRESS
+
+        with pytest.raises(jwt.InvalidAudienceError):
+            jwt_service.verify_id_token(token, "privana-web")
 
 
 class TestTokenVerification:
@@ -287,6 +317,24 @@ class TestTokenTypeSeparation:
 
         with pytest.raises(ValueError, match="Expected access token"):
             jwt_service.get_address_from_token(refresh_token)
+
+    def test_id_token_cannot_be_used_as_access_token(
+        self, reset_auth_singletons, disable_rofl_keys
+    ):
+        jwt_service = JWTService()
+        id_token = jwt_service.create_id_token(TEST_ADDRESS, audience="casino-web")
+
+        with pytest.raises(jwt.InvalidAudienceError):
+            jwt_service.get_address_from_token(id_token)
+
+    def test_access_token_cannot_be_used_as_id_token(
+        self, reset_auth_singletons, disable_rofl_keys
+    ):
+        jwt_service = JWTService()
+        access_token = jwt_service.create_token(TEST_ADDRESS)
+
+        with pytest.raises(jwt.InvalidAudienceError):
+            jwt_service.verify_id_token(access_token, "casino-web")
 
 
 class TestRefreshTokenRotation:
@@ -469,3 +517,20 @@ class TestExternalVerification:
         assert refresh_payload["sub"] == TEST_ADDRESS
         assert refresh_payload["type"] == "refresh"
         assert "jti" in refresh_payload
+
+    def test_external_verification_of_id_token(self, reset_auth_singletons, disable_rofl_keys):
+        jwt_service = JWTService()
+        id_token = jwt_service.create_id_token(TEST_ADDRESS, audience="casino-web")
+
+        public_key_pem = jwt_service._key_manager.get_public_key_pem()
+
+        payload = jwt.decode(
+            id_token,
+            public_key_pem,
+            algorithms=["EdDSA"],
+            audience="casino-web",
+            issuer=DEFAULT_JWT_ISSUER,
+        )
+
+        assert payload["sub"] == TEST_ADDRESS
+        assert payload["type"] == TOKEN_TYPE_ID

@@ -38,18 +38,24 @@ def _get_int(name: str, default: int) -> int:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
 
 
-def _get_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.lower() in ("true", "1", "yes")
-
-
 def _parse_chain_ids(value: Optional[str]) -> Set[int]:
     """Parse comma-separated chain IDs (supports hex like 0x5afe)."""
     if not value:
         return set()
     return {int(x.strip(), 0) for x in value.split(",") if x.strip()}
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Environment variable {name} must be a boolean")
 
 
 def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
@@ -80,6 +86,7 @@ def load_settings(refresh: bool = False) -> Settings:
             api_port=_get_int("API_PORT", _defaults.api_port),
             log_level=os.getenv("LOG_LEVEL", _defaults.log_level),
             environment=os.getenv("ENVIRONMENT", _defaults.environment),
+            cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", _defaults.cors_allowed_origins),
             accounting_contract_address=os.getenv(
                 "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
             ),
@@ -110,6 +117,34 @@ def load_settings(refresh: bool = False) -> Settings:
             ),
             siwe_domain=os.getenv("SIWE_DOMAIN", _defaults.siwe_domain),
             siwe_allowed_chain_ids=_parse_chain_ids(os.getenv("SIWE_ALLOWED_CHAIN_IDS")),
+            auth_token_storage_dir=os.getenv(
+                "AUTH_TOKEN_STORAGE_DIR", _defaults.auth_token_storage_dir
+            ),
+            auth_clients_json=os.getenv(
+                "AUTH_CLIENTS",
+                os.getenv("OAUTH_CLIENTS", _defaults.auth_clients_json),
+            ),
+            auth_code_ttl_seconds=_get_int(
+                "AUTH_CODE_TTL_SECONDS", _defaults.auth_code_ttl_seconds
+            ),
+            auth_rate_limit_window_seconds=_get_int(
+                "AUTH_RATE_LIMIT_WINDOW_SECONDS", _defaults.auth_rate_limit_window_seconds
+            ),
+            auth_nonce_rate_limit=_get_int(
+                "AUTH_NONCE_RATE_LIMIT", _defaults.auth_nonce_rate_limit
+            ),
+            auth_login_rate_limit=_get_int(
+                "AUTH_LOGIN_RATE_LIMIT", _defaults.auth_login_rate_limit
+            ),
+            auth_authorize_rate_limit=_get_int(
+                "AUTH_AUTHORIZE_RATE_LIMIT", _defaults.auth_authorize_rate_limit
+            ),
+            auth_token_rate_limit=_get_int(
+                "AUTH_TOKEN_RATE_LIMIT", _defaults.auth_token_rate_limit
+            ),
+            trust_x_forwarded_for=_get_bool(
+                "TRUST_X_FORWARDED_FOR", _defaults.trust_x_forwarded_for
+            ),
         )
     return _settings
 
