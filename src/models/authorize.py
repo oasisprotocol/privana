@@ -30,6 +30,18 @@ class TokenExchangeRequest(BaseModel):
     redirect_uri: str = Field(..., min_length=1)
 
 
+class HostedAuthorizePageRequest(BaseModel):
+    """Query parameters required to render the hosted auth page."""
+
+    client_id: str = Field(..., min_length=1)
+    redirect_uri: str = Field(..., min_length=1)
+    code_challenge: str = Field(..., min_length=43, max_length=128)
+    state: str = Field(..., min_length=1)
+    response_mode: str = Field(default="web_message", min_length=1)
+    code_challenge_method: str = Field(default="S256", min_length=1)
+    chain_id: int = Field(..., ge=1)
+
+
 class TokenExchangeResponse(BaseModel):
     """Token response returned to third-party clients."""
 

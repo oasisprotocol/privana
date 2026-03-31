@@ -31,8 +31,8 @@ class Settings:
     auth_token_validity_seconds: int = 24 * 60 * 60
     siwe_domain: str = ""
 
-    # Allowed chain IDs for SIWE authentication
-    # If empty, defaults to chain_rpc_urls keys + sapphire_chain_id
+    # Allowed chain IDs for SIWE authentication.
+    # If empty, defaults to DEFAULT_SIWE_ALLOWED_CHAIN_IDS plus configured RPC chain IDs.
     siwe_allowed_chain_ids: Set[int] = field(default_factory=set)
     auth_token_storage_dir: str = ".auth_tokens"
     auth_clients_json: str = "[]"
