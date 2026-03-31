@@ -27,6 +27,15 @@ NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     84532: "ETH",
 }
 
+DEFAULT_SIWE_ALLOWED_CHAIN_IDS: Set[int] = {
+    1,  # Ethereum Mainnet
+    8453,  # Base Mainnet
+    84532,  # Base Sepolia
+    23294,  # Sapphire Mainnet
+    23295,  # Sapphire Testnet
+    11155111,  # Ethereum Sepolia
+}
+
 
 def _get_int(name: str, default: int) -> int:
     value = os.getenv(name)
@@ -149,4 +158,9 @@ def load_settings(refresh: bool = False) -> Settings:
     return _settings
 
 
-__all__ = ["load_settings", "CHAIN_NAMES", "NATIVE_TOKEN_SYMBOLS"]
+__all__ = [
+    "load_settings",
+    "CHAIN_NAMES",
+    "NATIVE_TOKEN_SYMBOLS",
+    "DEFAULT_SIWE_ALLOWED_CHAIN_IDS",
+]

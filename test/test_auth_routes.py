@@ -1283,16 +1283,16 @@ class TestChainIdValidation:
         assert response.jwt_access_token == "jwt-access-token"
 
     @pytest.mark.asyncio
-    async def test_defaults_to_sapphire_chain_id_when_no_explicit_list(
+    async def test_defaults_to_builtin_supported_chains_when_no_explicit_list(
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
-        """Test that chain_id defaults to sapphire_chain_id when no explicit list is set."""
+        """Test that built-in supported SIWE chains are allowed when no explicit list is set."""
         import src.config
 
         storage_dir = tmp_path / "chain_id_default_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-        # Don't set SIWE_ALLOWED_CHAIN_IDS - should default to sapphire_chain_id (23295)
+        # Don't set SIWE_ALLOWED_CHAIN_IDS - should fall back to the built-in supported set.
         monkeypatch.delenv("SIWE_ALLOWED_CHAIN_IDS", raising=False)
         src.config._settings = None
 

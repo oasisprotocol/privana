@@ -55,6 +55,42 @@ function buildRedirectUrl(params) {
   return url.toString();
 }
 
+function toChainHex(chainId) {
+  return `0x${Number(chainId).toString(16)}`;
+}
+
+function isSupportedChain(chainId) {
+  return context.supportedChainIds.includes(chainId);
+}
+
+async function getCurrentChainId() {
+  const chainIdHex = await window.ethereum.request({ method: "eth_chainId" });
+  return Number.parseInt(chainIdHex, 16);
+}
+
+async function switchToChain(targetChainId) {
+  await window.ethereum.request({
+    method: "wallet_switchEthereumChain",
+    params: [{ chainId: toChainHex(targetChainId) }],
+  });
+
+  const nextChainId = await getCurrentChainId();
+  if (nextChainId !== targetChainId) {
+    throw new Error(`Unable to switch wallet to chain ${targetChainId}.`);
+  }
+
+  return nextChainId;
+}
+
+async function resolveSigningChain() {
+  const currentChainId = await getCurrentChainId();
+  if (isSupportedChain(currentChainId)) {
+    return currentChainId;
+  }
+
+  return switchToChain(context.preferredChainId);
+}
+
 function deliverSuccess(code) {
   if (context.responseMode === "web_message" && window.opener && !window.opener.closed) {
     window.opener.postMessage(
@@ -142,8 +178,7 @@ async function startLogin() {
     walletAddressElement.textContent = address;
 
     showStatus("Preparing sign-in message…");
-    const chainIdHex = await window.ethereum.request({ method: "eth_chainId" });
-    const chainId = Number.parseInt(chainIdHex, 16);
+    const chainId = await resolveSigningChain();
     const nonceResponse = await fetchJson(
       `${context.nonceEndpoint}?address=${encodeURIComponent(address)}`,
       { method: "GET", headers: {} },

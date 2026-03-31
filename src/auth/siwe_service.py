@@ -11,7 +11,7 @@ from web3 import Web3
 from src.auth.auth_token_service import get_auth_token_service
 from src.auth.siwe_config import get_siwe_config
 from src.auth.token_store import get_token_store
-from src.config import load_settings
+from src.config import DEFAULT_SIWE_ALLOWED_CHAIN_IDS, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,11 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
 
     allowed_chains = settings.siwe_allowed_chain_ids
     if not allowed_chains:
-        allowed_chains = set(settings.chain_rpc_urls.keys()) | {settings.sapphire_chain_id}
+        allowed_chains = (
+            DEFAULT_SIWE_ALLOWED_CHAIN_IDS
+            | set(settings.chain_rpc_urls.keys())
+            | {settings.sapphire_chain_id}
+        )
     if not siwe_message.chain_id or siwe_message.chain_id not in allowed_chains:
         logger.warning(
             "SIWE chain_id %s not in allowed chains %s for %s",

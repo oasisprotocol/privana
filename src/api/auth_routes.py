@@ -16,10 +16,11 @@ from src.auth.pkce import verify_pkce
 from src.auth.rate_limiter import get_auth_rate_limiter, request_identity
 from src.auth.siwe_config import get_siwe_config
 from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
-from src.config import load_settings
+from src.config import DEFAULT_SIWE_ALLOWED_CHAIN_IDS, load_settings
 from src.models.authorize import (
     AuthorizeCodeRequest,
     AuthorizeCodeResponse,
+    HostedAuthorizePageRequest,
     TokenExchangeRequest,
     TokenExchangeResponse,
 )
@@ -31,6 +32,17 @@ _ERROR_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "a
 _AUTH_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "static" / "auth.js"
 _AUTH_STYLESHEET_PATH = Path(__file__).resolve().parent.parent / "static" / "auth.css"
 _VALID_RESPONSE_MODES = {"web_message", "redirect"}
+
+
+def _allowed_siwe_chains() -> set[int]:
+    settings = load_settings()
+    if settings.siwe_allowed_chain_ids:
+        return set(settings.siwe_allowed_chain_ids)
+    return (
+        DEFAULT_SIWE_ALLOWED_CHAIN_IDS
+        | set(settings.chain_rpc_urls.keys())
+        | {settings.sapphire_chain_id}
+    )
 
 
 def _headers_for_origin(origin: Optional[str]) -> dict[str, str]:
@@ -90,23 +102,35 @@ def _rate_limit_retry_after(request: Request, bucket: str, limit: int) -> Option
     )
 
 
-def _versioned_asset_url(path: str, asset_file: Path) -> str:
+def _versioned_asset_url(url: str, asset_file: Path) -> str:
     version = asset_file.stat().st_mtime_ns
-    return f"{path}?v={version}"
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}v={version}"
 
 
 @auth_router.get("/auth/authorize", response_class=HTMLResponse)
 async def authorize_page(
+    request: Request,
     client_id: str = Query(..., min_length=1),
     redirect_uri: str = Query(..., min_length=1),
     code_challenge: str = Query(..., min_length=43, max_length=128),
     state: str = Query(..., min_length=1),
     response_mode: str = Query(default="web_message"),
     code_challenge_method: str = Query(default="S256"),
+    chain_id: int = Query(..., ge=1),
 ) -> HTMLResponse:
     """Serve the Flexvaults auth page for popup/redirect SIWE login."""
     registry = get_client_registry()
     settings = load_settings()
+    payload = HostedAuthorizePageRequest(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        code_challenge=code_challenge,
+        state=state,
+        response_mode=response_mode,
+        code_challenge_method=code_challenge_method,
+        chain_id=chain_id,
+    )
 
     try:
         siwe_config = get_siwe_config(settings)
@@ -117,34 +141,41 @@ async def authorize_page(
             status_code=500,
         )
 
-    client = registry.get_client(client_id)
+    client = registry.get_client(payload.client_id)
     if client is None:
         return _render_error_page("Unknown Application", "This application is not registered.")
-    if not registry.validate_redirect_uri(client_id, redirect_uri):
+    if not registry.validate_redirect_uri(payload.client_id, payload.redirect_uri):
         return _render_error_page(
             "Invalid Redirect", "The supplied redirect URI is not registered."
         )
-    if code_challenge_method != "S256":
+    if payload.code_challenge_method != "S256":
         return _render_error_page("Unsupported PKCE", "Only S256 PKCE is supported.")
-    if response_mode not in _VALID_RESPONSE_MODES:
+    if payload.response_mode not in _VALID_RESPONSE_MODES:
         return _render_error_page("Unsupported Response Mode", "Unsupported response_mode.")
+    if payload.chain_id not in _allowed_siwe_chains():
+        return _render_error_page(
+            "Unsupported Chain",
+            f"Chain ID {payload.chain_id} is not supported for hosted sign-in.",
+        )
 
-    normalized_redirect_uri = ClientRegistry.normalize_redirect_uri(redirect_uri)
+    normalized_redirect_uri = ClientRegistry.normalize_redirect_uri(payload.redirect_uri)
     redirect_origin = ClientRegistry.redirect_origin(normalized_redirect_uri)
     context = {
         "clientId": client.client_id,
         "displayName": client.display_name,
         "redirectUri": normalized_redirect_uri,
         "redirectOrigin": redirect_origin,
-        "codeChallenge": code_challenge,
-        "codeChallengeMethod": code_challenge_method,
-        "state": state,
-        "responseMode": response_mode,
+        "codeChallenge": payload.code_challenge,
+        "codeChallengeMethod": payload.code_challenge_method,
+        "state": payload.state,
+        "responseMode": payload.response_mode,
+        "preferredChainId": payload.chain_id,
+        "supportedChainIds": sorted(_allowed_siwe_chains()),
         "siweDomain": siwe_config.domain,
         "siweOrigin": siwe_config.origin,
         "authTokenValiditySeconds": settings.auth_token_validity_seconds,
-        "nonceEndpoint": "/v1/accounting/auth/nonce",
-        "authorizeEndpoint": "/v1/accounting/auth/authorize",
+        "nonceEndpoint": str(request.url_for("get_siwe_nonce")),
+        "authorizeEndpoint": str(request.url_for("authorize_code")),
     }
 
     template = _AUTH_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -152,9 +183,19 @@ async def authorize_page(
     html = (
         template.replace("__AUTH_CONTEXT_JSON__", escaped_context)
         .replace(
-            "__AUTH_CSS_HREF__", _versioned_asset_url("/static/auth.css", _AUTH_STYLESHEET_PATH)
+            "__AUTH_CSS_HREF__",
+            _versioned_asset_url(
+                str(request.url_for("static", path="auth.css")),
+                _AUTH_STYLESHEET_PATH,
+            ),
         )
-        .replace("__AUTH_JS_SRC__", _versioned_asset_url("/static/auth.js", _AUTH_SCRIPT_PATH))
+        .replace(
+            "__AUTH_JS_SRC__",
+            _versioned_asset_url(
+                str(request.url_for("static", path="auth.js")),
+                _AUTH_SCRIPT_PATH,
+            ),
+        )
     )
 
     return HTMLResponse(

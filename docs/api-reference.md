@@ -18,8 +18,9 @@ Supported authentication modes:
    - The returned `siwe_token` can also be passed via `X-SIWE-Token` for direct token-based private reads.
    - Browser requests to `/auth/nonce` and `/auth/login` must originate from the configured Flexvaults auth origin. Non-browser clients may omit the `Origin` header.
 2. **Cross-domain / third-party apps**
-   - Redirect or open a popup to `GET /auth/authorize` with `client_id`, exact `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `state`, and `response_mode`.
+   - Redirect or open a popup to `GET /auth/authorize` with `client_id`, exact `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `chain_id`, `state`, and `response_mode`.
    - The Flexvaults auth page performs SIWE on the canonical Flexvaults domain and returns a short-lived authorization code.
+   - If the wallet is already on a supported chain, the auth page signs there. Otherwise it switches to the requested `chain_id` and signs on that chain.
    - Exchange that code at `POST /auth/token` with `grant_type=authorization_code`, the code, and the PKCE verifier to receive:
      - `access_token` for Flexvaults API calls
      - `id_token` for third-party backend identity verification
@@ -283,6 +284,7 @@ Serve the Flexvaults authorization page used for cross-domain sign-in.
   - `redirect_uri` (string, required) – Must exactly match a registered URI for the client.
   - `code_challenge` (string, required)
   - `code_challenge_method` (string, required) – Only `S256` is supported.
+  - `chain_id` (integer, required) – Preferred fallback chain for hosted SIWE. If the wallet is already on another supported chain, the auth page signs there without switching.
   - `state` (string, required)
   - `response_mode` (string, optional) – `web_message` or `redirect`. Defaults to `web_message`.
 

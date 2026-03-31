@@ -2,11 +2,13 @@ import asyncio
 import base64
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from web3 import Web3
 
@@ -30,6 +32,7 @@ TEST_REDIRECT_URI = "https://casino.flexvaults.test/callback"
 TEST_REDIRECT_ORIGIN = "https://casino.flexvaults.test"
 TEST_DOMAIN = "auth.flexvaults.com"
 TEST_ADDRESS = Web3.to_checksum_address("0x000000000000000000000000000000000000dEaD")
+TEST_HOSTED_CHAIN_ID = 84532
 
 
 def _build_pkce_challenge(verifier: str) -> str:
@@ -58,6 +61,7 @@ def _reset_auth_state() -> None:
 def test_app(tmp_path, monkeypatch):
     monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
     monkeypatch.setenv("SIWE_DOMAIN", TEST_DOMAIN)
+    monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", f"{TEST_HOSTED_CHAIN_ID},23295")
     monkeypatch.setenv("AUTH_TOKEN_VALIDITY_SECONDS", "600")
     monkeypatch.setenv("AUTH_CODE_TTL_SECONDS", "90")
     monkeypatch.setenv("JWT_EXPIRY_HOURS", "1")
@@ -91,6 +95,7 @@ def test_app(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(routes.router)
     app.include_router(auth_routes.auth_router)
+    app.mount("/static", StaticFiles(directory=Path("src/static")), name="static")
 
     yield app
 
@@ -111,6 +116,7 @@ def test_authorize_page_renders_registered_client(client):
             "redirect_uri": TEST_REDIRECT_URI,
             "code_challenge": _build_pkce_challenge("v" * 43),
             "code_challenge_method": "S256",
+            "chain_id": TEST_HOSTED_CHAIN_ID,
             "response_mode": "web_message",
             "state": "state-123",
         },
@@ -121,8 +127,53 @@ def test_authorize_page_renders_registered_client(client):
     assert TEST_REDIRECT_ORIGIN in response.text
     assert "/static/auth.css?v=" in response.text
     assert "/static/auth.js?v=" in response.text
+    assert f'"preferredChainId": {TEST_HOSTED_CHAIN_ID}' in response.text
+    assert '"supportedChainIds": [23295, 84532]' in response.text
     assert response.headers["cache-control"] == "no-store"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_authorize_page_preserves_root_path_in_rendered_urls(test_app):
+    with TestClient(test_app, root_path="/api") as prefixed_client:
+        response = prefixed_client.get(
+            "/v1/accounting/auth/authorize",
+            params={
+                "client_id": TEST_CLIENT_ID,
+                "redirect_uri": TEST_REDIRECT_URI,
+                "code_challenge": _build_pkce_challenge("v" * 43),
+                "code_challenge_method": "S256",
+                "chain_id": TEST_HOSTED_CHAIN_ID,
+                "response_mode": "web_message",
+                "state": "state-123",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "http://testserver/api/static/auth.css?v=" in response.text
+    assert "http://testserver/api/static/auth.js?v=" in response.text
+    assert '"nonceEndpoint": "http://testserver/api/v1/accounting/auth/nonce"' in response.text
+    assert (
+        '"authorizeEndpoint": "http://testserver/api/v1/accounting/auth/authorize"' in response.text
+    )
+
+
+def test_authorize_page_rejects_unsupported_chain(client):
+    response = client.get(
+        "/v1/accounting/auth/authorize",
+        params={
+            "client_id": TEST_CLIENT_ID,
+            "redirect_uri": TEST_REDIRECT_URI,
+            "code_challenge": _build_pkce_challenge("v" * 43),
+            "code_challenge_method": "S256",
+            "chain_id": 23294,
+            "response_mode": "web_message",
+            "state": "state-123",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported Chain" in response.text
+    assert "Chain ID 23294 is not supported for hosted sign-in." in response.text
 
 
 def test_authorize_code_and_exchange_is_single_use(client, monkeypatch):
