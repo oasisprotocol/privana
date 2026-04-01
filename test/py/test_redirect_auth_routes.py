@@ -149,12 +149,11 @@ def test_authorize_page_preserves_root_path_in_rendered_urls(test_app):
         )
 
     assert response.status_code == 200
-    assert "http://testserver/api/static/auth.css?v=" in response.text
-    assert "http://testserver/api/static/auth.js?v=" in response.text
-    assert '"nonceEndpoint": "http://testserver/api/v1/accounting/auth/nonce"' in response.text
-    assert (
-        '"authorizeEndpoint": "http://testserver/api/v1/accounting/auth/authorize"' in response.text
-    )
+    assert "/api/static/auth.css?v=" in response.text
+    assert "/api/static/auth.js?v=" in response.text
+    assert '"nonceEndpoint": "/api/v1/accounting/auth/nonce"' in response.text
+    assert '"authorizeEndpoint": "/api/v1/accounting/auth/authorize"' in response.text
+    assert "http://testserver" not in response.text
 
 
 def test_authorize_page_rejects_unsupported_chain(client):
