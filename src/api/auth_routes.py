@@ -108,6 +108,14 @@ def _versioned_asset_url(url: str, asset_file: Path) -> str:
     return f"{url}{separator}v={version}"
 
 
+def _root_path_aware_path(request: Request, route_name: str, **path_params: str) -> str:
+    path = str(request.app.url_path_for(route_name, **path_params))
+    root_path = request.scope.get("root_path", "") or ""
+    if root_path.endswith("/"):
+        root_path = root_path[:-1]
+    return f"{root_path}{path}" if root_path else path
+
+
 @auth_router.get("/auth/authorize", response_class=HTMLResponse)
 async def authorize_page(
     request: Request,
@@ -174,8 +182,8 @@ async def authorize_page(
         "siweDomain": siwe_config.domain,
         "siweOrigin": siwe_config.origin,
         "authTokenValiditySeconds": settings.auth_token_validity_seconds,
-        "nonceEndpoint": str(request.url_for("get_siwe_nonce")),
-        "authorizeEndpoint": str(request.url_for("authorize_code")),
+        "nonceEndpoint": _root_path_aware_path(request, "get_siwe_nonce"),
+        "authorizeEndpoint": _root_path_aware_path(request, "authorize_code"),
     }
 
     template = _AUTH_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -185,14 +193,14 @@ async def authorize_page(
         .replace(
             "__AUTH_CSS_HREF__",
             _versioned_asset_url(
-                str(request.url_for("static", path="auth.css")),
+                _root_path_aware_path(request, "static", path="auth.css"),
                 _AUTH_STYLESHEET_PATH,
             ),
         )
         .replace(
             "__AUTH_JS_SRC__",
             _versioned_asset_url(
-                str(request.url_for("static", path="auth.js")),
+                _root_path_aware_path(request, "static", path="auth.js"),
                 _AUTH_SCRIPT_PATH,
             ),
         )
