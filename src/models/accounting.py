@@ -264,6 +264,12 @@ class TokenInfoResponse(BaseModel):
     token_address: Optional[str] = None
 
 
+class TokenListResponse(BaseModel):
+    """Response containing a list of all registered tokens."""
+
+    tokens: list[TokenInfoResponse]
+
+
 class BalanceResponse(BaseModel):
     """Response containing a user's balance for a specific token."""
 

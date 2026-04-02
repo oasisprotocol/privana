@@ -41,6 +41,7 @@ from src.models.accounting import (
     SiweLoginResponse,
     SiweNonceResponse,
     TokenInfoResponse,
+    TokenListResponse,
     TotalLockedBalanceResponse,
     TransactionSubmissionResponse,
     TransferFundsRequest,
@@ -579,6 +580,17 @@ async def siwe_login(
         jwt_expires_in=jwt_service.access_token_expiry_seconds,
         jwt_refresh_expires_in=jwt_service.refresh_token_expiry_seconds,
     )
+
+
+@router.get("/tokens", response_model=TokenListResponse)
+async def list_tokens() -> TokenListResponse:
+    """List all registered tokens."""
+    try:
+        tokens = await _service.list_all_tokens()
+        return TokenListResponse(tokens=[TokenInfoResponse(**t) for t in tokens])
+    except Exception as exc:
+        logger.exception("Failed to list tokens")
+        raise HTTPException(status_code=500, detail="Failed to list tokens") from exc
 
 
 @router.get("/tokens/{token_id}", response_model=TokenInfoResponse)

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # Cache TTL settings (in seconds)
 _TOKEN_CONTEXT_CACHE_TTL = 3600  # 1 hour - token metadata rarely changes
 _TOKEN_SYMBOL_CACHE_TTL = 3600  # 1 hour - symbols rarely change
+_TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
@@ -110,6 +111,9 @@ class AccountingContractService:
         )
         self._token_symbol_cache: AsyncTTLCache[str, str] = AsyncTTLCache(
             maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_SYMBOL_CACHE_TTL
+        )
+        self._token_list_cache: AsyncTTLCache[str, list[Dict[str, Any]]] = AsyncTTLCache(
+            maxsize=1, ttl=_TOKEN_LIST_CACHE_TTL
         )
 
     # ------------------------------------------------------------------
@@ -877,6 +881,25 @@ class AccountingContractService:
             result["token_address"] = Web3.to_checksum_address(token_address)
 
         return result
+
+    async def list_all_tokens(self) -> list[Dict[str, Any]]:
+        """List all registered tokens from the contract (cached for 5 minutes)."""
+        return await self._token_list_cache.get_or_set_async("all", self._fetch_all_tokens)
+
+    async def _fetch_all_tokens(self) -> list[Dict[str, Any]]:
+        """Fetch all registered tokens from the contract (uncached)."""
+        contract_reader = self._get_reader_contract()
+        token_ids = await contract_reader.functions.getRegisteredTokens().call()
+
+        results = []
+        for token_id in token_ids:
+            token_id_hex = Web3.to_hex(token_id)
+            try:
+                info = await self.get_token_info(token_id_hex)
+                results.append(info)
+            except Exception:
+                logger.warning("Failed to fetch info for token %s", token_id_hex)
+        return results
 
     async def get_withdrawal_nonce(self, user_address: str) -> Dict[str, Any]:
         """Get the current withdrawal nonce for a user."""
