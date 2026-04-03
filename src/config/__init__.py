@@ -27,6 +27,14 @@ NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     84532: "ETH",
 }
 
+NATIVE_TOKEN_NAMES: Dict[int, str] = {
+    84532: "Ether",
+}
+
+NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
+    84532: 18,
+}
+
 DEFAULT_SIWE_ALLOWED_CHAIN_IDS: Set[int] = {
     1,  # Ethereum Mainnet
     8453,  # Base Mainnet
