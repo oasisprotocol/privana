@@ -117,7 +117,7 @@ class AccountingContractService:
         self._token_context_cache: AsyncTTLCache[str, TokenContext] = AsyncTTLCache(
             maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_CONTEXT_CACHE_TTL
         )
-        self._token_symbol_cache: AsyncTTLCache[str, str] = AsyncTTLCache(
+        self._token_symbol_cache: AsyncTTLCache[str, Optional[str]] = AsyncTTLCache(
             maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_SYMBOL_CACHE_TTL
         )
         self._token_name_cache: AsyncTTLCache[str, Optional[str]] = AsyncTTLCache(
@@ -466,12 +466,12 @@ class AccountingContractService:
                 f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
             )
 
-    async def _get_token_symbol(self, token: HexBytes) -> str:
+    async def _get_token_symbol(self, token: HexBytes) -> Optional[str]:
         return await self._token_symbol_cache.get_or_set_async(
             token.hex(), lambda: self._fetch_token_symbol(token)
         )
 
-    async def _fetch_token_symbol(self, token: HexBytes) -> str:
+    async def _fetch_token_symbol(self, token: HexBytes) -> Optional[str]:
         """Fetch token symbol from config or chain (uncached)."""
         context = await self._get_token_context(token)
 
@@ -493,9 +493,9 @@ class AccountingContractService:
                 token_contract = chain_w3.eth.contract(address=context.token_address, abi=erc20_abi)
                 return await token_contract.functions.symbol().call()
             except Exception:
-                return "UNKNOWN"
+                return None
 
-        return "UNKNOWN"
+        return None
 
     async def _get_token_name(self, token: HexBytes) -> Optional[str]:
         return await self._token_name_cache.get_or_set_async(
