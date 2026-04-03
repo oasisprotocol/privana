@@ -20,7 +20,13 @@ from web3.providers import AsyncHTTPProvider
 from src.abi.accounting import ACCOUNTING_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import RoflAppdClient
-from src.config import CHAIN_NAMES, NATIVE_TOKEN_SYMBOLS, load_settings
+from src.config import (
+    CHAIN_NAMES,
+    NATIVE_TOKEN_DECIMALS,
+    NATIVE_TOKEN_NAMES,
+    NATIVE_TOKEN_SYMBOLS,
+    load_settings,
+)
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
 
@@ -29,6 +35,8 @@ logger = logging.getLogger(__name__)
 # Cache TTL settings (in seconds)
 _TOKEN_CONTEXT_CACHE_TTL = 3600  # 1 hour - token metadata rarely changes
 _TOKEN_SYMBOL_CACHE_TTL = 3600  # 1 hour - symbols rarely change
+_TOKEN_NAME_CACHE_TTL = 3600  # 1 hour - names rarely change
+_TOKEN_DECIMALS_CACHE_TTL = 3600  # 1 hour - decimals never change
 _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 
 # Cache size limits
@@ -109,8 +117,14 @@ class AccountingContractService:
         self._token_context_cache: AsyncTTLCache[str, TokenContext] = AsyncTTLCache(
             maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_CONTEXT_CACHE_TTL
         )
-        self._token_symbol_cache: AsyncTTLCache[str, str] = AsyncTTLCache(
+        self._token_symbol_cache: AsyncTTLCache[str, Optional[str]] = AsyncTTLCache(
             maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_SYMBOL_CACHE_TTL
+        )
+        self._token_name_cache: AsyncTTLCache[str, Optional[str]] = AsyncTTLCache(
+            maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_NAME_CACHE_TTL
+        )
+        self._token_decimals_cache: AsyncTTLCache[str, Optional[int]] = AsyncTTLCache(
+            maxsize=_TOKEN_CACHE_MAXSIZE, ttl=_TOKEN_DECIMALS_CACHE_TTL
         )
         self._token_list_cache: AsyncTTLCache[str, list[Dict[str, Any]]] = AsyncTTLCache(
             maxsize=1, ttl=_TOKEN_LIST_CACHE_TTL
@@ -452,12 +466,12 @@ class AccountingContractService:
                 f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
             )
 
-    async def _get_token_symbol(self, token: HexBytes) -> str:
+    async def _get_token_symbol(self, token: HexBytes) -> Optional[str]:
         return await self._token_symbol_cache.get_or_set_async(
             token.hex(), lambda: self._fetch_token_symbol(token)
         )
 
-    async def _fetch_token_symbol(self, token: HexBytes) -> str:
+    async def _fetch_token_symbol(self, token: HexBytes) -> Optional[str]:
         """Fetch token symbol from config or chain (uncached)."""
         context = await self._get_token_context(token)
 
@@ -479,9 +493,71 @@ class AccountingContractService:
                 token_contract = chain_w3.eth.contract(address=context.token_address, abi=erc20_abi)
                 return await token_contract.functions.symbol().call()
             except Exception:
-                return "UNKNOWN"
+                return None
 
-        return "UNKNOWN"
+        return None
+
+    async def _get_token_name(self, token: HexBytes) -> Optional[str]:
+        return await self._token_name_cache.get_or_set_async(
+            token.hex(), lambda: self._fetch_token_name(token)
+        )
+
+    async def _fetch_token_name(self, token: HexBytes) -> Optional[str]:
+        """Fetch token name from config or chain (uncached)."""
+        context = await self._get_token_context(token)
+
+        if context.is_native:
+            return NATIVE_TOKEN_NAMES.get(context.chain_id, "Ether")
+
+        if context.token_address:
+            try:
+                chain_w3 = await self._get_chain_web3(context.chain_id)
+                erc20_abi = [
+                    {
+                        "constant": True,
+                        "inputs": [],
+                        "name": "name",
+                        "outputs": [{"name": "", "type": "string"}],
+                        "type": "function",
+                    }
+                ]
+                token_contract = chain_w3.eth.contract(address=context.token_address, abi=erc20_abi)
+                return await token_contract.functions.name().call()
+            except Exception:
+                return None
+
+        return None
+
+    async def _get_token_decimals(self, token: HexBytes) -> Optional[int]:
+        return await self._token_decimals_cache.get_or_set_async(
+            token.hex(), lambda: self._fetch_token_decimals(token)
+        )
+
+    async def _fetch_token_decimals(self, token: HexBytes) -> Optional[int]:
+        """Fetch token decimals from config or chain (uncached)."""
+        context = await self._get_token_context(token)
+
+        if context.is_native:
+            return NATIVE_TOKEN_DECIMALS.get(context.chain_id, 18)
+
+        if context.token_address:
+            try:
+                chain_w3 = await self._get_chain_web3(context.chain_id)
+                erc20_abi = [
+                    {
+                        "constant": True,
+                        "inputs": [],
+                        "name": "decimals",
+                        "outputs": [{"name": "", "type": "uint8"}],
+                        "type": "function",
+                    }
+                ]
+                token_contract = chain_w3.eth.contract(address=context.token_address, abi=erc20_abi)
+                return await token_contract.functions.decimals().call()
+            except Exception:
+                return None
+
+        return None
 
     async def deposit_quote(self, user_address: str, token_id: str, amount: int) -> Dict[str, Any]:
         """Generate a deposit quote with transaction details for UI usage."""
@@ -879,6 +955,10 @@ class AccountingContractService:
             result["chain_id"] = chain_id
             result["chain_name"] = self.chain_names.get(chain_id, f"Chain {chain_id}")
             result["token_address"] = Web3.to_checksum_address(token_address)
+
+        result["symbol"] = await self._get_token_symbol(token_hex)
+        result["name"] = await self._get_token_name(token_hex)
+        result["decimals"] = await self._get_token_decimals(token_hex)
 
         return result
 

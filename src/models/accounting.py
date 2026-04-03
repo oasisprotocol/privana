@@ -262,6 +262,9 @@ class TokenInfoResponse(BaseModel):
     chain_id: Optional[int] = None
     chain_name: Optional[str] = None
     token_address: Optional[str] = None
+    symbol: Optional[str] = None
+    name: Optional[str] = None
+    decimals: Optional[int] = None
 
 
 class TokenListResponse(BaseModel):
@@ -276,7 +279,7 @@ class BalanceResponse(BaseModel):
     user_address: str
     token_id: str
     balance: str
-    token_symbol: str
+    token_symbol: Optional[str] = None
     chain_id: str
 
 
@@ -285,7 +288,7 @@ class TokenBalance(BaseModel):
 
     token_id: str
     balance: str
-    token_symbol: str
+    token_symbol: Optional[str] = None
     chain_id: str
 
 
