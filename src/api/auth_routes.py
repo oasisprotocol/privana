@@ -206,13 +206,16 @@ async def authorize_page(
         )
     )
 
+    # Firefox blocks extension-injected wallet providers under strict script-src.
+    # This page has no authored inline JS, so relaxing only script-src keeps the
+    # rest of the CSP strict while allowing wallet injection.
     return HTMLResponse(
         content=html,
         headers={
             **no_store_headers(),
             "Content-Security-Policy": (
                 "default-src 'none'; "
-                "script-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
                 "style-src 'self'; "
                 "img-src 'self'; "
                 "connect-src 'self'; "
