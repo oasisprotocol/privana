@@ -130,7 +130,10 @@ def test_authorize_page_renders_registered_client(client):
     assert f'"preferredChainId": {TEST_HOSTED_CHAIN_ID}' in response.text
     assert '"supportedChainIds": [23295, 84532]' in response.text
     assert response.headers["cache-control"] == "no-store"
-    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+    csp = response.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in csp
+    # Firefox needs relaxed script-src for wallet-provider injection on this page.
+    assert "script-src 'self' 'unsafe-inline'; " in csp
 
 
 def test_authorize_page_preserves_root_path_in_rendered_urls(test_app):
