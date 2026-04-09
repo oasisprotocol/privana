@@ -44,7 +44,6 @@ jobs:
         image: ghcr.io/oasisprotocol/sapphire-localnet
         ports:
           - 8545:8545
-          - 8546:8546
         env:
           OASIS_DOCKER_START_EXPLORER: no
           TO: "chimney theory present latin find behave ankle clock shadow earn suit reflect"
@@ -90,8 +89,6 @@ jobs:
 
       - name: Run Solidity tests
         run: make solidity-test
-        env:
-          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
 
       - name: Install dependencies
         run: make dev

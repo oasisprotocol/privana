@@ -14,7 +14,9 @@
     "format": "npm-run-all format:**",
     "build": "hardhat compile",
     "check:size": "hardhat run scripts/check-bytecode-size.ts --no-compile",
-    "test": "hardhat test --network sapphire-localnet",
+    "test:hardhat": "hardhat test",
+    "test:sapphire-localnet": "hardhat test --network sapphire-localnet",
+    "test": "npm-run-all test:**",
     "coverage": "hardhat coverage"
   },
   "devDependencies": {
