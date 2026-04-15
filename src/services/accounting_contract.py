@@ -1109,7 +1109,7 @@ class AccountingContractService:
     ) -> Dict[str, Any]:
         checksum_user = self._require_address(user_address, "user_address")
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
-        balance = await self._fetch_balance(checksum_user, token_hex, siwe_token)
+        balance = await self._fetch_balance(token_hex, siwe_token)
         context = await self._get_token_context(token_hex)
         return {
             "user_address": checksum_user,
@@ -1119,16 +1119,9 @@ class AccountingContractService:
             "chain_id": str(context.chain_id),
         }
 
-    async def _fetch_balance(
-        self, user: ChecksumAddress, token: HexBytes, siwe_token: bytes
-    ) -> int:
-        """Fetch balance from contract.
-
-        TODO: Add caching when SIWE validation at API layer is implemented.
-        See: https://github.com/oasisprotocol/accounting-module/pull/82
-        """
+    async def _fetch_balance(self, token: HexBytes, siwe_token: bytes) -> int:
         contract_reader = await self._get_confidential_reader_contract()
-        return await contract_reader.functions.balanceOf(user, bytes(token), siwe_token).call()
+        return await contract_reader.functions.balanceOf(bytes(token), siwe_token).call()
 
     async def get_batch_balances(
         self, user_address: str, token_ids_raw: list[str], siwe_token: bytes
@@ -1143,7 +1136,7 @@ class AccountingContractService:
 
         response_balances = []
         for token_id in token_ids:
-            balance = await self._fetch_balance(user, token_id, siwe_token)
+            balance = await self._fetch_balance(token_id, siwe_token)
             context = await self._get_token_context(token_id)
             response_balances.append(
                 {
@@ -1168,14 +1161,9 @@ class AccountingContractService:
             "is_expired": now >= int(expiry),
         }
 
-    async def _fetch_user_locks(self, user: ChecksumAddress, siwe_token: bytes) -> list[Any]:
-        """Fetch user locks from contract.
-
-        TODO: Add caching when SIWE validation at API layer is implemented.
-        See: https://github.com/oasisprotocol/accounting-module/pull/82
-        """
+    async def _fetch_user_locks(self, siwe_token: bytes) -> list[Any]:
         contract_reader = await self._get_confidential_reader_contract()
-        return await contract_reader.functions.getUserLocks(user, siwe_token).call()
+        return await contract_reader.functions.getUserLocks(siwe_token).call()
 
     async def get_locked_funds(
         self,
@@ -1193,7 +1181,7 @@ class AccountingContractService:
         # Backend services that need service-authenticated reads should query
         # getServiceLocks(...) directly on the contract using Sapphire authenticated
         # view calls (for Python wrappers: signed query with empty token parameter).
-        all_locks = await self._fetch_user_locks(user, siwe_token)
+        all_locks = await self._fetch_user_locks(siwe_token)
         if service is None:
             locks = all_locks
         else:
@@ -1215,7 +1203,7 @@ class AccountingContractService:
         user = self._require_address(user_address, "user_address")
 
         now = await self._get_chain_timestamp()
-        all_locks = await self._fetch_user_locks(user, siwe_token)
+        all_locks = await self._fetch_user_locks(siwe_token)
         expired_locks = [lock for lock in all_locks if now >= int(lock[4])]
         lock_infos = [self._lock_to_info(user, lock, now) for lock in expired_locks]
         return {"user_address": user, "expired_locks": lock_infos}
@@ -1226,7 +1214,7 @@ class AccountingContractService:
         user = self._require_address(user_address, "user_address")
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
 
-        locks = await self._fetch_user_locks(user, siwe_token)
+        locks = await self._fetch_user_locks(siwe_token)
         total_locked = sum(int(lock[3]) for lock in locks if HexBytes(lock[2]) == token_hex)
 
         return {

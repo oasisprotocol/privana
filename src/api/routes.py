@@ -2,6 +2,7 @@
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import jwt
@@ -84,12 +85,26 @@ def _mint_private_read_token(user_address: str) -> bytes:
     return token
 
 
-def _require_private_read_token(
+@dataclass(frozen=True)
+class PrivateReadAuth:
+    """Authenticated SIWE token + resolved user address for private reads."""
+
+    token: bytes
+    user_address: str
+
+
+def _require_private_read_auth(
     current_user: Optional[str] = Depends(get_current_user_optional),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
     token: Optional[str] = Header(None, alias=_SIWE_TOKEN_HEADER),
-) -> bytes:
+) -> PrivateReadAuth:
+    if authorization and token:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provide either Authorization bearer token or {_SIWE_TOKEN_HEADER}, not both",
+        )
     if current_user:
-        return _mint_private_read_token(current_user)
+        return PrivateReadAuth(_mint_private_read_token(current_user), current_user)
     if not token:
         raise HTTPException(
             status_code=401,
@@ -99,7 +114,11 @@ def _require_private_read_token(
         raw = HexBytes(token)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid {_SIWE_TOKEN_HEADER} header") from exc
-    return bytes(raw)
+    try:
+        auth_token = get_auth_token_service().decode_auth_token(bytes(raw), validate_expiry=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+    return PrivateReadAuth(bytes(raw), auth_token.user_addr)
 
 
 def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
@@ -379,20 +398,19 @@ async def get_withdrawal_info(index: int) -> WithdrawalInfoResponse:
 
 
 @router.get(
-    "/funds/locked/{user_address}",
+    "/funds/locked",
     response_model=LockedFundsResponse,
 )
 async def get_locked_funds(
-    user_address: str,
     service_address: Optional[str] = None,
-    siwe_token: bytes = Depends(_require_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
 ) -> LockedFundsResponse:
-    """Get locked funds for a user, optionally filtered by service address."""
+    """Get locked funds for the authenticated user, optionally filtered by service address."""
     try:
         result = await _service.get_locked_funds(
-            user_address,
+            auth.user_address,
             service_address,
-            siwe_token,
+            auth.token,
         )
         return LockedFundsResponse(**result)
     except ContractLogicError as exc:
@@ -405,25 +423,19 @@ async def get_locked_funds(
 
 
 @router.get(
-    "/balances/{user_address}/{token_id}",
+    "/balances/{token_id}",
     response_model=BalanceResponse,
 )
 async def get_balance(
-    user_address: str,
     token_id: str,
-    siwe_token: bytes = Depends(_require_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
 ) -> BalanceResponse:
-    """Get the user's balance for a specific token from the contract."""
+    """Get the authenticated user's balance for a specific token from the contract."""
     try:
-        result = await _service.get_balance(user_address, token_id, siwe_token)
+        result = await _service.get_balance(auth.user_address, token_id, auth.token)
         return BalanceResponse(**result)
     except ContractLogicError as exc:
-        logger.warning(
-            "SIWE token validation failed for %s: %s (token length: %d bytes)",
-            user_address,
-            exc,
-            len(siwe_token),
-        )
+        logger.warning("SIWE token validation failed for %s: %s", auth.user_address, exc)
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -452,16 +464,15 @@ async def unlock_all_expired_locks(
 
 
 @router.get(
-    "/funds/expired/{user_address}",
+    "/funds/expired",
     response_model=ExpiredLocksResponse,
 )
 async def get_expired_locks(
-    user_address: str,
-    siwe_token: bytes = Depends(_require_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
 ) -> ExpiredLocksResponse:
-    """Get all expired locks for a user."""
+    """Get all expired locks for the authenticated user."""
     try:
-        result = await _service.get_expired_locks(user_address, siwe_token)
+        result = await _service.get_expired_locks(auth.user_address, auth.token)
         return ExpiredLocksResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -478,13 +489,11 @@ async def get_expired_locks(
 )
 async def get_batch_balances(
     payload: BatchBalancesRequest,
-    siwe_token: bytes = Depends(_require_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
 ) -> BatchBalancesResponse:
-    """Get balances for multiple tokens for a user."""
+    """Get balances for multiple tokens for the authenticated user."""
     try:
-        result = await _service.get_batch_balances(
-            payload.user_address, payload.token_ids, siwe_token
-        )
+        result = await _service.get_batch_balances(auth.user_address, payload.token_ids, auth.token)
         return BatchBalancesResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -496,17 +505,16 @@ async def get_batch_balances(
 
 
 @router.get(
-    "/funds/locked/total/{user_address}/{token_id}",
+    "/funds/locked/total/{token_id}",
     response_model=TotalLockedBalanceResponse,
 )
 async def get_total_locked_balance(
-    user_address: str,
     token_id: str,
-    siwe_token: bytes = Depends(_require_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
 ) -> TotalLockedBalanceResponse:
-    """Get total locked balance for a specific token across all locks."""
+    """Get total locked balance for a specific token across all locks for the authenticated user."""
     try:
-        result = await _service.get_total_locked_balance(user_address, token_id, siwe_token)
+        result = await _service.get_total_locked_balance(auth.user_address, token_id, auth.token)
         return TotalLockedBalanceResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc

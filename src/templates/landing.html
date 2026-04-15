@@ -438,12 +438,12 @@
                 <div class="endpoint-item">
                     <div class="endpoint-header" onclick="toggleEndpoint(this)">
                         <span class="method method-get">GET</span>
-                        <span class="path">/v1/accounting/funds/locked/{user_address}</span>
+                        <span class="path">/v1/accounting/funds/locked</span>
                         <span class="chevron">▼</span>
                     </div>
                     <div class="endpoint-details">
                         <div class="details-content">
-                            <div class="description">Get locked funds for a user, optionally filtered by service address.</div>
+                            <div class="description">Get locked funds for the authenticated user, optionally filtered by service address.</div>
                             <div class="params-section">
                                 <h4>Query Parameters</h4>
                                 <div class="param">
@@ -699,12 +699,12 @@
                 <div class="endpoint-item">
                     <div class="endpoint-header" onclick="toggleEndpoint(this)">
                         <span class="method method-get">GET</span>
-                        <span class="path">/v1/accounting/balances/{user_address}/{token_id}</span>
+                        <span class="path">/v1/accounting/balances/{token_id}</span>
                         <span class="chevron">▼</span>
                     </div>
                     <div class="endpoint-details">
                         <div class="details-content">
-                            <div class="description">Get the user's balance for a specific token from the contract.</div>
+                            <div class="description">Get the authenticated user's balance for a specific token from the contract.</div>
                             <div class="params-section">
                                 <h4>Response</h4>
                                 <div class="param">

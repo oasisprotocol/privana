@@ -143,10 +143,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return msg.sender;
     }
 
-    function _requireUser(address user, bytes memory token) internal view {
-        if (_authSender(token) != user) revert Unauthorized();
-    }
-
     /**
      * @notice Credits user's account after verifying an EVM deposit transaction.
      *
@@ -821,12 +817,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return withdrawals.length;
     }
 
-    /// @notice Returns active locks for a user. Requires auth token for private reads.
+    /// @notice Returns active locks for the authenticated user. Requires auth token for private reads.
     function getUserLocks(
-        address user,
         bytes memory token
     ) public view returns (FundLock[] memory) {
-        _requireUser(user, token);
+        address user = _authSender(token);
+        if (user == address(0)) revert Unauthorized();
         return userInfo[user].activeLocks;
     }
 
@@ -860,13 +856,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return serviceLocks;
     }
 
-    /// @notice Returns a user's balance for a token (user-only). Requires auth token.
+    /// @notice Returns the authenticated user's balance for a token. Requires auth token.
     function balanceOf(
-        address user,
         bytes32 tokenId,
         bytes memory token
     ) public view returns (uint256) {
-        _requireUser(user, token);
+        address user = _authSender(token);
+        if (user == address(0)) revert Unauthorized();
         return balances[user][tokenId];
     }
 

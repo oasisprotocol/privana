@@ -260,6 +260,57 @@ class TestAuthTokenService:
         assert decoded[0][2] == token.valid_until
         assert decoded[0][3] == token.statement
 
+    @pytest.mark.asyncio
+    async def test_decrypt_auth_token_returns_auth_token(self, initialized_key_manager):
+        """Should decode encrypted tokens back into AuthToken instances."""
+        service = get_auth_token_service()
+        valid_until = int(time.time()) + 600
+
+        ciphertext = service.create_and_encrypt(
+            domain="https://example.com",
+            user_addr="0x1234567890123456789012345678901234567890",
+            valid_until=valid_until,
+            statement="Sign in to example",
+            resources=["https://api.example.com/v1"],
+        )
+
+        token = service.decrypt_auth_token(ciphertext)
+
+        assert token.domain == "https://example.com"
+        assert token.user_addr == "0x1234567890123456789012345678901234567890"
+        assert token.valid_until == valid_until
+        assert token.statement == "Sign in to example"
+        assert token.resources == ["https://api.example.com/v1"]
+
+    @pytest.mark.asyncio
+    async def test_decrypt_auth_token_rejects_expired_tokens(self, initialized_key_manager):
+        """Should reject tokens whose validity window has elapsed."""
+        service = get_auth_token_service()
+
+        ciphertext = service.create_and_encrypt(
+            domain="https://example.com",
+            user_addr="0x1234567890123456789012345678901234567890",
+            valid_until=int(time.time()) - 1,
+        )
+
+        with pytest.raises(ValueError, match="expired"):
+            service.decrypt_auth_token(ciphertext)
+
+    @pytest.mark.asyncio
+    async def test_decode_auth_token_can_skip_expiry_validation(self, initialized_key_manager):
+        """Should decode expired tokens when expiry validation is explicitly skipped."""
+        service = get_auth_token_service()
+
+        ciphertext = service.create_and_encrypt(
+            domain="https://example.com",
+            user_addr="0x1234567890123456789012345678901234567890",
+            valid_until=int(time.time()) - 1,
+        )
+
+        token = service.decode_auth_token(ciphertext, validate_expiry=False)
+
+        assert token.user_addr == "0x1234567890123456789012345678901234567890"
+
 
 class TestAuthTokenServiceWithTestKey:
     """Tests verifying compatibility with contract's test key."""

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from web3 import Web3
@@ -498,9 +498,10 @@ def test_private_read_token_prefers_backend_minted_auth_token(monkeypatch):
     )
     monkeypatch.setattr(routes.time, "time", lambda: 1_700_000_000)
 
-    token = routes._require_private_read_token(current_user=TEST_ADDRESS, token=None)
+    auth = routes._require_private_read_auth(current_user=TEST_ADDRESS, token=None)
 
-    assert token == b"\xde\xad"
+    assert auth.token == b"\xde\xad"
+    assert auth.user_address == TEST_ADDRESS
     auth_token_service.create_and_encrypt.assert_called_once_with(
         domain=TEST_DOMAIN,
         user_addr=TEST_ADDRESS,
@@ -508,9 +509,73 @@ def test_private_read_token_prefers_backend_minted_auth_token(monkeypatch):
     )
 
 
-def test_private_read_token_accepts_direct_header_token():
-    token = routes._require_private_read_token(current_user=None, token="0x1234")
-    assert token == b"\x12\x34"
+def test_private_read_token_resolves_user_from_direct_header_token(monkeypatch):
+    auth_token_service = MagicMock()
+    auth_token_service.decode_auth_token.return_value = SimpleNamespace(user_addr=TEST_ADDRESS)
+    monkeypatch.setattr(routes, "get_auth_token_service", lambda: auth_token_service)
+
+    auth = routes._require_private_read_auth(
+        current_user=None,
+        authorization=None,
+        token="0x1234",
+    )
+
+    assert auth.token == b"\x12\x34"
+    assert auth.user_address == TEST_ADDRESS
+    auth_token_service.decode_auth_token.assert_called_once_with(
+        b"\x12\x34",
+        validate_expiry=False,
+    )
+
+
+def test_private_read_token_rejects_invalid_direct_header_token(monkeypatch):
+    auth_token_service = MagicMock()
+    auth_token_service.decode_auth_token.side_effect = ValueError("Invalid auth token")
+    monkeypatch.setattr(routes, "get_auth_token_service", lambda: auth_token_service)
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes._require_private_read_auth(
+            current_user=None,
+            authorization=None,
+            token="0x1234",
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid or expired SIWE token"
+
+
+def test_private_read_token_rejects_mixed_auth_headers():
+    with pytest.raises(HTTPException) as exc_info:
+        routes._require_private_read_auth(
+            current_user=TEST_ADDRESS,
+            authorization="Bearer stale-jwt",
+            token="0x1234",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert (
+        exc_info.value.detail
+        == "Provide either Authorization bearer token or X-SIWE-Token, not both"
+    )
+
+
+def test_private_read_route_rejects_mixed_auth_headers(client, test_app):
+    test_app.dependency_overrides[routes.get_current_user_optional] = lambda: TEST_ADDRESS
+    try:
+        response = client.get(
+            "/v1/accounting/balances/0xtoken",
+            headers={
+                "Authorization": "Bearer stale-jwt",
+                "X-SIWE-Token": "0x1234",
+            },
+        )
+    finally:
+        test_app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Provide either Authorization bearer token or X-SIWE-Token, not both"
+    )
 
 
 def test_nonce_endpoint_is_rate_limited(client):

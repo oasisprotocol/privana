@@ -126,7 +126,7 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
     except ValueError as exc:
         raise SiweAuthError("SIWE message expiration_time is invalid") from exc
     valid_until = int(expiration_dt.timestamp())
-    if valid_until <= now:
+    if valid_until < now:
         raise SiweAuthError("SIWE message expired")
     max_valid_until = now + settings.auth_token_validity_seconds + tolerance_seconds
     if valid_until > max_valid_until:
