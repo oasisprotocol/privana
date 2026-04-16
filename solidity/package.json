@@ -28,7 +28,7 @@
     "@nomicfoundation/hardhat-verify": "^2.0.2",
     "@openzeppelin/hardhat-upgrades": "^3.0.0",
     "@oasisprotocol/sapphire-contracts": "0.2.15",
-    "@oasisprotocol/sapphire-hardhat": "^2.22.2",
+    "@oasisprotocol/sapphire-hardhat": "^2.22.3",
     "@oasisprotocol/sapphire-paratime": "^2.3.0",
     "@typechain/ethers-v6": "^0.5.1",
     "@typechain/hardhat": "^9.1.0",
