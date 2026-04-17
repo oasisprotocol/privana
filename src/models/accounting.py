@@ -293,16 +293,11 @@ class TokenBalance(BaseModel):
 
 
 class BatchBalancesRequest(BaseModel):
-    """Request payload for querying multiple token balances for a user."""
+    """Request payload for querying multiple token balances for the authenticated user."""
 
     MAX_TOKEN_IDS: ClassVar[int] = 100
 
-    user_address: str = Field(..., min_length=1)
     token_ids: list[str] = Field(..., min_length=1, max_length=MAX_TOKEN_IDS)
-
-    @field_validator("user_address")
-    def _normalise_user_address(cls, value: str) -> str:
-        return value.strip().lower()
 
     @field_validator("token_ids")
     def _normalise_token_ids(cls, value: list[str]) -> list[str]:

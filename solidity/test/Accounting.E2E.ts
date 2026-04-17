@@ -1,15 +1,15 @@
-import { expect, version } from 'chai';
+import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
-import { keccak256, parseEther, Wallet } from 'ethers';
+import { keccak256, Wallet } from 'ethers';
 import { MockAccounting, MockAccountingV2, MockShoyuBashi, MockSiweAuth, ProvethVerifier } from '../typechain-types';
-import { generateERC20Tx, getReceiptInclusionProof, getRlpUint } from './utils';
-import { getTxInclusionProof } from './utils';
+import { generateERC20Tx, getReceiptInclusionProof, getRlpUint, getTxInclusionProof } from './utils';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
-import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 // import {
 //   isCalldataEnveloped,
 //   wrapEthereumProvider,
 // } from '@oasisprotocol/sapphire-paratime';
+
+const EMPTY_AUTH_TOKEN = '0x' as const;
 
 const types = {
   Lock: [
@@ -82,9 +82,6 @@ describe('Accounting', function () {
   let mockSiweAuth: MockSiweAuth;
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
-  let user1: HardhatEthersSigner;
-  let user2: HardhatEthersSigner;
-  let service: HardhatEthersSigner;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
@@ -92,8 +89,7 @@ describe('Accounting', function () {
 
   before(async () => {
     const provider = ethers.provider;
-    let deployer: HardhatEthersSigner;
-    [deployer, user1, user2, service] = await ethers.getSigners();
+    const [deployer] = await ethers.getSigners();
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
@@ -116,18 +112,19 @@ describe('Accounting', function () {
     ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
 
-    accountingUser1 = accounting.connect(user1) as MockAccounting;
-    accountingUser2 = accounting.connect(user2) as MockAccounting;
-
-    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
-      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
-    );
-
-    // Drive index 0 and 1 wallets
-    userWallet1 = hdNodeWallet.connect(provider);
-    userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(provider);
-
-    console.log("wallets", userWallet1.address, userWallet2.address);
+    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
+    userWallet1 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/0",
+    ).connect(provider);
+    userWallet2 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/1",
+    ).connect(provider);
+    accountingUser1 = accounting.connect(userWallet1) as MockAccounting;
+    accountingUser2 = accounting.connect(userWallet2) as MockAccounting;
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -152,6 +149,55 @@ describe('Accounting', function () {
 
     tokenId = TEST_TOKEN.tokenId;
   });
+
+  async function ensurePrivacyScenario(): Promise<void> {
+    const ownerBal = await accounting.getBalance(userWallet1.address, tokenId);
+    const callerBal = await accounting.getBalance(userWallet2.address, tokenId);
+    const ownerLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+
+    if (
+      ownerBal === parseUsdt("8") &&
+      callerBal === parseUsdt("1") &&
+      ownerLocks.length === 1 &&
+      ownerLocks[0][1].toLowerCase() === userWallet2.address.toLowerCase() &&
+      ownerLocks[0][2] === tokenId &&
+      ownerLocks[0][3] === parseUsdt("1")
+    ) {
+      return;
+    }
+
+    if (ownerBal !== 0n || callerBal !== 0n || ownerLocks.length !== 0) {
+      throw new Error("Unexpected privacy test preconditions");
+    }
+
+    await accounting.setBalance(userWallet1.address, tokenId, parseUsdt("9"));
+    await accounting.setBalance(userWallet2.address, tokenId, parseUsdt("1"));
+
+    const expiry = (await getBlockTimestamp()) + 3600;
+    const lockNonce = await accounting.createLockNonces(userWallet1.address);
+    const signature = await userWallet1.signTypedData(
+      domain,
+      { Lock: types.Lock },
+      {
+        userAddress: userWallet1.address,
+        serviceAddress: userWallet2.address,
+        tokenId,
+        amount: parseUsdt("1"),
+        expiry,
+        nonce: lockNonce,
+      }
+    );
+
+    await accounting.createLock(
+      userWallet1.address,
+      userWallet2.address,
+      tokenId,
+      parseUsdt("1"),
+      expiry,
+      lockNonce,
+      signature
+    );
+  }
 
   it("Should expose createLockNonces, modifyLockNonces, transferLockedNonces", async function () {
     expect(await accounting.createLockNonces(userWallet1.address)).to.equal(0n);
@@ -478,7 +524,7 @@ describe('Accounting', function () {
     expect(balance2After).to.equal(parseUsdt("1"));
 
     // It doesn't go to the normal balance, instead a lock is appended to the user info
-    const userLocks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const userLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
 
     expect(userLocks.length).to.equal(1);
     expect(userLocks[0][1]).to.equal(userWallet2.address);
@@ -487,38 +533,58 @@ describe('Accounting', function () {
     expect(userLocks[0][4]).to.be.equal(expiry);
   });
 
-  it('Privacy: unauthorized callers should be rejected by all user-only view functions', async function () {
-    // user2 tries to read user1's data
-    const user1Addr = user1.address;
-    await expect(accountingUser2.balanceOf(user1Addr, tokenId, "0x")).to.be.revertedWithCustomError(accounting, 'Unauthorized');
-    await expect(accountingUser2.getUserLocks(user1Addr, "0x")).to.be.revertedWithCustomError(accounting, 'Unauthorized');
+  it('Privacy: view functions derive identity from auth token, so user2 cannot read user1 data', async function () {
+    await ensurePrivacyScenario();
+
+    const ownerBal = await accountingUser1.balanceOf(tokenId, EMPTY_AUTH_TOKEN);
+    const callerBal = await accountingUser2.balanceOf(tokenId, EMPTY_AUTH_TOKEN);
+    expect(ownerBal).to.equal(parseUsdt("8"));
+    expect(callerBal).to.equal(parseUsdt("1"));
+    expect(callerBal).to.not.equal(ownerBal);
+
+    const ownerLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    const callerLocks = await accountingUser2.getUserLocks(EMPTY_AUTH_TOKEN);
+    expect(ownerLocks.length).to.equal(1);
+    expect(callerLocks.length).to.equal(0);
   });
 
   it('Privacy: user-only view functions should return correct data for the owner', async function () {
-    const user1Addr = user1.address;
-    const bal = await accountingUser1.balanceOf(user1Addr, tokenId, "0x");
-    expect(bal).to.be.gte(0);
+    await ensurePrivacyScenario();
 
-    const locks = await accountingUser1.getUserLocks(user1Addr, "0x");
-    expect(locks).to.be.an('array');
+    const bal = await accountingUser1.balanceOf(tokenId, EMPTY_AUTH_TOKEN);
+    expect(bal).to.equal(parseUsdt("8"));
 
-    const totalLocked = locks.reduce(
-      (acc, lock) => lock[2] === tokenId ? acc + lock[3] : acc,
-      0n
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
+    expect(locks.length).to.equal(1);
+    expect(locks[0][1]).to.equal(userWallet2.address);
+    expect(locks[0][2]).to.equal(tokenId);
+    expect(locks[0][3]).to.equal(parseUsdt("1"));
+  });
+
+  it('Privacy: non-empty auth tokens determine the private-read subject', async function () {
+    await ensurePrivacyScenario();
+
+    const authToken = ethers.AbiCoder.defaultAbiCoder().encode(
+      ['address'],
+      [userWallet1.address]
     );
-    expect(totalLocked).to.be.gte(0);
+
+    const bal = await accountingUser2.balanceOf(tokenId, authToken);
+    expect(bal).to.equal(parseUsdt("8"));
+
+    const locks = await accountingUser2.getUserLocks(authToken);
+    expect(locks.length).to.equal(1);
+    expect(locks[0][1]).to.equal(userWallet2.address);
   });
 
   it('Privacy: service-scoped total locked balance should only count the caller\'s locks', async function () {
-    const svcAddr = service.address;
-    const accountingService = accounting.connect(service) as MockAccounting;
-    const serviceLocks = await accountingService.getServiceLocks(user1.address, "0x");
-    expect(serviceLocks.every((lock) => lock[1].toLowerCase() === svcAddr.toLowerCase())).to.equal(true);
-    const svcTotal = serviceLocks.reduce(
-      (acc, lock) => lock[2] === tokenId ? acc + lock[3] : acc,
-      0n
-    );
-    expect(svcTotal).to.be.gte(0);
+    await ensurePrivacyScenario();
+
+    const serviceLocks = await accountingUser2.getServiceLocks(userWallet1.address, EMPTY_AUTH_TOKEN);
+    expect(serviceLocks.length).to.equal(1);
+    expect(serviceLocks[0][1]).to.equal(userWallet2.address);
+    expect(serviceLocks[0][2]).to.equal(tokenId);
+    expect(serviceLocks[0][3]).to.equal(parseUsdt("1"));
   });
 
   it("The service should be able to resolve the lock", async function () {
@@ -561,7 +627,7 @@ describe('Accounting', function () {
 
     await accounting.unlockSingleLock(userWallet1.address, 1);
 
-    const userLocks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const userLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     expect(userLocks.length).to.equal(0);
 
   });
@@ -597,7 +663,7 @@ describe('Accounting', function () {
       await tx.wait();
     }
 
-    const userLocks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const userLocks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     expect(userLocks.length).to.equal(10);
 
     // Try to create the 11th lock, should fail
@@ -712,7 +778,7 @@ describe('ModifyLock', function () {
 
   before(async () => {
     const provider = ethers.provider;
-    const [deployer, user1, user2] = await ethers.getSigners();
+    const [deployer] = await ethers.getSigners();
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
@@ -735,15 +801,19 @@ describe('ModifyLock', function () {
     ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
 
-    accountingUser1 = accounting.connect(user1) as MockAccounting;
-    accountingUser2 = accounting.connect(user2) as MockAccounting;
-
-    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
-      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
-    );
-
-    userWallet1 = hdNodeWallet.connect(provider);
-    userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(provider);
+    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
+    userWallet1 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/0",
+    ).connect(provider);
+    userWallet2 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/1",
+    ).connect(provider);
+    accountingUser1 = accounting.connect(userWallet1) as MockAccounting;
+    accountingUser2 = accounting.connect(userWallet2) as MockAccounting;
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -819,7 +889,7 @@ describe('ModifyLock', function () {
     );
 
     const balanceBefore = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksBefore = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locksBefore = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locksBefore[0][0];
     expect(locksBefore[0][3]).to.equal(parseUsdt("1"));
 
@@ -848,7 +918,7 @@ describe('ModifyLock', function () {
     await tx.wait();
 
     const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
 
     expect(balanceAfter).to.equal(balanceBefore - parseUsdt("2"));
     expect(locksAfter[0][3]).to.equal(parseUsdt("3"));
@@ -856,7 +926,7 @@ describe('ModifyLock', function () {
   });
 
   it("User should be able to add funds while keeping the same expiry", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -884,13 +954,13 @@ describe('ModifyLock', function () {
       modifyLockSignature
     );
 
-    const locksAfter = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     expect(locksAfter[0][3]).to.equal(lockAmountBefore + parseUsdt("0.5"));
     expect(locksAfter[0][4]).to.equal(currentExpiry);
   });
 
   it("User should be able to extend expiry without adding funds", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 3600;
@@ -921,7 +991,7 @@ describe('ModifyLock', function () {
     );
 
     const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
 
     expect(balanceAfter).to.equal(balanceBefore);
     expect(locksAfter[0][3]).to.equal(lockAmountBefore);
@@ -955,7 +1025,7 @@ describe('ModifyLock', function () {
   });
 
   it("Should reject modifyLock with earlier expiry", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const earlierExpiry = currentExpiry - 1000;
@@ -984,7 +1054,7 @@ describe('ModifyLock', function () {
   });
 
   it("Should reject modifyLock with zero amount and same expiry (no-op)", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1012,7 +1082,7 @@ describe('ModifyLock', function () {
   });
 
   it("Should reject modifyLock with insufficient balance", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1040,7 +1110,7 @@ describe('ModifyLock', function () {
   });
 
   it("Should reject modifyLock with wrong signer", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1068,7 +1138,7 @@ describe('ModifyLock', function () {
   });
 
   it("Should reject replay of modifyLock signature", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 100;
@@ -1106,7 +1176,7 @@ describe('ModifyLock', function () {
   });
 
   it("Service should still be able to transfer from lock after funds are added", async function () {
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const lockAmount = locks[0][3];
     const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
@@ -1136,7 +1206,7 @@ describe('ModifyLock', function () {
     );
 
     const balance2After = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locksAfter = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
 
     expect(balance2After).to.equal(balance2Before + parseUsdt("0.5"));
     expect(locksAfter[0][3]).to.equal(lockAmount - parseUsdt("0.5"));
@@ -1144,7 +1214,7 @@ describe('ModifyLock', function () {
 
   it("Should reject replay of transferFromLock signature", async function () {
     // Service (userWallet2) transfers from its lock on userWallet1's account
-    const locks = await accounting.getUserLocks(userWallet1.address, "0x");
+    const locks = await accountingUser1.getUserLocks(EMPTY_AUTH_TOKEN);
     const lockId = locks[0][0];
     const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
 

@@ -89,8 +89,8 @@ Modify an existing lock by adding funds and/or extending the expiry.
   - `detail` (string, optional).
 - **Note:** At least one of `amount > 0` or `new_expiry > current_expiry` must be true; otherwise the call is rejected as a no-op.
 
-### GET `/funds/locked/{user_address}`
-Get locked funds for a user, optionally filtered by `service_address`.
+### GET `/funds/locked`
+Get locked funds for the authenticated user, optionally filtered by `service_address`.
 - **Headers**
   - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
   - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
@@ -135,8 +135,8 @@ Unlock all expired locks for a user in a single transaction.
   - `status` (string) – Submission status.
   - `detail` (string, optional).
 
-### GET `/funds/expired/{user_address}`
-Get all expired locks for a user.
+### GET `/funds/expired`
+Get all expired locks for the authenticated user.
 - **Headers**
   - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
   - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
@@ -201,23 +201,22 @@ Get information about a specific withdrawal request.
   - `resolved` (boolean) – Whether the withdrawal has been resolved.
   - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
 
-### GET `/balances/{user_address}/{token_id}`
-Get the user's balance for a specific token.
+### GET `/balances/{token_id}`
+Get the authenticated user's balance for a specific token.
 - **Headers**
   - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
   - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 
 ### POST `/balances/batch`
-Get balances for multiple tokens for a user.
+Get balances for multiple tokens for the authenticated user.
 - **Headers**
   - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
   - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
 - **Request body**
-  - `user_address` (string, required)
   - `token_ids` (array[string], required) – Bytes32 token identifiers (hex), max 100 items
 
-### GET `/funds/locked/total/{user_address}/{token_id}`
-Get total locked balance for a specific token across all locks.
+### GET `/funds/locked/total/{token_id}`
+Get total locked balance for a specific token across all locks for the authenticated user.
 - **Headers**
   - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
   - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.

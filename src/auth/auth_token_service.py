@@ -5,18 +5,21 @@ matching the format expected by the Sapphire contract.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
-from eth_abi import encode
+from eth_abi import decode, encode
 from web3 import Web3
 
-from src.crypto.deoxysii import AEAD, NONCE_SIZE
+from src.crypto.deoxysii import AEAD, NONCE_SIZE, DecryptionError
 
 logger = logging.getLogger(__name__)
 
 # Zero nonce (15 bytes) - matches contract's Sapphire.encrypt(key, 0, data, "")
 ZERO_NONCE = b"\x00" * NONCE_SIZE
+
+_AUTH_TOKEN_ABI_SCHEMA = "(string,address,uint256,string,string[])"
 
 
 @dataclass
@@ -39,19 +42,10 @@ class AuthToken:
     resources: list[str]
 
     def to_abi_encoded(self) -> bytes:
-        """Encode the AuthToken as ABI-encoded bytes.
-
-        This matches the Solidity abi.encode() output for the struct.
-        Solidity's abi.decode(data, (AuthToken)) expects tuple encoding,
-        not flat encoding of individual fields.
-        """
-        # Convert address from hex string to bytes
+        """Encode the AuthToken as a Solidity struct tuple."""
         user_addr_bytes = Web3.to_bytes(hexstr=self.user_addr)
-
-        # ABI encode as tuple to match Solidity struct decoding:
-        # abi.decode(data, (AuthToken)) expects tuple encoding
         return encode(
-            ["(string,address,uint256,string,string[])"],
+            [_AUTH_TOKEN_ABI_SCHEMA],
             [(self.domain, user_addr_bytes, self.valid_until, self.statement, self.resources)],
         )
 
@@ -136,6 +130,33 @@ class AuthTokenService:
         # Use zero nonce to match contract's Sapphire.encrypt(key, 0, data, "")
         ciphertext = self.aead.encrypt(ZERO_NONCE, encoded, b"")
         return ciphertext
+
+    def decode_auth_token(self, ciphertext: bytes, *, validate_expiry: bool = True) -> AuthToken:
+        """Decrypt and decode an AuthToken.
+
+        Raises:
+            ValueError: If the token cannot be decrypted, decoded, or has expired.
+        """
+        try:
+            encoded = self.aead.decrypt(ZERO_NONCE, ciphertext, b"")
+            decoded = decode([_AUTH_TOKEN_ABI_SCHEMA], encoded)[0]
+            token = AuthToken(
+                domain=decoded[0],
+                user_addr=Web3.to_checksum_address(decoded[1]),
+                valid_until=int(decoded[2]),
+                statement=decoded[3],
+                resources=list(decoded[4]),
+            )
+        except (DecryptionError, ValueError, TypeError) as exc:
+            raise ValueError("Invalid auth token") from exc
+
+        if validate_expiry and token.valid_until < int(time.time()):
+            raise ValueError("Auth token has expired")
+        return token
+
+    def decrypt_auth_token(self, ciphertext: bytes) -> AuthToken:
+        """Decrypt, decode, and enforce AuthToken expiry."""
+        return self.decode_auth_token(ciphertext, validate_expiry=True)
 
     def create_and_encrypt(
         self,
