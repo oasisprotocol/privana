@@ -20,6 +20,30 @@ class ChainType(IntEnum):
     EVM = 0
 
 
+class HistoryKind(IntEnum):
+    """On-chain user activity kind.
+
+    Mirrors the Solidity ``HistoryKind`` enum in ``Types.sol``. Values must stay
+    in sync with the contract: each entry's ``kind`` is the on-chain enum index,
+    decoded into the wire-format string via ``HISTORY_KIND_WIRE_NAMES``.
+    """
+
+    Deposit = 0
+    Withdraw = 1
+    CreateLock = 2
+    TransferFromLock = 3
+    TransferBalance = 4
+
+
+HISTORY_KIND_WIRE_NAMES: dict[HistoryKind, str] = {
+    HistoryKind.Deposit: "deposit",
+    HistoryKind.Withdraw: "withdraw",
+    HistoryKind.CreateLock: "createLock",
+    HistoryKind.TransferFromLock: "transferFromLock",
+    HistoryKind.TransferBalance: "transferBalance",
+}
+
+
 _CHAIN_TYPE_BY_NAME: dict[str, ChainType] = {"evm": ChainType.EVM}
 
 
@@ -295,6 +319,32 @@ class BalanceResponse(BaseModel):
     balance: str
     token_symbol: Optional[str] = None
     chain_id: str
+
+
+class HistoryEntry(BaseModel):
+    """A single authenticated user activity entry."""
+
+    kind: Literal[
+        "deposit",
+        "withdraw",
+        "createLock",
+        "transferFromLock",
+        "transferBalance",
+        "unknown",
+    ]
+    timestamp: int
+    token_id: Optional[str] = None
+    amount: Optional[str] = None
+    counterparty: Optional[str] = None
+    deposit_id: Optional[str] = None
+    chain_id: Optional[int] = None
+
+
+class HistoryResponse(BaseModel):
+    """Paginated user history response."""
+
+    history: list[HistoryEntry]
+    total: int
 
 
 class TokenBalance(BaseModel):

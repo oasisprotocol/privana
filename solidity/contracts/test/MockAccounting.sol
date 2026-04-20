@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Accounting} from "../Accounting.sol";
-import {ChainType, UnsupportedTokenType} from "../Types.sol";
+import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
 
 /**
  * @title MockAccounting
@@ -66,6 +66,11 @@ contract MockAccounting is Accounting {
         if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
         processedDeposits[depositId] = true;
         balances[beneficiary][tokenId] += amount;
+        _appendHistory(
+            beneficiary,
+            HistoryKind.Deposit,
+            abi.encodePacked(tokenId, amount, depositId)
+        );
         emit Deposit(tokenId, amount, depositId);
     }
 

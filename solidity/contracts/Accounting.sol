@@ -5,11 +5,13 @@ import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
 import {
     ChainType,
+    FundLock,
+    HistoryEntry,
+    HistoryKind,
     TokenInfo,
     TokenType,
-    UserInfo,
-    FundLock,
-    UnsupportedTokenType
+    UnsupportedTokenType,
+    UserInfo
 } from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -23,6 +25,9 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * and automated withdrawals via EIP-712 signatures.
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
+    /// @dev Maximum entries returned by `getHistory` in a single call.
+    uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
+
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAccountingSiweAuth public immutable siweAuth;
     /// @dev internal (not private) so MockAccounting test helper can set balances directly.
@@ -39,12 +44,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     /// @dev Array of all registered token IDs for enumeration
     bytes32[] private registeredTokenIds;
 
-    // ─── Emergency Withdraw Storage ───────────────────────────────────
-
     /// @dev requestId = keccak256(abi.encode(beneficiary, tokenId, version)).
     /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
     /// Re-requesting overwrites; no explicit cancel needed.
     mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
+    mapping(address user => HistoryEntry[] entries) private history;
 
     struct EmergencyWithdrawRequest {
         address toAddress;
@@ -152,6 +156,20 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return msg.sender;
     }
 
+    function _appendHistory(
+        address user,
+        HistoryKind kind,
+        bytes memory payload
+    ) internal {
+        history[user].push(
+            HistoryEntry({
+                kind: kind,
+                timestamp: uint64(block.timestamp),
+                payload: payload
+            })
+        );
+    }
+
     /**
      * @notice Get the deposit address for an authenticated user.
      * @param chainType The chain family (see ChainType enum)
@@ -187,6 +205,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
         processedDeposits[depositId] = true;
         balances[beneficiary][tokenId] += amount;
+        _appendHistory(
+            beneficiary,
+            HistoryKind.Deposit,
+            abi.encodePacked(tokenId, amount, depositId)
+        );
         emit Deposit(tokenId, amount, depositId);
     }
 
@@ -381,6 +404,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
                 amount: amount,
                 expiry: expiry
             })
+        );
+
+        _appendHistory(
+            userAddress,
+            HistoryKind.CreateLock,
+            abi.encodePacked(tokenId, amount, serviceAddress)
         );
     }
 
@@ -632,6 +661,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         lock.amount -= amount;
         balances[toAddress][lock.tokenId] += amount;
 
+        _appendHistory(
+            userAddress,
+            HistoryKind.TransferFromLock,
+            abi.encodePacked(lock.tokenId, amount, toAddress)
+        );
+
         if (lock.amount == 0) {
             locks[lockIndex] = locks[locks.length - 1];
             locks.pop();
@@ -690,6 +725,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         _scheduleWithdrawal(userAddress, toAddress, tokenId, amount);
+        _appendHistory(
+            userAddress,
+            HistoryKind.Withdraw,
+            abi.encodePacked(tokenId, amount, toAddress)
+        );
     }
 
     /**
@@ -743,6 +783,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
+
+        _appendHistory(
+            userAddress,
+            HistoryKind.TransferBalance,
+            abi.encodePacked(tokenId, amount, toAddress)
+        );
     }
 
     /**
@@ -771,6 +817,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 nonce,
         bytes calldata signature
     ) public {
+        if (amount == 0) revert InvalidAmount();
+
         EIP712SignatureVerifier.verifyWithdrawSignature(
             userAddress,
             tokenId,
@@ -785,6 +833,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
 
         _scheduleWithdrawal(userAddress, userAddress, tokenId, amount);
+        _appendHistory(
+            userAddress,
+            HistoryKind.Withdraw,
+            abi.encodePacked(tokenId, amount, userAddress)
+        );
     }
 
     /**
@@ -997,8 +1050,57 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
+     * @notice Returns authenticated user history entries within a single page, oldest first.
+     * @param offset Non-negative number of page starting at 0, or negative number for the page starting from the end (-1 is last page)
+     * @param limit Requested page size, capped at 100 entries
+     * @param token SIWE auth token identifying the caller
+     * @return page Page of history entries (oldest first within the page)
+     * @return total Total history entries for the authenticated user
+     */
+    function getHistory(
+        int256 offset,
+        uint256 limit,
+        bytes calldata token
+    ) external view returns (HistoryEntry[] memory page, uint256 total) {
+        address user = _authSender(token);
+        if (user == address(0)) revert Unauthorized();
+        HistoryEntry[] storage all = history[user];
+        total = all.length;
+
+        uint256 pageSize = limit > MAX_HISTORY_PAGE_SIZE ? MAX_HISTORY_PAGE_SIZE : limit;
+        if (total == 0 || pageSize == 0) {
+            return (new HistoryEntry[](0), total);
+        }
+
+        uint256 pageCount = (total + pageSize - 1) / pageSize;
+        uint256 start;
+        if (offset < 0) {
+            // Avoid negating type(int256).min.
+            uint256 pageFromEnd = uint256(-(offset + 1)) + 1;
+            if (pageFromEnd > pageCount) {
+                return (new HistoryEntry[](0), total);
+            }
+            start = (pageCount - pageFromEnd) * pageSize;
+        } else {
+            if (uint256(offset) >= pageCount) {
+                return (new HistoryEntry[](0), total);
+            }
+            start = uint256(offset) * pageSize;
+        }
+
+        if (total - start < pageSize) {
+            pageSize = total - start;
+        }
+
+        page = new HistoryEntry[](pageSize);
+        for (uint256 i = 0; i < pageSize; i++) {
+            page[i] = all[start + i];
+        }
+    }
+
+    /**
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[41] private __gap;
+    uint256[40] private __gap;
 }

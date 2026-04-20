@@ -29,7 +29,7 @@ If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`
 
 Most write operations are authorized **per-request** by an EIP-712 signature embedded in the body — no session needed.
 
-A subset of endpoints expose **private state** (per-user balances, locks, deposit address) and require an authenticated session token instead. Two flows produce one:
+A subset of endpoints expose **private state** (per-user balances, locks, deposit address, history) and require an authenticated session token instead. Two flows produce one:
 
 ### 1. Direct SIWE (first-party Flexvaults origin)
 
@@ -74,10 +74,25 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /funds/locked` | required | same |
 | `GET /funds/locked/total/{token_id}` | required | same |
 | `GET /funds/expired` | required | same |
+| `GET /history` | required | same |
 | `POST /auth/jwt/logout`, `GET /auth/jwt/me` | required | `Authorization: Bearer …` |
 | Everything else | none (signature-gated where applicable) | — |
 
 `Authorization` and `X-SIWE-Token` are mutually exclusive — sending both yields `400`.
+
+### History
+
+`GET /history` returns one page of the authenticated user's on-chain activity history. Entries within a page are ordered oldest to newest. Query parameters are `offset` (default `-1`) and `limit` (default `50`, max `100`). Non-negative offsets are 0-indexed page numbers from the oldest entries; negative offsets select pages from the end (`-1` is the latest page, `-2` the previous page).
+
+| Field | Description | History kind type(s) |
+| --- | --- | --- |
+| `kind` | Entry type. Known values are `deposit`, `withdraw`, `createLock`, `transferFromLock`, and `transferBalance`; undecoded entries return `unknown`. | all |
+| `timestamp` | Entry timestamp. | all |
+| `token_id` | Token identifier. | `deposit`, `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
+| `amount` | Token amount as a decimal string. | `deposit`, `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
+| `chain_id` | Source chain for `token_id`, when known. | `deposit`, `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
+| `deposit_id` | Deposit identifier. | `deposit` |
+| `counterparty` | Address payload for non-deposit entries: withdrawal destination, lock service, or transfer recipient. | `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
 
 ## Deposit Flow
 
@@ -156,6 +171,7 @@ All require a session token (`Authorization: Bearer …` or `X-SIWE-Token`). The
 | `GET /funds/locked` | Active locks (optional `?service_address` filter). |
 | `GET /funds/locked/total/{token_id}` | Sum of locked amounts for one token. |
 | `GET /funds/expired` | Locks past their expiry. |
+| `GET /history` | On-chain activity history for the caller, defaulting to the latest page. |
 
 A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid or expired SIWE token` — clients should reauth and retry.
 
