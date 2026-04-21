@@ -122,7 +122,7 @@ deployments:
         value: pGJwa1ggion+8Dmp4MGKPB6mWA/mCnCsxSxceyNCaaz6nOr65wpkbmFtZVggaY25l5bqtfIHlNWnbZ/JBRcDsMUXk48vActu0w5SbqBlbm9uY2VP5tDHT+ipek6MqXDl37amZXZhbHVlWDH3rkizxrxHhE91ieZfTnM7VdutcbU2+TOul4O5HBcm6msHmBCAyCe5Ejv6Cn/qzr6y
       - name: SIWE_ALLOWED_CHAIN_IDS
         value: pGJwa1ggJaDvRd2TZd5Viz4zZ5G2ZSVfelgnQ19Rr65PjJMy7xxkbmFtZVgmKUXvOXmfGcwf1YVwco97HOK3JvvuWddIK0BIXkx6Q9BoYKcP+iVlbm9uY2VPIa3WAjkijgCZZi7uZZkwZXZhbHVlUA7JjTIgBulBSldJV3QbK3c=
-      - name: SIWE_DOMAIN
+      - name: SIWE_DOMAINS
         value: pGJwa1ggWvAZVwaH3Ew0CdJEAZUBiuOng12+6QPZW+f4VxO3Vm5kbmFtZVgbl+ZTdS9Cs7IfnDy9a9wwOEi5mLqHOKoILgPKZW5vbmNlT+YxqzFzMG6AN0XXbdbatWV2YWx1ZVg1uBpOHPjZvCtoD6S0j+nHXJCRt7XDGmUc/JiGohEbv/SNXK/2aQcUA1bmF3nMBvgs/icaPC4=
       - name: SIWE_NONCE_EXPIRY_SECONDS
         value: pGJwa1ggUnuKadtH+818DVsYZyAiCaUZARXisYBNSKPw1nVODhpkbmFtZVgpVKcGg4L1qDuTvxXcTi/AZb/jJ0Hmw2H9MYDzkSqmrkqURcLLM6a1CPBlbm9uY2VPxij0VUVxvCz4jrXMCYwYZXZhbHVlU9KnhbAR2U1sDVorpmRBwTvDkBI=

@@ -1,7 +1,7 @@
 """Type definitions for the Accounting Module API."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Set
+from typing import Dict, Set, Tuple
 
 
 @dataclass
@@ -29,7 +29,9 @@ class Settings:
     min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei
 
     auth_token_validity_seconds: int = 24 * 60 * 60
-    siwe_domain: str = ""
+    # Allow-list of SIWE domains. A SIWE message's ``domain`` field must match
+    # one of these (after canonicalization) for authentication to succeed.
+    siwe_domains: Tuple[str, ...] = field(default_factory=tuple)
 
     # Allowed chain IDs for SIWE authentication.
     # If empty, defaults to DEFAULT_SIWE_ALLOWED_CHAIN_IDS plus configured RPC chain IDs.

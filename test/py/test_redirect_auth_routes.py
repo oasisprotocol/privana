@@ -60,7 +60,7 @@ def _reset_auth_state() -> None:
 @pytest.fixture
 def test_app(tmp_path, monkeypatch):
     monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-    monkeypatch.setenv("SIWE_DOMAIN", TEST_DOMAIN)
+    monkeypatch.setenv("SIWE_DOMAINS", TEST_DOMAIN)
     monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", f"{TEST_HOSTED_CHAIN_ID},23295")
     monkeypatch.setenv("AUTH_TOKEN_VALIDITY_SECONDS", "600")
     monkeypatch.setenv("AUTH_CODE_TTL_SECONDS", "90")
@@ -459,7 +459,7 @@ def test_login_rejects_browser_requests_from_non_auth_origin(client):
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["detail"] == (
-        "Browser SIWE requests must originate from the configured auth origin"
+        "Browser SIWE requests must originate from a configured auth origin"
     )
 
 
@@ -480,7 +480,7 @@ def test_authorize_code_rejects_browser_requests_from_non_auth_origin(client):
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["detail"] == (
-        "Browser authorization requests must originate from the configured auth origin"
+        "Browser authorization requests must originate from a configured auth origin"
     )
 
 
@@ -492,7 +492,7 @@ def test_private_read_token_prefers_backend_minted_auth_token(monkeypatch):
         routes,
         "load_settings",
         lambda: SimpleNamespace(
-            siwe_domain=TEST_DOMAIN,
+            siwe_domains=(TEST_DOMAIN,),
             auth_token_validity_seconds=600,
         ),
     )
@@ -761,13 +761,13 @@ def test_build_cors_origins_raises_on_invalid_auth_client_registry(monkeypatch):
         SimpleNamespace(
             cors_allowed_origins="",
             environment="production",
-            siwe_domain="https://auth.flexvaults.com",
+            siwe_domains=("https://auth.flexvaults.com",),
         ),
     )
     monkeypatch.setattr(
         main,
-        "get_siwe_config",
-        lambda _settings: SimpleNamespace(origin="https://auth.flexvaults.com"),
+        "get_siwe_configs",
+        lambda _settings: (SimpleNamespace(origin="https://auth.flexvaults.com"),),
     )
     monkeypatch.setattr(
         main,
@@ -782,7 +782,7 @@ def test_build_cors_origins_raises_on_invalid_auth_client_registry(monkeypatch):
 def test_siwe_config_normalizes_default_https_port():
     config = get_siwe_config(
         SimpleNamespace(
-            siwe_domain="https://auth.flexvaults.com:443",
+            siwe_domains=("https://auth.flexvaults.com:443",),
             environment="production",
         )
     )

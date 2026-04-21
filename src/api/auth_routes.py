@@ -14,7 +14,7 @@ from src.auth.http import auth_exception, enforce_expected_origin, no_store_head
 from src.auth.jwt_service import get_jwt_service
 from src.auth.pkce import verify_pkce
 from src.auth.rate_limiter import get_auth_rate_limiter, request_identity
-from src.auth.siwe_config import get_siwe_config
+from src.auth.siwe_config import get_siwe_config, get_siwe_configs
 from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.config import DEFAULT_SIWE_ALLOWED_CHAIN_IDS, load_settings
 from src.models.authorize import (
@@ -239,13 +239,13 @@ async def authorize_code(
     """Verify SIWE on the Flexvaults origin and mint an authorization code."""
     settings = load_settings()
     try:
-        siwe_config = get_siwe_config(settings)
+        expected_origins = {cfg.origin for cfg in get_siwe_configs(settings)}
     except ValueError as exc:
         raise auth_exception(status_code=500, detail=str(exc)) from exc
     enforce_expected_origin(
         request,
-        expected_origin=siwe_config.origin,
-        detail="Browser authorization requests must originate from the configured auth origin",
+        expected_origins=expected_origins,
+        detail="Browser authorization requests must originate from a configured auth origin",
         allow_missing=True,
     )
     retry_after = _rate_limit_retry_after(

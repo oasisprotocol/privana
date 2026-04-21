@@ -474,7 +474,7 @@ class TestSiweValidationEdgeCases:
                 )
 
         assert exc.value.status_code == 400
-        assert "SIWE verification failed" in exc.value.detail
+        assert "SIWE domain is not allowed" in exc.value.detail
 
     @pytest.mark.asyncio
     async def test_rejects_expired_siwe_message(self, reset_auth_singletons, monkeypatch, tmp_path):
@@ -1398,14 +1398,14 @@ class TestConfigErrors:
     async def test_rejects_missing_siwe_domain_config(
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
-        """Test that login fails when SIWE_DOMAIN is not configured."""
+        """Test that login fails when SIWE_DOMAINS is not configured."""
         import src.config
 
         storage_dir = tmp_path / "missing_domain_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-        # Ensure SIWE_DOMAIN is not set
-        monkeypatch.delenv("SIWE_DOMAIN", raising=False)
+        # Ensure SIWE_DOMAINS is not set
+        monkeypatch.delenv("SIWE_DOMAINS", raising=False)
 
         # Reset config singleton to pick up the missing env var
         src.config._settings = None
@@ -1430,7 +1430,7 @@ class TestConfigErrors:
             )
 
         assert exc.value.status_code == 500
-        assert "SIWE_DOMAIN not configured" in exc.value.detail
+        assert "SIWE_DOMAINS not configured" in exc.value.detail
 
         # Reset config for other tests
         src.config._settings = None

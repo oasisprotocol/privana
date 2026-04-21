@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 
 from src.models.types import Settings
 
@@ -60,6 +60,17 @@ def _parse_chain_ids(value: Optional[str]) -> Set[int]:
     if not value:
         return set()
     return {int(x.strip(), 0) for x in value.split(",") if x.strip()}
+
+
+def _parse_siwe_domains(value: Optional[str]) -> Tuple[str, ...]:
+    """Parse the SIWE domain allow-list from ``SIWE_DOMAINS`` (comma-separated).
+
+    Order is preserved; canonical-form dedupe is handled downstream in
+    ``siwe_config``.
+    """
+    if not value:
+        return ()
+    return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -132,7 +143,7 @@ def load_settings(refresh: bool = False) -> Settings:
             auth_token_validity_seconds=_get_int(
                 "AUTH_TOKEN_VALIDITY_SECONDS", _defaults.auth_token_validity_seconds
             ),
-            siwe_domain=os.getenv("SIWE_DOMAIN", _defaults.siwe_domain),
+            siwe_domains=_parse_siwe_domains(os.getenv("SIWE_DOMAINS")),
             siwe_allowed_chain_ids=_parse_chain_ids(os.getenv("SIWE_ALLOWED_CHAIN_IDS")),
             auth_token_storage_dir=os.getenv(
                 "AUTH_TOKEN_STORAGE_DIR", _defaults.auth_token_storage_dir

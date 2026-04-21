@@ -17,7 +17,7 @@ from src.auth.dependencies import get_current_user, get_current_user_optional
 from src.auth.http import auth_exception, enforce_expected_origin, no_store_headers
 from src.auth.jwt_service import get_jwt_service
 from src.auth.rate_limiter import get_auth_rate_limiter, request_identity
-from src.auth.siwe_config import get_siwe_config
+from src.auth.siwe_config import get_siwe_config, get_siwe_configs
 from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
@@ -140,13 +140,13 @@ def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
 def _enforce_browser_auth_origin(request: Request) -> None:
     settings = load_settings()
     try:
-        expected_origin = get_siwe_config(settings).origin
+        expected_origins = {cfg.origin for cfg in get_siwe_configs(settings)}
     except ValueError as exc:
         raise auth_exception(status_code=500, detail=str(exc)) from exc
     enforce_expected_origin(
         request,
-        expected_origin=expected_origin,
-        detail="Browser SIWE requests must originate from the configured auth origin",
+        expected_origins=expected_origins,
+        detail="Browser SIWE requests must originate from a configured auth origin",
         allow_missing=True,
     )
 
