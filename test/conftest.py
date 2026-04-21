@@ -43,8 +43,8 @@ def reset_auth_singletons(monkeypatch, tmp_path):
 
     # Use temp directory for token storage in tests
     monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(tmp_path / "auth_tokens"))
-    # Set SIWE domain for tests
-    monkeypatch.setenv("SIWE_DOMAIN", "localhost:5173")
+    # Set SIWE domain allow-list for tests
+    monkeypatch.setenv("SIWE_DOMAINS", "localhost:5173")
     # Allow chain_id=1 (Ethereum mainnet) used in SIWE test messages
     monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", "1")
 

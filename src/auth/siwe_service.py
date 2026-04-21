@@ -9,7 +9,7 @@ from siwe import ExpiredMessage, InvalidSignature, MalformedSession, SiweMessage
 from web3 import Web3
 
 from src.auth.auth_token_service import get_auth_token_service
-from src.auth.siwe_config import get_siwe_config
+from src.auth.siwe_config import get_siwe_configs
 from src.auth.token_store import get_token_store
 from src.config import DEFAULT_SIWE_ALLOWED_CHAIN_IDS, load_settings
 
@@ -41,7 +41,7 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
     """Verify a SIWE message and mint a Sapphire-compatible AuthToken."""
     settings = load_settings()
     try:
-        siwe_config = get_siwe_config(settings)
+        siwe_configs = get_siwe_configs(settings)
     except ValueError as exc:
         raise SiweAuthError(str(exc), status_code=500) from exc
 
@@ -53,6 +53,15 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
     except Exception as exc:
         logger.warning("Invalid SIWE message format: %s", exc)
         raise SiweAuthError("Invalid SIWE message") from exc
+
+    message_domain = (siwe_message.domain or "").strip().lower()
+    matched_config = next(
+        (cfg for cfg in siwe_configs if cfg.domain == message_domain),
+        None,
+    )
+    if matched_config is None:
+        logger.warning("SIWE message domain not in allow-list: %s", message_domain or "(empty)")
+        raise SiweAuthError("SIWE domain is not allowed")
 
     nonce = siwe_message.nonce
     if not nonce:
@@ -88,7 +97,7 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
             provider = Web3.HTTPProvider(settings.chain_rpc_urls[siwe_message.chain_id])
         siwe_message.verify(
             signature,
-            domain=siwe_config.domain,
+            domain=matched_config.domain,
             nonce=nonce,
             provider=provider,
         )
@@ -137,7 +146,7 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
 
     try:
         siwe_token_bytes = auth_token_service.create_and_encrypt(
-            domain=siwe_config.domain,
+            domain=matched_config.domain,
             user_addr=address,
             valid_until=valid_until,
             statement=statement,

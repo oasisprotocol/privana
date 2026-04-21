@@ -61,24 +61,28 @@ def normalize_redirect_uri(redirect_uri: str) -> str:
     )
 
 
-def get_siwe_config(settings: Settings) -> SiweConfig:
-    """Normalize SIWE_DOMAIN into a SIWE domain and browser origin."""
-    raw_value = (settings.siwe_domain or "").strip()
+def _parse_siwe_domain(raw_value: str, settings: Settings) -> SiweConfig:
+    """Normalize a single SIWE domain entry into a SiweConfig."""
+    raw_value = raw_value.strip()
     if not raw_value:
-        raise ValueError("SIWE_DOMAIN not configured")
+        raise ValueError("SIWE domain entry must not be empty")
 
     if "://" in raw_value:
         parsed = urlsplit(raw_value)
         if parsed.scheme not in {"http", "https"}:
-            raise ValueError("SIWE_DOMAIN must use http or https when a scheme is provided")
+            raise ValueError(
+                "SIWE_DOMAINS entries must use http or https when a scheme is provided"
+            )
         if not parsed.netloc or not parsed.hostname:
-            raise ValueError("SIWE_DOMAIN must include a host")
+            raise ValueError("SIWE_DOMAINS entries must include a host")
         if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-            raise ValueError("SIWE_DOMAIN must not include a path, query, or fragment")
+            raise ValueError("SIWE_DOMAINS entries must not include a path, query, or fragment")
         if parsed.username or parsed.password:
-            raise ValueError("SIWE_DOMAIN must not include userinfo")
+            raise ValueError("SIWE_DOMAINS entries must not include userinfo")
         if parsed.scheme == "http" and not is_loopback_host(parsed.hostname):
-            raise ValueError("SIWE_DOMAIN may use http only for localhost/loopback development")
+            raise ValueError(
+                "SIWE_DOMAINS entries may use http only for localhost/loopback development"
+            )
         netloc = _canonical_netloc(parsed.scheme, parsed.hostname, parsed.port)
         return SiweConfig(
             domain=netloc,
@@ -87,9 +91,11 @@ def get_siwe_config(settings: Settings) -> SiweConfig:
 
     parsed = urlsplit(f"//{raw_value}")
     if not parsed.netloc or not parsed.hostname:
-        raise ValueError("SIWE_DOMAIN must be a bare host[:port] or origin")
+        raise ValueError("SIWE_DOMAINS entries must be a bare host[:port] or origin")
     if parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
-        raise ValueError("SIWE_DOMAIN must not include a path, query, fragment, or userinfo")
+        raise ValueError(
+            "SIWE_DOMAINS entries must not include a path, query, fragment, or userinfo"
+        )
 
     environment = str(getattr(settings, "environment", "production")).lower()
     scheme = (
@@ -100,3 +106,37 @@ def get_siwe_config(settings: Settings) -> SiweConfig:
         domain=netloc,
         origin=f"{scheme}://{netloc}",
     )
+
+
+def get_siwe_configs(settings: Settings) -> tuple[SiweConfig, ...]:
+    """Normalize all configured SIWE domains into SiweConfig entries.
+
+    Raises ``ValueError`` when no domains are configured. Duplicate entries
+    (after canonicalization) are de-duplicated while preserving order.
+    """
+    raw_entries = tuple(getattr(settings, "siwe_domains", ()) or ())
+    if not raw_entries:
+        raise ValueError("SIWE_DOMAINS not configured")
+
+    configs: list[SiweConfig] = []
+    seen_domains: set[str] = set()
+    for raw in raw_entries:
+        cfg = _parse_siwe_domain(raw, settings)
+        if cfg.domain in seen_domains:
+            continue
+        seen_domains.add(cfg.domain)
+        configs.append(cfg)
+
+    if not configs:
+        raise ValueError("SIWE_DOMAINS not configured")
+    return tuple(configs)
+
+
+def get_siwe_config(settings: Settings) -> SiweConfig:
+    """Return the primary (first) configured SIWE config.
+
+    Used by callers that operate on a single default domain (hosted auth page,
+    server-minted private-read tokens). Domain allow-list checks must iterate
+    :func:`get_siwe_configs` instead.
+    """
+    return get_siwe_configs(settings)[0]

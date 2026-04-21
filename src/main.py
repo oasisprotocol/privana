@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from src.api.auth_routes import auth_router
 from src.api.routes import router
 from src.auth.client_registry import get_client_registry
-from src.auth.siwe_config import get_siwe_config
+from src.auth.siwe_config import get_siwe_configs
 from src.config import load_settings
 
 logger = logging.getLogger(__name__)
@@ -47,8 +47,8 @@ def _build_cors_origins() -> list[str]:
             }
         )
 
-    if settings.siwe_domain:
-        origins.add(get_siwe_config(settings).origin)
+    if settings.siwe_domains:
+        origins.update(cfg.origin for cfg in get_siwe_configs(settings))
 
     origins.update(get_client_registry().allowed_origins())
 

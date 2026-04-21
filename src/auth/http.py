@@ -1,6 +1,6 @@
 """HTTP helpers for auth endpoints."""
 
-from typing import Optional
+from typing import Iterable, Optional
 
 from fastapi import HTTPException, Request
 
@@ -37,16 +37,17 @@ def request_origin(request: Request) -> Optional[str]:
 def enforce_expected_origin(
     request: Request,
     *,
-    expected_origin: str,
+    expected_origins: Iterable[str],
     detail: str,
     allow_missing: bool = True,
 ) -> Optional[str]:
-    """Require the request Origin to match the expected origin."""
+    """Require the request Origin to match one of the expected origins."""
+    allowed = {o.rstrip("/") for o in expected_origins if o}
     origin = request_origin(request)
     if origin is None:
         if allow_missing:
             return None
         raise auth_exception(status_code=400, detail=detail)
-    if origin != expected_origin.rstrip("/"):
+    if origin not in allowed:
         raise auth_exception(status_code=400, detail=detail)
     return origin

@@ -22,6 +22,7 @@ class FakeSiweMessage:
         chain_id: int = 1,
         statement: str = "Sign in to Flexvaults",
         resources: list[str] | None = None,
+        domain: str = TEST_DOMAIN,
     ) -> None:
         self.address = address
         self.nonce = nonce
@@ -30,6 +31,7 @@ class FakeSiweMessage:
         self.chain_id = chain_id
         self.statement = statement
         self.resources = resources or ["https://flexvaults.com/privacy"]
+        self.domain = domain
         self.verify_calls: list[dict[str, str]] = []
 
     def verify(
@@ -48,7 +50,7 @@ class FakeSiweMessage:
 @pytest.fixture
 def auth_settings():
     return SimpleNamespace(
-        siwe_domain=TEST_DOMAIN,
+        siwe_domains=(TEST_DOMAIN,),
         auth_token_validity_seconds=600,
         environment="production",
         siwe_allowed_chain_ids={1},
@@ -264,3 +266,86 @@ def test_authenticate_siwe_message_accepts_shorter_expiration_window(monkeypatch
     result = siwe_service.authenticate_siwe_message("message", "0x1234")
 
     assert result.valid_until == int((now + timedelta(minutes=10)).timestamp())
+
+
+SECONDARY_DOMAIN = "auth.secondary.test"
+
+
+@pytest.fixture
+def multi_domain_auth_settings():
+    return SimpleNamespace(
+        siwe_domains=(TEST_DOMAIN, SECONDARY_DOMAIN),
+        auth_token_validity_seconds=600,
+        environment="production",
+        siwe_allowed_chain_ids={1},
+        chain_rpc_urls={},
+        sapphire_chain_id=23295,
+    )
+
+
+def test_authenticate_siwe_message_matches_secondary_domain(
+    monkeypatch, multi_domain_auth_settings
+):
+    """Verify that any configured domain in the allow-list is accepted."""
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    fake_message = FakeSiweMessage(
+        issued_at=now,
+        expiration_time=now
+        + timedelta(seconds=multi_domain_auth_settings.auth_token_validity_seconds),
+        domain=SECONDARY_DOMAIN,
+    )
+    token_store = MagicMock()
+    token_store.is_nonce_valid.return_value = True
+    token_store.consume_nonce.return_value = True
+
+    auth_token_service = MagicMock()
+    auth_token_service.create_and_encrypt.return_value = b"\xaa\xbb"
+
+    monkeypatch.setattr(siwe_service, "load_settings", lambda: multi_domain_auth_settings)
+    monkeypatch.setattr(siwe_service, "get_token_store", lambda: token_store)
+    monkeypatch.setattr(siwe_service, "get_auth_token_service", lambda: auth_token_service)
+    monkeypatch.setattr(siwe_service.SiweMessage, "from_message", lambda _: fake_message)
+    monkeypatch.setattr(siwe_service.time, "time", lambda: now.timestamp())
+
+    result = siwe_service.authenticate_siwe_message("message", "0x1234")
+
+    assert result.address == Web3.to_checksum_address(TEST_ADDRESS)
+    # Verify the secondary domain was used to verify the SIWE message, not the first entry.
+    assert fake_message.verify_calls == [
+        {
+            "signature": "0x1234",
+            "domain": SECONDARY_DOMAIN,
+            "nonce": fake_message.nonce,
+            "provider": None,
+        }
+    ]
+    auth_token_service.create_and_encrypt.assert_called_once_with(
+        domain=SECONDARY_DOMAIN,
+        user_addr=Web3.to_checksum_address(TEST_ADDRESS),
+        valid_until=result.valid_until,
+        statement=fake_message.statement,
+        resources=fake_message.resources,
+    )
+
+
+def test_authenticate_siwe_message_rejects_domain_not_in_allow_list(
+    monkeypatch, multi_domain_auth_settings
+):
+    """Domains outside the allow-list are rejected even with multiple configured entries."""
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    fake_message = FakeSiweMessage(
+        issued_at=now,
+        expiration_time=now
+        + timedelta(seconds=multi_domain_auth_settings.auth_token_validity_seconds),
+        domain="malicious.test",
+    )
+    token_store = MagicMock()
+    token_store.is_nonce_valid.return_value = True
+
+    monkeypatch.setattr(siwe_service, "load_settings", lambda: multi_domain_auth_settings)
+    monkeypatch.setattr(siwe_service, "get_token_store", lambda: token_store)
+    monkeypatch.setattr(siwe_service, "get_auth_token_service", lambda: MagicMock())
+    monkeypatch.setattr(siwe_service.SiweMessage, "from_message", lambda _: fake_message)
+
+    with pytest.raises(siwe_service.SiweAuthError, match="SIWE domain is not allowed"):
+        siwe_service.authenticate_siwe_message("message", "0x1234")
