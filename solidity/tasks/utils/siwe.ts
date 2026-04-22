@@ -80,6 +80,7 @@ export async function getSiweToken(params: {
   signer: { signMessage: (message: string) => Promise<string> };
   userAddress: string;
   chainId: number;
+  clientId?: string;
 }): Promise<string> {
   // Fetch domain from API
   const domainResp = await fetchJson(
@@ -125,7 +126,11 @@ export async function getSiweToken(params: {
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ siwe_message: siweMessage, signature }),
+      body: JSON.stringify({
+        siwe_message: siweMessage,
+        signature,
+        ...(params.clientId ? { client_id: params.clientId } : {}),
+      }),
     },
   );
 

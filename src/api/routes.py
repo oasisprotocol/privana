@@ -13,6 +13,7 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError
 
 from src.auth.auth_token_service import get_auth_token_service
+from src.auth.client_registry import get_client_registry
 from src.auth.dependencies import get_current_user, get_current_user_optional
 from src.auth.http import auth_exception, enforce_expected_origin, no_store_headers
 from src.auth.jwt_service import get_jwt_service
@@ -576,7 +577,15 @@ async def siwe_login(
     except SiweAuthError as exc:
         raise auth_exception(status_code=exc.status_code, detail=exc.detail) from exc
 
-    access_token = jwt_service.create_token(auth_result.address)
+    audience: Optional[str] = None
+    if payload.client_id:
+        registry = get_client_registry()
+        client = registry.get_client(payload.client_id)
+        if client is None:
+            raise auth_exception(status_code=400, detail=f"Unknown client_id: {payload.client_id}")
+        audience = client.audience
+
+    access_token = jwt_service.create_token(auth_result.address, audience=audience)
     refresh_token = jwt_service.create_refresh_token(auth_result.address)
     response.headers.update(no_store_headers())
 

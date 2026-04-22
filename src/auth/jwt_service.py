@@ -52,11 +52,13 @@ class JWTService:
             headers={"kid": self._key_manager.key_id},
         )
 
-    def create_token(self, address: str) -> str:
+    def create_token(self, address: str, audience: Optional[str] = None) -> str:
         """Create an API access JWT for an authenticated user.
 
         Args:
             address: Ethereum address of the user (will be checksummed).
+            audience: Optional per-client audience for the ``aud`` claim.
+                Falls back to the global ``JWT_AUDIENCE`` when *None*.
 
         Returns:
             Signed JWT string.
@@ -67,10 +69,12 @@ class JWTService:
         now = datetime.now(timezone.utc)
         expiry = now + timedelta(hours=self._expiry_hours)
 
+        aud = audience or self._audience
+
         payload = {
             "sub": address,  # Subject: the user's Ethereum address
             "iss": self._issuer,  # Issuer
-            "aud": self._audience,  # Audience
+            "aud": aud,  # Audience
             "iat": int(now.timestamp()),  # Issued at
             "nbf": int(now.timestamp()),  # Not before (same as iat)
             "exp": int(expiry.timestamp()),  # Expiration

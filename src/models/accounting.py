@@ -352,6 +352,7 @@ class SiweLoginRequest(BaseModel):
 
     siwe_message: str = Field(..., min_length=1)
     signature: str = Field(..., min_length=4)
+    client_id: Optional[str] = Field(default=None, min_length=1)
 
     @field_validator("signature")
     def _normalise_siwe_signature(cls, value: str) -> str:
