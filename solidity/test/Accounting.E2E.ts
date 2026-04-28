@@ -1,15 +1,17 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
-import { keccak256, Wallet } from 'ethers';
-import { MockAccounting, MockAccountingV2, MockShoyuBashi, MockSiweAuth, ProvethVerifier } from '../typechain-types';
-import { generateERC20Tx, getReceiptInclusionProof, getRlpUint, getTxInclusionProof } from './utils';
+import { keccak256, parseEther, Wallet } from 'ethers';
+import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
-// import {
-//   isCalldataEnveloped,
-//   wrapEthereumProvider,
-// } from '@oasisprotocol/sapphire-paratime';
+import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 
 const EMPTY_AUTH_TOKEN = '0x' as const;
+
+// Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
+// parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
+// the enum declaration order in Types.sol.
+const ChainType = { EVM: 0 } as const;
+const TokenType = { NativeEVM: 0, ERC20: 1 } as const;
 
 const types = {
   Lock: [
@@ -47,11 +49,18 @@ const types = {
     { name: "tokenId", type: "bytes32" },
     { name: "amount", type: "uint256" },
     { name: "nonce", type: "uint256" },
-  ]
+  ],
+  WithdrawFromLock: [
+    { name: "userAddress", type: "address" },
+    { name: "toAddress", type: "address" },
+    { name: "lockId", type: "uint256" },
+    { name: "amount", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+  ],
 }
 
 const TEST_TOKEN = {
-  tokenType: 1, // ERC20
+  tokenType: TokenType.ERC20,
   // keccak256(abi.encodePacked(uint256(84532), address(0x12084e1a0fe92b5ab803a81a0ae54d91040f89ca)))
   // Precomputed to save time and avoid dependency on ethers.utils.solidityPack
   // which is not available in the ethers v6 version used by hardhat
@@ -77,37 +86,32 @@ async function getBlockTimestamp(): Promise<number> {
 
 describe('Accounting', function () {
   let accounting: MockAccounting;
-  let mockShoyubashi: MockShoyuBashi;
-  let provethVerifier: ProvethVerifier;
   let mockSiweAuth: MockSiweAuth;
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
+  let user1: HardhatEthersSigner;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
   let tokenId: string;
 
+  const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
+
   before(async () => {
     const provider = ethers.provider;
-    const [deployer] = await ethers.getSigners();
+    const signers = await ethers.getSigners();
+    const deployer = signers[0];
+    user1 = signers[1];
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
-    mockShoyubashi = await MockShoyubashiFactory.deploy();
-    await mockShoyubashi.waitForDeployment();
-
-    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
-    provethVerifier = await ProvethVerifierFactory.deploy();
-    await provethVerifier.waitForDeployment();
-
     const AccountingFactory = await ethers.getContractFactory('MockAccounting');
     // Deploy as UUPS proxy
     accounting = await upgrades.deployProxy(
       AccountingFactory,
-      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      [MOCK_ROFL_APP_ID, deployer.address],
       { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
     ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
@@ -232,216 +236,10 @@ describe('Accounting', function () {
     expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
   });
 
-  it("User should be able to deposit", async function () {
-    const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
-
-    const blockNumber = 32680090;
-    const transactionIndex = 45;
-
-    const { rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
-
-    const { proof: receiptProof } = await getReceiptInclusionProof(
-      provider,
-      blockNumber,
-      transactionIndex
-    );
-
-    // Check balance before
-    const balanceBefore = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-
-    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
-
-    // Submit the deposit to Accounting contract
-    await accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-      rlpBlockHeader,
-      transactionIndexRlp: getRlpUint(transactionIndex),
-      transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-    }, {
-      receiptIndexRlp: getRlpUint(transactionIndex),
-      receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-    });
-
-    const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-
-    expect(balanceBefore).to.equal(0);
-    expect(balanceAfter).to.equal(parseUsdt("10"));
-  });
-
-  describe("Deposit validation (isolated deployment)", function () {
-    let isolatedAccounting: MockAccounting;
-    let isolatedShoyubashi: MockShoyuBashi;
-    let rlpBlockHeader: string;
-    let txProof: string[];
-    let receiptProof: string[];
-
-    const blockNumber = 32680090;
-    const transactionIndex = 45;
-
-    before(async () => {
-      const provider = new ethers.JsonRpcProvider("https://sepolia.base.org");
-
-      ({ rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
-        provider,
-        blockNumber,
-        transactionIndex
-      ));
-
-      ({ proof: receiptProof } = await getReceiptInclusionProof(
-        provider,
-        blockNumber,
-        transactionIndex
-      ));
-    });
-
-    beforeEach(async () => {
-      const [deployer] = await ethers.getSigners();
-
-      const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
-      const isolatedMockSiweAuth = await MockSiweAuthFactory.deploy('test');
-      await isolatedMockSiweAuth.waitForDeployment();
-
-      const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
-      isolatedShoyubashi = await MockShoyubashiFactory.deploy();
-      await isolatedShoyubashi.waitForDeployment();
-
-      const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
-      const isolatedProvethVerifier = await ProvethVerifierFactory.deploy();
-      await isolatedProvethVerifier.waitForDeployment();
-
-      const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-      isolatedAccounting = await upgrades.deployProxy(
-        AccountingFactory,
-        [await isolatedShoyubashi.getAddress(), await isolatedProvethVerifier.getAddress(), deployer.address],
-        { kind: 'uups', initializer: 'initialize', constructorArgs: [await isolatedMockSiweAuth.getAddress()] }
-      ) as unknown as MockAccounting;
-      await isolatedAccounting.waitForDeployment();
-
-      const data = ethers.concat([
-        ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-        ethers.zeroPadValue(TEST_TOKEN.address, 20)
-      ]);
-
-      await isolatedAccounting.setTokenInfo({
-        tokenType: TEST_TOKEN.tokenType,
-        data
-      });
-    });
-
-    it("Should reject replayed deposit proof", async function () {
-      await isolatedShoyubashi.setUnanimousHash(
-        TEST_TOKEN.chainId,
-        blockNumber,
-        keccak256(rlpBlockHeader)
-      );
-
-      await isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-        rlpBlockHeader,
-        transactionIndexRlp: getRlpUint(transactionIndex),
-        transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      }, {
-        receiptIndexRlp: getRlpUint(transactionIndex),
-        receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-      });
-
-      await expect(
-        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-          rlpBlockHeader,
-          transactionIndexRlp: getRlpUint(transactionIndex),
-          transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        }, {
-          receiptIndexRlp: getRlpUint(transactionIndex),
-          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        })
-      ).to.be.revertedWithCustomError(isolatedAccounting, "DepositAlreadyProcessed");
-    });
-
-    it("Should reject deposit with invalid proof", async function () {
-      await isolatedShoyubashi.setUnanimousHash(
-        TEST_TOKEN.chainId,
-        blockNumber,
-        keccak256(rlpBlockHeader)
-      );
-
-      const invalidProof = txProof.slice(0, txProof.length - 1);
-
-      await expect(
-        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-          rlpBlockHeader,
-          transactionIndexRlp: getRlpUint(transactionIndex),
-          transactionProofStack: ethers.encodeRlp(
-            invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))
-          ),
-        }, {
-          receiptIndexRlp: getRlpUint(transactionIndex),
-          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        })
-      ).to.be.reverted;
-    });
-
-    it("Should reject deposit with invalid receipt proof", async function () {
-      await isolatedShoyubashi.setUnanimousHash(
-        TEST_TOKEN.chainId,
-        blockNumber,
-        keccak256(rlpBlockHeader)
-      );
-
-      const invalidProof = receiptProof.slice(0, receiptProof.length - 1);
-
-      await expect(
-        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-          rlpBlockHeader,
-          transactionIndexRlp: getRlpUint(transactionIndex),
-          transactionProofStack: ethers.encodeRlp(
-            txProof.map((rlpList) => ethers.decodeRlp(rlpList))
-          ),
-        }, {
-          receiptIndexRlp: getRlpUint(transactionIndex),
-          receiptProofStack: ethers.encodeRlp(invalidProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        })
-      ).to.be.reverted;
-    });
-
-    it("Should reject deposit when tx/receipt indices mismatch", async function () {
-      await isolatedShoyubashi.setUnanimousHash(
-        TEST_TOKEN.chainId,
-        blockNumber,
-        keccak256(rlpBlockHeader)
-      );
-
-      await expect(
-        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-          rlpBlockHeader,
-          transactionIndexRlp: getRlpUint(transactionIndex),
-          transactionProofStack: ethers.encodeRlp(
-            txProof.map((rlpList) => ethers.decodeRlp(rlpList))
-          ),
-        }, {
-          receiptIndexRlp: getRlpUint(transactionIndex + 1),
-          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        })
-      ).to.be.revertedWithCustomError(isolatedAccounting, "ReceiptIndexMismatch");
-    });
-
-    it("Should reject deposit with wrong block hash", async function () {
-      const wrongBlockHash =
-        "0x1234567890123456789012345678901234567890123456789012345678901234";
-      await isolatedShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, wrongBlockHash);
-
-      await expect(
-        isolatedAccounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-          rlpBlockHeader,
-          transactionIndexRlp: getRlpUint(transactionIndex),
-          transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        }, {
-          receiptIndexRlp: getRlpUint(transactionIndex),
-          receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-        })
-      ).to.be.revertedWithCustomError(isolatedAccounting, "InvalidBlockHash");
-    });
+  it("Set up initial balance via setBalance", async function () {
+    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("10"));
+    const balance = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
+    expect(balance).to.equal(parseUsdt("10"));
   });
 
   it("Test EIP712 transfer", async function () {
@@ -748,6 +546,7 @@ describe('Accounting', function () {
 
     const withdrawals = await accounting.withdrawals(0);
     expect(withdrawals.userAddress).to.equal(userWallet1.address);
+    expect(withdrawals.toAddress).to.equal(userWallet1.address);
     expect(withdrawals.amount).to.equal(parseUsdt("0.1"));
     expect(withdrawals.tokenId).to.equal(TEST_TOKEN.tokenId);
     expect(withdrawals.resolved).to.equal(false);
@@ -763,18 +562,464 @@ describe('Accounting', function () {
     }
   });
 
+  describe("creditDeposit (via mock)", function () {
+    it("should credit deposit to beneficiary", async function () {
+      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32", "uint256"],
+        [84532, ethers.id("0xtxhash1"), tokenId, 0]
+      ));
+      const amount = parseUsdt("100");
+      await accounting.mockCreditDeposit(userWallet1.address, tokenId, amount, depositId);
+      const balance = await accounting.getBalance(userWallet1.address, tokenId);
+      expect(balance).to.be.gte(amount);
+    });
+
+    it("should reject duplicate deposit key", async function () {
+      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32", "uint256"],
+        [84532, ethers.id("0xtxhash-dedup"), tokenId, 0]
+      ));
+      await accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId);
+      await expect(
+        accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId)
+      ).to.be.revertedWithCustomError(accounting, "DepositAlreadyProcessed");
+    });
+
+    it("should reject zero amount", async function () {
+      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32", "uint256"],
+        [84532, ethers.id("0xtxhash-zero"), tokenId, 0]
+      ));
+      await expect(
+        accounting.mockCreditDeposit(userWallet1.address, tokenId, 0n, depositId)
+      ).to.be.revertedWithCustomError(accounting, "InvalidAmount");
+    });
+
+    it("should reject unregistered token", async function () {
+      const fakeTokenId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint8", "bytes"],
+        [1, ethers.AbiCoder.defaultAbiCoder().encode(["uint256", "address"], [84532, ethers.ZeroAddress])]
+      ));
+      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32", "uint256"],
+        [84532, ethers.id("0xtxhash-unreg"), fakeTokenId, 0]
+      ));
+      await expect(
+        accounting.mockCreditDeposit(userWallet1.address, fakeTokenId, parseUsdt("100"), depositId)
+      ).to.be.revertedWithCustomError(accounting, "UnsupportedTokenType");
+    });
+  });
+
+  describe("getDepositAddress (via mock)", function () {
+    it("should return deterministic deposit address for beneficiary", async function () {
+      const addr1 = await accounting.mockGetDepositAddress(userWallet1.address, ChainType.EVM, 0);
+      const addr2 = await accounting.mockGetDepositAddress(userWallet1.address, ChainType.EVM, 0);
+      expect(addr1).to.equal(addr2);
+      expect(addr1).to.not.equal(ethers.ZeroAddress);
+    });
+
+    it("should return different addresses for different beneficiaries", async function () {
+      const addr1 = await accounting.mockGetDepositAddress(userWallet1.address, ChainType.EVM, 0);
+      const addr2 = await accounting.mockGetDepositAddress(userWallet2.address, ChainType.EVM, 0);
+      expect(addr1).to.not.equal(addr2);
+    });
+  });
+
+  describe("emergencyWithdraw", function () {
+    it("should create emergency withdraw request", async function () {
+      const user = await ethers.getSigner(userWallet1.address);
+      const expectedId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+
+      await expect(
+        accounting.connect(user).requestEmergencyWithdraw(tokenId, userWallet1.address, 0)
+      ).to.emit(accounting, "EmergencyWithdrawRequested").withArgs(expectedId, tokenId);
+
+      const req = await accounting.emergencyWithdrawRequests(expectedId);
+      expect(req.toAddress).to.equal(userWallet1.address);
+      expect(req.blockNumber).to.not.equal(0n);
+    });
+
+    it("should overwrite request on re-request (implicit cancel)", async function () {
+      const user = await ethers.getSigner(userWallet1.address);
+      const requestId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+
+      // Re-request with a different destination — overwrites the prior slot.
+      const newDest = user1.address;
+      await accounting.connect(user).requestEmergencyWithdraw(tokenId, newDest, 0);
+
+      const req = await accounting.emergencyWithdrawRequests(requestId);
+      expect(req.toAddress).to.equal(newDest);
+    });
+
+    it("should isolate requests by (beneficiary, tokenId, version)", async function () {
+      const keyA = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+      const keyB = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 1);
+      const keyC = await accounting.emergencyWithdrawKey(userWallet2.address, tokenId, 0);
+      expect(keyA).to.not.equal(keyB);
+      expect(keyA).to.not.equal(keyC);
+      expect(keyB).to.not.equal(keyC);
+    });
+
+    it("should execute emergency withdraw after 1-block delay (ERC20)", async function () {
+      // executeEmergencyWithdraw calls EIP155Signer.sign() which needs Sapphire precompiles.
+      // On Hardhat we verify state transitions up to the signing step; on Sapphire we get signedTx.
+      const user = await ethers.getSigner(userWallet1.address);
+      const requestId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+      const network = await ethers.provider.getNetwork();
+      if (network.name === 'hardhat' || network.name === 'unknown') {
+        await expect(
+          accounting.connect(user).executeEmergencyWithdraw(
+            userWallet1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+          )
+        ).to.be.revertedWithCustomError(accounting, "DER_Split_Error");
+        this.skip();
+      }
+
+      // Full happy path on Sapphire: decode signedTx and verify EIP-155 chainId matches
+      // the chainId encoded in tokens[tokenId].data. Regression test for the issue where
+      // caller-supplied chainId could produce a signed tx for the wrong EVM chain.
+      const signedTx: string = await accounting.connect(user).executeEmergencyWithdraw.staticCall(
+        userWallet1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+      );
+      expect(ethers.Transaction.from(signedTx).chainId).to.equal(BigInt(TEST_TOKEN.chainId));
+
+      const tx = await accounting.connect(user).executeEmergencyWithdraw(
+        userWallet1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+      );
+      await expect(tx).to.emit(accounting, "EmergencyWithdrawExecuted").withArgs(requestId);
+    });
+
+    it("should reject request with unregistered tokenId", async function () {
+      // The new UnsupportedTokenType pre-check in requestEmergencyWithdraw prevents
+      // storing a request for a token the contract doesn't know about.
+      const user = await ethers.getSigner(userWallet1.address);
+      const unknownTokenId = "0x" + "11".repeat(32);
+      await expect(
+        accounting.connect(user).requestEmergencyWithdraw(unknownTokenId, userWallet1.address, 0)
+      ).to.be.revertedWithCustomError(accounting, "UnsupportedTokenType");
+    });
+
+    it("should reject execute on non-existent request", async function () {
+      // Unused (beneficiary, version) pair — slot is empty.
+      await expect(
+        accounting.connect(await ethers.getSigner(userWallet1.address)).executeEmergencyWithdraw(
+          userWallet1.address, tokenId, 99, 0, parseUsdt("1"), 1000000000n
+        )
+      ).to.be.revertedWithCustomError(accounting, "EmergencyWithdrawNotFound");
+    });
+
+    // Note: EmergencyWithdrawTooSoon requires request + execute in the same block,
+    // which needs evm_setAutomine(false). Hardhat's batch-mining semantics are finicky
+    // for revert assertions — tested manually on Sapphire testnet instead.
+  });
+
+  describe("roflSignerAddress (signed-query auth)", function () {
+    it("should start unset and reject view-signing calls with RoflSignerNotSet", async function () {
+      // Ensure unset state by deploying a fresh proxy — the parent `before` does not set it.
+      const AccountingFactory = await ethers.getContractFactory('MockAccounting');
+      const fresh = await upgrades.deployProxy(
+        AccountingFactory,
+        [MOCK_ROFL_APP_ID, (await ethers.getSigners())[0].address],
+        { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
+      ) as unknown as MockAccounting;
+      await fresh.waitForDeployment();
+      expect(await fresh.roflSignerAddress()).to.equal(ethers.ZeroAddress);
+
+      await expect(
+        fresh.generateGasFundingTx.staticCall(userWallet1.address, 84532, 10n, 0n, 1000000000n)
+      ).to.be.revertedWithCustomError(fresh, "RoflSignerNotSet");
+    });
+
+    it("should update roflSignerAddress and emit RoflSignerUpdated", async function () {
+      const signer = userWallet1.address;
+      await expect(accounting.mockSetRoflSignerAddress(signer))
+        .to.emit(accounting, "RoflSignerUpdated")
+        .withArgs(signer);
+      expect(await accounting.roflSignerAddress()).to.equal(signer);
+    });
+
+    it("should reject zero address in setter", async function () {
+      await expect(accounting.mockSetRoflSignerAddress(ethers.ZeroAddress))
+        .to.be.revertedWithCustomError(accounting, "InvalidAddress");
+    });
+
+    it("real setRoflSignerAddress is gated by onlyROFL", async function () {
+      // Non-mock setter must fail when the ROFL precompile can't authenticate the caller.
+      // On Hardhat the Sapphire precompile doesn't exist, so the call reverts — which is
+      // exactly the guarantee the modifier provides. If the gate were removed, the call
+      // would succeed (since the inner body is a plain storage write).
+      await expect(
+        accounting.setRoflSignerAddress(userWallet1.address)
+      ).to.be.reverted;
+    });
+
+    // Precondition for the parametrized cases below: roflSignerAddress was set to userWallet1
+    // in the "should update" test above; userWallet2 is a different caller.
+    const wrongSenderCases = [
+      {
+        name: "generateSweepNativeTransfer",
+        call: (signer: typeof userWallet2) =>
+          accounting.connect(signer).generateSweepNativeTransfer.staticCall(
+            userWallet1.address, ChainType.EVM, 1n, 84532, 10n, 0n, 1000000000n
+          ),
+      },
+      {
+        name: "generateSweepERC20Transfer",
+        call: (signer: typeof userWallet2) =>
+          accounting.connect(signer).generateSweepERC20Transfer.staticCall(
+            userWallet1.address, ChainType.EVM, 1n, 84532, userWallet2.address, 10n, 0n, 1000000000n
+          ),
+      },
+      {
+        name: "generateGasFundingTx",
+        call: (signer: typeof userWallet2) =>
+          accounting.connect(signer).generateGasFundingTx.staticCall(
+            userWallet1.address, 84532, 10n, 0n, 1000000000n
+          ),
+      },
+    ];
+
+    wrongSenderCases.forEach(({ name, call }) => {
+      it(`${name} rejects wrong sender with NotAuthorizedROFL`, async function () {
+        await expect(call(userWallet2)).to.be.revertedWithCustomError(
+          accounting, "NotAuthorizedROFL"
+        );
+      });
+    });
+  });
+
+});
+
+describe('WithdrawFromLock', function () {
+  let accounting: MockAccounting;
+  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let userWallet1: Wallet;
+  let userWallet2: Wallet;
+  let userWallet3: Wallet;
+
+  const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
+
+  before(async () => {
+    const provider = ethers.provider;
+    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
+
+    userWallet1 = ethers.HDNodeWallet
+      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/0")
+      .connect(provider);
+    userWallet2 = ethers.HDNodeWallet
+      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/1")
+      .connect(provider);
+    userWallet3 = ethers.HDNodeWallet
+      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/2")
+      .connect(provider);
+  });
+
+  beforeEach(async () => {
+    const [deployer] = await ethers.getSigners();
+
+    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
+    const mockSiweAuth = await MockSiweAuthFactory.deploy('test');
+    await mockSiweAuth.waitForDeployment();
+
+    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
+    accounting = await upgrades.deployProxy(
+      AccountingFactory,
+      [MOCK_ROFL_APP_ID, deployer.address],
+      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
+    ) as unknown as MockAccounting;
+    await accounting.waitForDeployment();
+
+    const domainTuple = await accounting.eip712Domain();
+    domain = {
+      name: domainTuple[1],
+      version: domainTuple[2],
+      chainId: Number(domainTuple[3]),
+      verifyingContract: domainTuple[4],
+    };
+
+    const data = ethers.concat([
+      ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+    ]);
+    await accounting.setTokenInfo({
+      tokenType: TEST_TOKEN.tokenType,
+      data: data
+    });
+    await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n);
+  });
+
+  async function createLockForService(lockAmount: bigint, serviceAddress: string): Promise<bigint> {
+    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("5"));
+    const expiry = await getBlockTimestamp() + 3600;
+    const lockNonce = await accounting.createLockNonces(userWallet1.address);
+    const lockSignature = await userWallet1.signTypedData(
+      domain,
+      { Lock: types.Lock },
+      {
+        userAddress: userWallet1.address,
+        serviceAddress,
+        tokenId: TEST_TOKEN.tokenId,
+        amount: lockAmount,
+        expiry,
+        nonce: lockNonce,
+      }
+    );
+
+    await accounting.createLock(
+      userWallet1.address,
+      serviceAddress,
+      TEST_TOKEN.tokenId,
+      lockAmount,
+      expiry,
+      lockNonce,
+      lockSignature
+    );
+
+    const userLocks = await accounting.connect(userWallet1).getUserLocks(EMPTY_AUTH_TOKEN);
+    return userLocks[0][0];
+  }
+
+  it("should withdraw from lock to external destination and store toAddress", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet3.address,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await accounting.withdrawFromLock(
+      userWallet1.address,
+      userWallet3.address,
+      lockId,
+      parseUsdt("1"),
+      nonce,
+      signature
+    );
+
+    const locksAfter = await accounting.connect(userWallet1).getUserLocks(EMPTY_AUTH_TOKEN);
+    expect(locksAfter[0][3]).to.equal(parseUsdt("1"));
+
+    const withdrawal = await accounting.withdrawals(0);
+    expect(withdrawal.userAddress).to.equal(userWallet1.address);
+    expect(withdrawal.toAddress).to.equal(userWallet3.address);
+    expect(withdrawal.amount).to.equal(parseUsdt("1"));
+    expect(withdrawal.tokenId).to.equal(TEST_TOKEN.tokenId);
+    expect(withdrawal.resolved).to.equal(false);
+  });
+
+  it("should reject withdrawFromLock with zero destination", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: ethers.ZeroAddress,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await expect(
+      accounting.withdrawFromLock(
+        userWallet1.address,
+        ethers.ZeroAddress,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.revertedWithCustomError(accounting, "AddressMismatch");
+  });
+
+  it("should reject withdrawFromLock signed by non-service", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet1.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet3.address,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await expect(
+      accounting.withdrawFromLock(
+        userWallet1.address,
+        userWallet3.address,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.revertedWithCustomError(accounting, "InvalidSignature");
+  });
+
+  it("should reject replay of withdrawFromLock signature", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { WithdrawFromLock: types.WithdrawFromLock },
+      {
+        userAddress: userWallet1.address,
+        toAddress: userWallet3.address,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+      }
+    );
+
+    await accounting.withdrawFromLock(
+      userWallet1.address,
+      userWallet3.address,
+      lockId,
+      parseUsdt("1"),
+      nonce,
+      signature
+    );
+
+    await expect(
+      accounting.withdrawFromLock(
+        userWallet1.address,
+        userWallet3.address,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.revertedWithCustomError(accounting, "InvalidNonce");
+  });
+
 });
 
 describe('ModifyLock', function () {
   let accounting: MockAccounting;
-  let mockShoyubashi: MockShoyuBashi;
-  let provethVerifier: ProvethVerifier;
   let mockSiweAuth: MockSiweAuth;
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
+
+  const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
   before(async () => {
     const provider = ethers.provider;
@@ -784,19 +1029,11 @@ describe('ModifyLock', function () {
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
-    mockShoyubashi = await MockShoyubashiFactory.deploy();
-    await mockShoyubashi.waitForDeployment();
-
-    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
-    provethVerifier = await ProvethVerifierFactory.deploy();
-    await provethVerifier.waitForDeployment();
-
     const AccountingFactory = await ethers.getContractFactory('MockAccounting');
     // Deploy as UUPS proxy
     accounting = await upgrades.deployProxy(
       AccountingFactory,
-      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      [MOCK_ROFL_APP_ID, deployer.address],
       { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
     ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
@@ -833,32 +1070,8 @@ describe('ModifyLock', function () {
       data: data
     });
 
-    const baseProvider = new ethers.JsonRpcProvider("https://sepolia.base.org");
-    const blockNumber = 32680090;
-    const transactionIndex = 45;
-
-    const { rlpBlockHeader, proof: txProof } = await getTxInclusionProof(
-      baseProvider,
-      blockNumber,
-      transactionIndex
-    );
-
-    const { proof: receiptProof } = await getReceiptInclusionProof(
-      baseProvider,
-      blockNumber,
-      transactionIndex
-    );
-
-    await mockShoyubashi.setUnanimousHash(TEST_TOKEN.chainId, blockNumber, keccak256(rlpBlockHeader));
-
-    await accounting.creditEVMDeposit(userWallet1.address, TEST_TOKEN.tokenId, {
-      rlpBlockHeader,
-      transactionIndexRlp: getRlpUint(transactionIndex),
-      transactionProofStack: ethers.encodeRlp(txProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-    }, {
-      receiptIndexRlp: getRlpUint(transactionIndex),
-      receiptProofStack: ethers.encodeRlp(receiptProof.map((rlpList) => ethers.decodeRlp(rlpList))),
-    });
+    // Set up initial balance via setBalance
+    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("10"));
   });
 
   it("User should be able to add funds to an existing lock", async function () {
@@ -1245,10 +1458,10 @@ describe('ModifyLock', function () {
 
 describe('Upgradability', function () {
   let accounting: MockAccounting;
-  let mockShoyubashi: MockShoyuBashi;
-  let provethVerifier: ProvethVerifier;
   let mockSiweAuth: MockSiweAuth;
   let proxyAddress: string;
+
+  const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
   before(async () => {
     const [deployer] = await ethers.getSigners();
@@ -1257,18 +1470,10 @@ describe('Upgradability', function () {
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
-    mockShoyubashi = await MockShoyubashiFactory.deploy();
-    await mockShoyubashi.waitForDeployment();
-
-    const ProvethVerifierFactory = await ethers.getContractFactory('ProvethVerifier');
-    provethVerifier = await ProvethVerifierFactory.deploy();
-    await provethVerifier.waitForDeployment();
-
     const AccountingFactory = await ethers.getContractFactory('MockAccounting');
     accounting = await upgrades.deployProxy(
       AccountingFactory,
-      [await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address],
+      [MOCK_ROFL_APP_ID, deployer.address],
       { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
     ) as unknown as MockAccounting;
     await accounting.waitForDeployment();
@@ -1363,7 +1568,7 @@ describe('Upgradability', function () {
     const [deployer] = await ethers.getSigners();
 
     await expect(
-      accounting.initialize(await mockShoyubashi.getAddress(), await provethVerifier.getAddress(), deployer.address)
+      accounting.initialize(MOCK_ROFL_APP_ID, deployer.address)
     ).to.be.revertedWithCustomError(accounting, "InvalidInitialization");
   });
 
@@ -1377,44 +1582,24 @@ describe('Upgradability', function () {
 
     // _disableInitializers() in the constructor should block initialize()
     await expect(
-      implementation.initialize(
-        await mockShoyubashi.getAddress(),
-        await provethVerifier.getAddress(),
-        deployer.address
-      )
+      implementation.initialize(MOCK_ROFL_APP_ID, deployer.address)
     ).to.be.revertedWithCustomError(implementation, "InvalidInitialization");
   });
 
   it("Should reject upgrade to non-UUPS contract", async function () {
-    // ProvethVerifier is a plain (non-UUPS) contract — upgrading to it should fail
-    const NonUUPSFactory = await ethers.getContractFactory('ProvethVerifier');
+    // MockSiweAuth is a plain (non-UUPS) contract — upgrading to it should fail
+    const NonUUPSFactory = await ethers.getContractFactory('MockSiweAuth');
 
     // OZ plugin validates upgrade safety off-chain before sending any tx
     try {
-      await upgrades.upgradeProxy(proxyAddress, NonUUPSFactory, { kind: 'uups' });
+      await upgrades.upgradeProxy(proxyAddress, NonUUPSFactory, {
+        kind: 'uups',
+        constructorArgs: ["test-domain"],
+      });
       expect.fail("Expected upgrade to non-UUPS contract to be rejected");
     } catch (e: any) {
       expect(e.message).to.include("not upgrade safe");
     }
-  });
-
-  it("Should reject ProvethVerifier at address(0) during initialization", async function () {
-    const [deployer] = await ethers.getSigners();
-
-    const MockShoyubashiFactory = await ethers.getContractFactory('MockShoyuBashi');
-    const zeroPVShoyubashi = await MockShoyubashiFactory.deploy();
-    await zeroPVShoyubashi.waitForDeployment();
-
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-
-    // Deployment with address(0) provethVerifier should revert in initializer
-    await expect(
-      upgrades.deployProxy(
-        AccountingFactory,
-        [await zeroPVShoyubashi.getAddress(), ethers.ZeroAddress, deployer.address],
-        { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-      )
-    ).to.be.reverted;
   });
 
   it("Should support V2 upgrade with new state variables and reinitializer", async function () {

@@ -8,6 +8,7 @@ from eth_abi import encode
 from src.services.withdrawal_processor import WithdrawalProcessor
 
 TEST_USER_ADDRESS = "0x1234567890123456789012345678901234567890"
+TEST_TO_ADDRESS = "0x9876543210987654321098765432109876543210"
 TEST_CHAIN_ID = 84532
 TEST_TX_HASH = "0x" + "ab" * 32
 TEST_SIGNED_TX = b"\x00" * 64
@@ -184,10 +185,11 @@ class TestWithdrawalProcessor:
     async def test_resolve_and_broadcast_happy_path(self, processor):
         """Test successful resolve and broadcast flow."""
         contract_reader = processor.accounting_service._get_reader_contract()
-        # withdrawals(index).call returns: (user, amount, block, tokenId, resolved, txId)
+        # withdrawals(index).call returns: (user, to, amount, block, tokenId, resolved, txId)
         # Already resolved on first check
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             TEST_USER_ADDRESS,
+            TEST_TO_ADDRESS,
             100,
             50,
             b"\x00" * 32,
@@ -212,6 +214,7 @@ class TestWithdrawalProcessor:
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             TEST_USER_ADDRESS,
+            TEST_TO_ADDRESS,
             100,
             50,
             b"\x00" * 32,
@@ -235,6 +238,7 @@ class TestWithdrawalProcessor:
         # Never becomes resolved
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             TEST_USER_ADDRESS,
+            TEST_TO_ADDRESS,
             100,
             50,
             b"\x00" * 32,
@@ -259,6 +263,7 @@ class TestWithdrawalProcessor:
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             TEST_USER_ADDRESS,
+            TEST_TO_ADDRESS,
             100,
             50,
             b"\x00" * 32,
@@ -332,6 +337,7 @@ class TestWithdrawalProcessor:
         # Withdrawal: resolved=True, txIdentifier encodes nonce=1
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             TEST_USER_ADDRESS,
+            TEST_TO_ADDRESS,
             100,
             50,
             b"\x00" * 32,
@@ -367,6 +373,7 @@ class TestWithdrawalProcessor:
         contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             TEST_USER_ADDRESS,
+            TEST_TO_ADDRESS,
             100,
             50,
             b"\x00" * 32,

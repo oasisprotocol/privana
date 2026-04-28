@@ -2,7 +2,7 @@
 /* solhint-disable no-console */
 pragma solidity ^0.8.20;
 
-import {TokenInfo, EVMKeypair} from "./Types.sol";
+import {ChainType, TokenInfo, EVMKeypair} from "./Types.sol";
 
 import {RLPReader} from "solidity-rlp/contracts/RLPReader.sol";
 import {
@@ -13,7 +13,9 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {
     EIP155Signer
 } from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
-import {IProvethVerifier, EVMTransactionProof, EVMReceiptProof} from "./interfaces/IProvethVerifier.sol";
+import {
+    Subcall
+} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
 
 import {SliceBytes} from "./lib/SliceBytes.sol";
 import {
@@ -23,33 +25,56 @@ import {
     EthereumUtils
 } from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
-import {IShoyuBashi} from "./interfaces/IShoyuBashi.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     address public evmAddress;
     bytes32 private secretKey;
-    IShoyuBashi public shoyuBashi;
-    IProvethVerifier public provethVerifier;
+    address public gasTankAddress;
+    bytes32 private gasTankSecret;
 
     mapping(uint256 chainId => uint64) public nonces;
     mapping(uint256 chainId => uint256) public gasPrices;
 
-    uint64 public constant gasLimitNative = 25000;
-    uint64 public constant gasLimitERC20 = 100000;
+    bytes21 public roflAppID;
+    /// @notice Address of the ROFL-derived secp256k1 key used to authenticate signed queries.
+    /// @dev Published by the service at startup via setRoflSignerAddress. Enables msg.sender-based
+    ///      auth on view functions (roflEnsureAuthorizedOrigin is tx-only and doesn't work in eth_call).
+    address public roflSignerAddress;
+
+    // Sweep gas limits: deposit address → evmAddress (always an EOA)
+    uint64 public constant gasLimitNativeSweep = 21000;
+    uint64 public constant gasLimitERC20Sweep = 65000;
+    // Withdrawal gas limits: evmAddress → user-chosen address (may be a contract)
+    uint64 public constant gasLimitNativeWithdraw = 50000;
+    uint64 public constant gasLimitERC20Withdraw = 100000;
 
     error GasPriceNotSet(uint256 chainId);
-    error UnknownTransactionType();
-    error InvalidTxDataLength();
-    error InvalidTransferSelector();
     error InvalidGasPrice();
     error InvalidNativeTokenDataLength();
     error InvalidERC20TokenDataLength();
-    error InvalidBlockHash();
     error InvalidAddress();
+    error UnsupportedChainType();
+    error NotAuthorizedROFL();
+    error RoflSignerNotSet();
 
     event GasPriceSet(uint256 indexed chainId, uint256 gasPrice);
+    event RoflSignerUpdated(address indexed newSigner);
+
+    modifier onlyROFL() {
+        Subcall.roflEnsureAuthorizedOrigin(roflAppID);
+        _;
+    }
+
+    /// @notice Gate for functions called as signed view queries by ROFL.
+    /// @dev Cannot use roflEnsureAuthorizedOrigin in view context — no tx origin inside eth_call.
+    ///      Relies on sapphirepy signed queries setting msg.sender to the ROFL-derived key.
+    modifier onlyROFLQuery() {
+        if (roflSignerAddress == address(0)) revert RoflSignerNotSet();
+        if (msg.sender != roflSignerAddress) revert NotAuthorizedROFL();
+        _;
+    }
 
     using RLPReader for RLPReader.RLPItem;
     using RLPReader for RLPReader.Iterator;
@@ -58,24 +83,18 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
 
     /**
      * @notice Initializes the EVMSignerAndVerifier contract.
-     * @dev This replaces the constructor for upgradeable contracts.
-     *      Generates a secure keypair using Sapphire's EthereumUtils.
-     * @param _shoyubashi The address of the ShoyuBashi oracle
-     * @param _provethVerifier The address of the ProvethVerifier contract
+     * @param _roflAppID The ROFL app identifier (stable across redeployments)
      * @param _owner The address that will own this contract
      */
     function __EVMSignerAndVerifier_init(
-        address _shoyubashi,
-        address _provethVerifier,
+        bytes21 _roflAppID,
         address _owner
     ) internal onlyInitializing {
-        if (_shoyubashi == address(0)) revert InvalidAddress();
-        if (_provethVerifier == address(0)) revert InvalidAddress();
         if (_owner == address(0)) revert InvalidAddress();
         __Ownable_init(_owner);
         (evmAddress, secretKey) = _generateKeypair();
-        shoyuBashi = IShoyuBashi(_shoyubashi);
-        provethVerifier = IProvethVerifier(_provethVerifier);
+        (gasTankAddress, gasTankSecret) = _generateKeypair();
+        roflAppID = _roflAppID;
     }
 
     /**
@@ -88,345 +107,37 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     }
 
     /**
-     * @notice Decodes an EVM transaction and recovers the sender address.
-     *
-     * This function supports all major EVM transaction types:
-     *   - Legacy (type >= 0xc0, RLP-encoded)
-     *   - EIP-2930 (type 1, access list)
-     *   - EIP-1559 (type 2, dynamic fee)
-     *
-     * For each type, the function:
-     *   1. Parses the transaction type from the first byte.
-     *   2. Decodes the RLP-encoded transaction fields into their components.
-     *   3. Reconstructs the unsigned transaction (per EIP-155/EIP-2718 rules) for signature recovery.
-     *   4. Computes the correct hash for signature recovery (sometimes with a type byte prefix).
-     *   5. Recovers the sender address using ECDSA.recover.
-     *
-     * ---
-     * RLP encoding/decoding:
-     * - Legacy transactions are fully RLP-encoded (the first byte is >= 0xc0, indicating an RLP list).
-     * - Typed transactions (EIP-2930/EIP-1559) have a type byte (0x01 or 0x02) followed by an RLP-encoded list.
-     * - RLPReader is used to decode the list into fields (nonce, gas, to, value, data, etc).
-     * - RLPWriter is used to reconstruct the unsigned transaction for signature recovery.
-     *
-     * ---
-     * Signature recovery:
-     * - For legacy: unsignedHash = keccak256(RLP(list of fields with chainId, 0, 0))
-     * - For EIP-2930: unsignedHash = keccak256(0x01 || RLP(list of fields))
-     * - For EIP-1559: unsignedHash = keccak256(0x02 || RLP(list of fields))
-     * - The recovery id (v) is derived per EIP rules (27/28 for legacy, 27+parity for typed).
-     *
-     * @param evmTransactionData The raw transaction bytes (RLP-encoded or typed).
-     * @return chainId The chain ID the transaction was signed for.
-     * @return hash The hash of the signed transaction (for inclusion in a block).
-     * @return from The recovered sender address.
-     * @return to The recipient address.
-     * @return value The amount of ETH sent.
-     * @return txData The calldata for the transaction.
-     * @return v The signature v value (raw, as in the transaction).
-     * @return r The signature r value.
-     * @return s The signature s value.
+     * @notice Derives a deterministic deposit keypair for a beneficiary.
+     * @dev Uses secretKey as master seed with domain separation via (beneficiary, chainType, version).
+     *      Sapphire.generateSigningKeyPair is deterministic — same seed always produces the same keypair.
+     *      chainId is deliberately omitted: one address across all chains within a ChainType family.
+     *      Virtual to allow mocking in tests (Sapphire precompiles unavailable in Hardhat).
+     * @param beneficiary The user's Sapphire address
+     * @param chainType The chain family (see ChainType enum)
+     * @param version Key derivation index
+     * @return depositAddr The derived deposit address
+     * @return depositSecret The derived deposit private key
      */
-    function decodeEVMTransaction(
-        bytes memory evmTransactionData
-    )
-        internal
-        pure
-        returns (
-            uint256 chainId,
-            bytes32 hash,
-            address from,
-            address to,
-            uint256 value,
-            bytes memory txData,
-            uint256 v,
-            uint256 r,
-            uint256 s
-        )
-    {
-        // Parse the transaction type from the first byte of the calldata.
-        uint8 transactionType = uint8(evmTransactionData[0]);
+    function _deriveDepositKeypair(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version
+    ) internal view virtual returns (address depositAddr, bytes32 depositSecret) {
+        bytes32 seed = keccak256(
+            abi.encode(secretKey, beneficiary, chainType, version)
+        );
 
-        // --- Legacy Transaction (type >= 0xc0) ---
-        // These are fully RLP-encoded transactions (no type byte prefix).
-        if (transactionType >= 0xc0) {
-            // Decode the RLP list into its fields.
-            // The RLP list order is: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
-            RLPReader.RLPItem[] memory ls = evmTransactionData
-                .toRlpItem()
-                .toList();
-
-            // Extract each field from the RLP-decoded list.
-            uint256 nonce = ls[0].toUint();
-            uint256 gasPrice = ls[1].toUint();
-            uint256 gasLimit = ls[2].toUint();
-            to = ls[3].toAddress();
-            value = ls[4].toUint();
-            txData = ls[5].toBytes();
-            v = ls[6].toUint();
-            r = ls[7].toUint();
-            s = ls[8].toUint();
-
-            // Recover the chainId from v (EIP-155 replay protection).
-            chainId = (v - 35) / 2;
-
-            // Reconstruct the unsigned transaction for signature recovery:
-            // The unsigned tx is RLP([nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0])
-            bytes[] memory items = new bytes[](9);
-            items[0] = RLPWriter.writeUint(nonce);
-            items[1] = RLPWriter.writeUint(gasPrice);
-            items[2] = RLPWriter.writeUint(gasLimit);
-            items[3] = RLPWriter.writeAddress(to);
-            items[4] = RLPWriter.writeUint(value);
-            items[5] = RLPWriter.writeBytes(txData);
-            items[6] = RLPWriter.writeUint(chainId);
-            items[7] = RLPWriter.writeUint(0);
-            items[8] = RLPWriter.writeUint(0);
-
-            // Hash the RLP-encoded unsigned transaction for signature recovery.
-            bytes32 unsignedHash = keccak256(RLPWriter.writeList(items));
-
-            // The recovery id for ECDSA is always 27 or 28, derived from v.
-            uint8 recoveryV = uint8(((v - 1) % 2) + 27);
-
-            // Recover the sender address from the signature.
-            from = ECDSA.recover(
-                unsignedHash,
-                uint8(recoveryV),
-                bytes32(r),
-                bytes32(s)
-            );
-
-            // The transaction hash (for block inclusion) is the keccak256 of the original calldata.
-            hash = keccak256(evmTransactionData);
-
-            // --- EIP-2930 Transaction (type 1) ---
-        } else if (transactionType == 1) {
-            // The transaction hash is the keccak256 of the original calldata.
-            hash = keccak256(evmTransactionData);
-
-            // Remove the type byte (0x01) prefix.
-            evmTransactionData = evmTransactionData.getSlice(
-                1,
-                evmTransactionData.length
-            );
-
-            // RLP-decode the remaining bytes into fields.
-            // EIP-2930 order: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS]
-            RLPReader.RLPItem[] memory ls = evmTransactionData
-                .toRlpItem()
-                .toList();
-
-            // Extract fields from the RLP list.
-            chainId = ls[0].toUint();
-            uint256 nonce = ls[1].toUint();
-            uint256 gasPrice = ls[2].toUint();
-            uint256 gasLimit = ls[3].toUint();
-            to = ls[4].toAddress();
-            value = ls[5].toUint();
-            txData = ls[6].toBytes();
-            v = ls[8].toUint(); // signatureYParity {0,1}
-            r = ls[9].toUint();
-            s = ls[10].toUint();
-
-            // Reconstruct the unsigned transaction for signature recovery:
-            // keccak256(0x01 || RLP([chainId, nonce, gasPrice, gasLimit, to, value, data, accessList]))
-            bytes[] memory items = new bytes[](8);
-            items[0] = RLPWriter.writeUint(chainId);
-            items[1] = RLPWriter.writeUint(nonce);
-            items[2] = RLPWriter.writeUint(gasPrice);
-            items[3] = RLPWriter.writeUint(gasLimit);
-            items[4] = RLPWriter.writeAddress(to);
-            items[5] = RLPWriter.writeUint(value);
-            items[6] = RLPWriter.writeBytes(txData);
-            items[7] = ls[7].toRlpBytes(); // accessList
-
-            // Hash with the type byte prefix (0x01) for signature recovery.
-            bytes32 unsignedHash = keccak256(
-                bytes.concat(bytes1(0x01), RLPWriter.writeList(items))
-            );
-
-            // The recovery id for ECDSA is 27 or 28, derived from v (YParity).
-            uint8 recoveryV = 27 + uint8(v);
-
-            // Recover the sender address from the signature.
-            from = ECDSA.recover(
-                unsignedHash,
-                uint8(recoveryV),
-                bytes32(r),
-                bytes32(s)
-            );
-
-            // --- EIP-1559 Transaction (type 2) ---
-        } else if (transactionType == 2) {
-            // The transaction hash is the keccak256 of the original calldata.
-            hash = keccak256(evmTransactionData);
-
-            // Remove the type byte (0x02) prefix.
-            evmTransactionData = evmTransactionData.getSlice(
-                1,
-                evmTransactionData.length
-            );
-
-            // RLP-decode the remaining bytes into fields.
-            // EIP-1559 order: [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS]
-            RLPReader.RLPItem[] memory ls = evmTransactionData
-                .toRlpItem()
-                .toList();
-
-            // Extract fields from the RLP list.
-            chainId = ls[0].toUint();
-            uint256 nonce = ls[1].toUint();
-            uint256 maxPriorityFeePerGas = ls[2].toUint();
-            uint256 maxFeePerGas = ls[3].toUint();
-            uint256 gasLimit = ls[4].toUint();
-            to = ls[5].toAddress();
-            value = ls[6].toUint();
-            txData = ls[7].toBytes();
-            v = ls[9].toUint(); // signatureYParity {0,1}
-            r = ls[10].toUint();
-            s = ls[11].toUint();
-
-            // Reconstruct the unsigned transaction for signature recovery:
-            // keccak256(0x02 || RLP([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList]))
-            bytes[] memory items = new bytes[](9);
-            items[0] = RLPWriter.writeUint(chainId);
-            items[1] = RLPWriter.writeUint(nonce);
-            items[2] = RLPWriter.writeUint(maxPriorityFeePerGas);
-            items[3] = RLPWriter.writeUint(maxFeePerGas);
-            items[4] = RLPWriter.writeUint(gasLimit);
-            items[5] = RLPWriter.writeAddress(to);
-            items[6] = RLPWriter.writeUint(value);
-            items[7] = RLPWriter.writeBytes(txData);
-            items[8] = ls[8].toRlpBytes(); // accessList
-
-            // Hash with the type byte prefix (0x02) for signature recovery.
-            bytes32 unsignedHash = keccak256(
-                bytes.concat(bytes1(0x02), RLPWriter.writeList(items))
-            );
-
-            // The recovery id for ECDSA is 27 or 28, derived from v (YParity).
-            uint8 recoveryV = 27 + uint8(v);
-
-            // Recover the sender address from the signature.
-            from = ECDSA.recover(
-                unsignedHash,
-                uint8(recoveryV),
-                bytes32(r),
-                bytes32(s)
-            );
-        } else {
-            revert UnknownTransactionType();
-        }
-    }
-
-    /**
-     * @notice Decodes ERC-20 transfer calldata to extract the recipient and amount.
-     *
-     * This function expects calldata for the ERC-20 `transfer(address,uint256)` function,
-     * which is always 68 bytes long:
-     *   - 4 bytes: function selector (keccak256("transfer(address,uint256)")[:4])
-     *   - 32 bytes: recipient address (left-padded to 32 bytes)
-     *   - 32 bytes: amount (uint256, left-padded to 32 bytes)
-     *
-     * The function:
-     *   1. Checks the calldata length is exactly 68 bytes.
-     *   2. Verifies the function selector matches `transfer(address,uint256)`.
-     *   3. Extracts the recipient address and amount using assembly for efficiency.
-     *   4. Returns the decoded address and amount.
-     *
-     * ---
-     * Calldata layout:
-     *   [0..4):   selector
-     *   [4..36):  address (left-padded)
-     *   [36..68): amount (left-padded)
-     *
-     * Solidity's ABI encoding pads dynamic types to 32 bytes, so the address is right-aligned
-     * in its 32-byte slot. We use assembly to extract and cast it to the correct type.
-     *
-     * @param txData The calldata for the ERC-20 transfer (should be 68 bytes).
-     * @return to The recipient address.
-     * @return amount The amount to transfer.
-     */
-    function decodeTxDataForErc20Transfer(
-        bytes memory txData
-    ) internal pure returns (address to, uint256 amount) {
-        // 1. Check calldata length: selector (4) + address (32) + amount (32) = 68 bytes
-        if (txData.length != 4 + 32 + 32) revert InvalidTxDataLength();
-
-        // 2. Compute the ERC-20 transfer selector: bytes4(keccak256("transfer(address,uint256)"))
-        bytes4 selector = bytes4(keccak256("transfer(address,uint256)"));
-
-        // 3. Extract the selector from calldata (first 4 bytes)
-        bytes4 selectorFromTx;
+        // v1: only EVM family uses Secp256k1. When a non-EVM ChainType variant is
+        // added, route it through an additional branch with its own signing alg.
+        if (chainType != ChainType.EVM) revert UnsupportedChainType();
+        (bytes memory pk, bytes memory sk) = Sapphire.generateSigningKeyPair(
+            Sapphire.SigningAlg.Secp256k1PrehashedKeccak256,
+            abi.encodePacked(seed)
+        );
+        depositAddr = EthereumUtils.k256PubkeyToEthereumAddress(pk);
         assembly {
-            // mload reads 32 bytes, so we offset by 32 to get the first 32 bytes of data
-            // The selector is in the first 4 bytes of this word
-            selectorFromTx := mload(add(txData, 32))
+            depositSecret := mload(add(sk, 32))
         }
-
-        // 4. Check that the selector matches the expected transfer selector
-        if (selectorFromTx != selector) revert InvalidTransferSelector();
-
-        // 5. Extract the recipient address and amount
-        //    - Address is in bytes 4..36 (32 bytes, right-aligned)
-        //    - Amount is in bytes 36..68 (32 bytes)
-        bytes32 toBytes;
-        bytes32 amountBytes;
-        assembly {
-            // toBytes: load 32 bytes at offset 36 (selector + address)
-            toBytes := mload(add(txData, 36))
-            // amountBytes: load 32 bytes at offset 68 (selector + address + amount)
-            amountBytes := mload(add(txData, 68))
-        }
-        // Convert the 32-byte word to an address (last 20 bytes)
-        to = address(uint160(uint256(toBytes)));
-        // Convert the 32-byte word to uint256
-        amount = uint256(amountBytes);
-    }
-
-    /**
-     * @notice Decodes an EVM transaction receipt to extract status and cumulative gas used.
-     *
-     * This function processes the RLP-encoded transaction receipt, which includes a type byte
-     * prefix followed by the RLP list of receipt fields. The receipt fields are ordered as:
-     *   [status, cumulativeGasUsed, logsBloom, logs]
-     *
-     * The function:
-     *   1. Removes the type byte prefix (first byte).
-     *   2. RLP-decodes the remaining bytes into the receipt fields.
-     *   3. Extracts and returns the `status` and `cumulativeGasUsed` fields.
-     *
-     * ---
-     * Receipt layout:
-     *   [0]: status (uint256) - 1 for success, 0 for failure
-     *   [1]: cumulativeGasUsed (uint256)
-     *   [2]: logsBloom (bytes)
-     *   [3]: logs (array)
-     *
-     * @param rlpTxReceipt The RLP-encoded transaction receipt with type byte prefix.
-     * @return status The transaction status (1 = success, 0 = failure).
-     * @return cumulativeGasUsed The total gas used in the block up to this transaction.
-     */
-    function decodeEVMTxReceipt(
-        bytes memory rlpTxReceipt
-    ) internal pure returns (uint256 status, uint256 cumulativeGasUsed) {
-        // Parse the transaction type from the first byte of the calldata.
-        uint8 transactionType = uint8(rlpTxReceipt[0]);
-
-        if (transactionType < 0xc0) {
-            // Remove the type byte prefix.
-            // See: https://github.com/ethereum/go-ethereum/blob/de5ea2ffd891c603b029d0080ab4626ce81dd91c/core/types/transaction.go#L47
-            rlpTxReceipt = rlpTxReceipt.getSlice(1, rlpTxReceipt.length);
-        }
-
-        // RLP-decode the remaining bytes into fields.
-        // EVM receipt order: [status, cumulativeGasUsed, logsBloom, logs}
-        RLPReader.RLPItem[] memory ls = rlpTxReceipt.toRlpItem().toList();
-
-        // Extract fields from the RLP list.
-        status = ls[0].toUint();
-        cumulativeGasUsed = ls[1].toUint();
     }
 
     /**
@@ -445,6 +156,16 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         emit GasPriceSet(chainId, gasPrice);
     }
 
+    /// @notice Publish the ROFL-derived signer address on-chain.
+    /// @dev Called by the service at startup. Gated by onlyROFL so only an authenticated ROFL
+    ///      transaction can update it. The address becomes the msg.sender that onlyROFLQuery
+    ///      functions will check against for signed view queries.
+    function setRoflSignerAddress(address newSigner) external onlyROFL {
+        if (newSigner == address(0)) revert InvalidAddress();
+        roflSignerAddress = newSigner;
+        emit RoflSignerUpdated(newSigner);
+    }
+
     /**
      * @notice Generates a signed native token transfer transaction for a specific EVM chain.
      *
@@ -455,13 +176,12 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      *   3. Return the RLP-encoded signed transaction ready for broadcast
      *
      * @dev Uses Sapphire's EIP155Signer to call SIGN_DIGEST precompile for secure transaction signing.
-     *      The nonce is automatically incremented to ensure transaction ordering.
-     *      Gas limit is set to a conservative 25,000 gas for native transfers.
      *      Gas price must be set for the chain via setGasPrice() before calling this function.
      *
      * @param chainId The target blockchain's chain ID where the transaction will be sent
      * @param userAddress The recipient address who will receive the native tokens
      * @param amount The amount of native tokens to transfer (in wei)
+     * @param nonce The sender's transaction nonce on the target chain
      * @return output The RLP-encoded signed transaction ready for broadcast to the target chain
      */
     function generateNativeTransfer(
@@ -469,7 +189,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         address userAddress,
         uint256 amount,
         uint64 nonce
-    ) internal returns (bytes memory output) {
+    ) internal view returns (bytes memory output) {
         if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
 
         return
@@ -479,7 +199,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
                 EIP155Signer.EthTx({
                     nonce: nonce,
                     gasPrice: gasPrices[chainId],
-                    gasLimit: gasLimitNative,
+                    gasLimit: gasLimitNativeWithdraw,
                     to: userAddress,
                     value: amount,
                     data: "",
@@ -503,14 +223,13 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * (evmAddress) to the specified user address.
      *
      * @dev Uses Sapphire's EIP155Signer to call SIGN_DIGEST precompile for secure transaction signing.
-     *      The nonce is automatically incremented to ensure transaction ordering.
-     *      Gas limit is set to 100,000 gas to handle most ERC20 transfer scenarios.
      *      Gas price must be set for the chain via setGasPrice() before calling this function.
      *
      * @param chainId The target blockchain's chain ID where the transaction will be sent
      * @param userAddress The recipient address who will receive the ERC20 tokens
      * @param tokenAddress The ERC20 contract address on the target chain
      * @param amount The amount of ERC20 tokens to transfer (in token's base units)
+     * @param nonce The sender's transaction nonce on the target chain
      * @return output The RLP-encoded signed transaction ready for broadcast to the target chain
      */
     function generateERC20Transfer(
@@ -519,7 +238,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         address tokenAddress,
         uint256 amount,
         uint64 nonce
-    ) internal returns (bytes memory output) {
+    ) internal view returns (bytes memory output) {
         if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
 
         bytes memory data = abi.encodeWithSignature(
@@ -534,7 +253,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
                 EIP155Signer.EthTx({
                     nonce: nonce,
                     gasPrice: gasPrices[chainId],
-                    gasLimit: gasLimitERC20,
+                    gasLimit: gasLimitERC20Withdraw,
                     to: tokenAddress,
                     value: 0,
                     data: data,
@@ -542,6 +261,177 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
                 })
             );
     }
+
+    // ─── Sweep & Gas Funding (onlyROFL) ───────────────────────────────
+
+    /**
+     * @notice Sign a native token sweep: depositAddress → evmAddress.
+     * @dev Derives deposit keypair internally, signs via EIP155Signer.sign().
+     *      ROFL broadcasts the returned signedTx on the source chain.
+     *      ROFL supplies amount (typically balance - 21000*gasPrice) from source chain query.
+     */
+    function generateSweepNativeTransfer(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version,
+        uint256 chainId,
+        uint256 amount,
+        uint64 sourceChainNonce,
+        uint256 gasPrice
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+            beneficiary, chainType, version
+        );
+        signedTx = EIP155Signer.sign(
+            depositAddr,
+            depositSecret,
+            EIP155Signer.EthTx({
+                nonce: sourceChainNonce,
+                gasPrice: gasPrice,
+                gasLimit: gasLimitNativeSweep,
+                to: evmAddress,
+                value: amount,
+                data: "",
+                chainId: chainId
+            })
+        );
+    }
+
+    /**
+     * @notice Sign an ERC20 sweep: token.transfer(evmAddress, amount) from deposit address.
+     * @dev Same derivation + signing pattern. ROFL supplies amount from source chain query.
+     */
+    function generateSweepERC20Transfer(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version,
+        uint256 chainId,
+        address tokenAddress,
+        uint256 amount,
+        uint64 sourceChainNonce,
+        uint256 gasPrice
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+            beneficiary, chainType, version
+        );
+        bytes memory data = abi.encodeWithSignature(
+            "transfer(address,uint256)",
+            evmAddress,
+            amount
+        );
+        signedTx = EIP155Signer.sign(
+            depositAddr,
+            depositSecret,
+            EIP155Signer.EthTx({
+                nonce: sourceChainNonce,
+                gasPrice: gasPrice,
+                gasLimit: gasLimitERC20Sweep,
+                to: tokenAddress,
+                value: 0,
+                data: data,
+                chainId: chainId
+            })
+        );
+    }
+
+    /**
+     * @notice Sign a native transfer from a deposit address to an arbitrary destination.
+     * @dev Used by emergency withdraw — caller supplies all source-chain state.
+     */
+    function generateDepositAddressTransfer(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version,
+        uint256 chainId,
+        address toAddress,
+        uint256 amount,
+        uint64 sourceChainNonce,
+        uint256 gasPrice
+    ) internal view returns (bytes memory signedTx) {
+        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+            beneficiary, chainType, version
+        );
+        signedTx = EIP155Signer.sign(
+            depositAddr,
+            depositSecret,
+            EIP155Signer.EthTx({
+                nonce: sourceChainNonce,
+                gasPrice: gasPrice,
+                gasLimit: gasLimitNativeWithdraw,
+                to: toAddress,
+                value: amount,
+                data: "",
+                chainId: chainId
+            })
+        );
+    }
+
+    /**
+     * @notice Sign an ERC20 transfer from a deposit address to an arbitrary destination.
+     * @dev Used by emergency withdraw for ERC20 tokens — caller supplies all source-chain state.
+     *      Signs token.transfer(toAddress, amount) from the derived deposit keypair.
+     */
+    function generateDepositAddressERC20Transfer(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version,
+        uint256 chainId,
+        address toAddress,
+        address tokenAddress,
+        uint256 amount,
+        uint64 sourceChainNonce,
+        uint256 gasPrice
+    ) internal view returns (bytes memory signedTx) {
+        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+            beneficiary, chainType, version
+        );
+        bytes memory data = abi.encodeWithSignature(
+            "transfer(address,uint256)",
+            toAddress,
+            amount
+        );
+        signedTx = EIP155Signer.sign(
+            depositAddr,
+            depositSecret,
+            EIP155Signer.EthTx({
+                nonce: sourceChainNonce,
+                gasPrice: gasPrice,
+                gasLimit: gasLimitERC20Withdraw,
+                to: tokenAddress,
+                value: 0,
+                data: data,
+                chainId: chainId
+            })
+        );
+    }
+
+    /**
+     * @notice Sign a gas funding tx: gasTankAddress → depositAddress (native tokens for ERC20 sweep gas).
+     * @dev Uses gasTankSecret internally. ROFL supplies nonce/gasPrice from source chain.
+     */
+    function generateGasFundingTx(
+        address toDepositAddress,
+        uint256 chainId,
+        uint256 gasAmount,
+        uint64 gasTankNonce,
+        uint256 gasPrice
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        signedTx = EIP155Signer.sign(
+            gasTankAddress,
+            gasTankSecret,
+            EIP155Signer.EthTx({
+                nonce: gasTankNonce,
+                gasPrice: gasPrice,
+                gasLimit: gasLimitNativeSweep,
+                to: toDepositAddress,
+                value: gasAmount,
+                data: "",
+                chainId: chainId
+            })
+        );
+    }
+
+    // ─── Token Data Encoding/Decoding ─────────────────────────────────
 
     /**
      * @notice Decodes EVM native token metadata to extract the chain ID.
@@ -663,30 +553,6 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         return abi.encodePacked(chainId, tokenAddress);
     }
 
-    function getBlockNumber(
-        bytes memory rlpBlockHeader
-    ) public pure returns (uint256 blockNumber) {
-        RLPReader.RLPItem[] memory blockHeader = rlpBlockHeader
-            .toRlpItem()
-            .toList();
-        blockNumber = (blockHeader[8].toUint());
-    }
-
-    function verifyBlockHash(
-        bytes32 expectedBlockHash,
-        uint256 blockNumber,
-        uint256 chainId
-    ) public view {
-        // Call Blockhash oracle with hash, blocknumber and chainId
-        bytes32 actualBlockHash = shoyuBashi.getUnanimousHash(
-            chainId,
-            blockNumber
-        );
-        // @ahmed needs to call Shoyubashi before submitting the includeEVMDeposit to update the blockhash oracle
-        // Call this function https://github.com/rube-de/hashi/blob/b43726b27eedddf15e48e65e0175aba4b2a8096e/packages/evm/contracts/ownable/ShoyuBashi.sol#L28
-        if (actualBlockHash != expectedBlockHash) revert InvalidBlockHash();
-    }
-
     function getEVMNonceAndIncrement(
         uint256 chainId
     ) internal returns (uint64 nonce) {
@@ -697,5 +563,5 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[44] private __gap;
+    uint256[42] private __gap;
 }

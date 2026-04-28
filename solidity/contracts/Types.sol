@@ -14,6 +14,16 @@ enum TokenType {
     ERC20
 }
 
+/// @notice Chain family for deposit-address derivation.
+/// @dev Coarser than chainId: one deposit address serves all chains within a family.
+enum ChainType {
+    EVM
+}
+
+/// @notice Raised when a caller dispatches on an unknown TokenType variant,
+///         or references a tokenId that has not been registered via registerToken.
+error UnsupportedTokenType();
+
 struct TokenInfo {
     TokenType tokenType;
     bytes data; // e.g. chainId and contract address for ERC20

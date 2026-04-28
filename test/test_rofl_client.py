@@ -4,6 +4,7 @@ import base64
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import cbor2
 from web3.types import TxParams
 
 
@@ -102,8 +103,10 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
         }
         result = await client.submit_tx(tx, encrypt=False)
 
-        # Verify - returns None (no submission_id from appd)
-        self.assertIsNone(result)
+        # Verify - returns RoflSubmissionResult with hex-encoded CBOR as submission_id
+        expected = cbor2.dumps({"ok": b""}).hex()
+        self.assertEqual(result.submission_id, expected)
+        self.assertEqual(result.ok_payload, b"")
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_reverted_raises_error(self, mock_async_client_class):
@@ -156,6 +159,26 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
         # Missing 'data'
         with self.assertRaises(ValueError):
             await client.submit_tx({"to": "0x123"})
+
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_invalid_cbor_raises_error(self, mock_async_client_class):
+        """Test that submit_tx raises ValueError when response is invalid CBOR."""
+        from src.clients.rofl import RoflAppdClient
+
+        mock_client = MagicMock()
+        mock_client.sign_submit = AsyncMock(side_effect=cbor2.CBORDecodeError("invalid"))
+        mock_async_client_class.return_value = mock_client
+
+        client = RoflAppdClient()
+        tx: TxParams = {
+            "to": "0x0987654321098765432109876543210987654321",
+            "data": "0xabcdef",
+        }
+
+        with self.assertRaises(ValueError) as ctx:
+            await client.submit_tx(tx)
+
+        self.assertIn("invalid CBOR", str(ctx.exception))
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_missing_ok_key_raises_error(self, mock_async_client_class):

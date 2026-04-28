@@ -7,6 +7,9 @@ from typing import Optional
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from src.clients.rofl import RoflAppdClient
+from src.services.accounting_contract import get_accounting_contract_service
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_AUTH_TOKEN_KEY_ID = "auth_token_enc_seed.key"
@@ -34,8 +37,6 @@ class AuthTokenKeyManager:
         Returns:
             32-byte seed derived from ROFL key generation.
         """
-        from src.clients.rofl import RoflAppdClient
-
         client = RoflAppdClient()
         key_id = _get_auth_token_key_id()
         logger.info("Using auth token key ID: %s", key_id)
@@ -112,8 +113,6 @@ class AuthTokenKeyManager:
         This should be called during startup after the key is initialized.
         The contract will verify the ROFL origin before accepting the key.
         """
-        from src.services.accounting_contract import get_accounting_contract_service
-
         service = get_accounting_contract_service()
         await service.set_auth_token_enc_key(self.enc_key)
         logger.info("AuthToken encryption key synced to contract successfully")

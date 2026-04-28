@@ -75,13 +75,14 @@ export function buildSiweMessage(params: {
   );
 }
 
-export async function getSiweToken(params: {
+type SiweLoginParams = {
   apiBaseUrl: string;
   signer: { signMessage: (message: string) => Promise<string> };
   userAddress: string;
   chainId: number;
-}): Promise<string> {
-  // Fetch domain from API
+};
+
+async function siweLogin(params: SiweLoginParams): Promise<JsonObject> {
   const domainResp = await fetchJson(
     `${params.apiBaseUrl}/v1/accounting/auth/domain`,
   );
@@ -93,7 +94,6 @@ export async function getSiweToken(params: {
     throw new Error("API returned an invalid SIWE domain");
   }
 
-  // Fetch nonce from API (server-generated for replay protection)
   const nonceResp = await fetchJson(
     `${params.apiBaseUrl}/v1/accounting/auth/nonce?address=${params.userAddress}`,
   );
@@ -129,14 +129,40 @@ export async function getSiweToken(params: {
     },
   );
 
+  if (!isJsonObject(loginResp)) {
+    throw new Error("API returned an invalid login response");
+  }
+  return loginResp;
+}
+
+export async function getSiweToken(params: SiweLoginParams): Promise<string> {
+  const loginResp = await siweLogin(params);
   const token =
-    isJsonObject(loginResp) && typeof loginResp.siwe_token === "string"
+    typeof loginResp.siwe_token === "string"
       ? loginResp.siwe_token
       : null;
   if (!token || !token.startsWith("0x")) {
     throw new Error("API returned an invalid SIWE token");
   }
   return token;
+}
+
+export async function authenticate(params: SiweLoginParams): Promise<{
+  jwtAccessToken: string;
+}> {
+  const loginResp = await siweLogin(params);
+  const siweToken =
+    typeof loginResp.siwe_token === "string"
+      ? loginResp.siwe_token
+      : null;
+  if (!siweToken || !siweToken.startsWith("0x")) {
+    throw new Error("API returned an invalid SIWE token");
+  }
+  const jwtAccessToken =
+    typeof loginResp.jwt_access_token === "string"
+      ? loginResp.jwt_access_token
+      : "";
+  return { jwtAccessToken };
 }
 
 export async function fetchBalance(params: {

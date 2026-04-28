@@ -193,8 +193,8 @@ class WithdrawalProcessor:
                 logger.warning(f"Withdrawal #{index}: failed to read, skipping: {exc}")
                 continue
 
-            resolved = result[4]
-            tx_identifier = result[5]
+            resolved = result[5]
+            tx_identifier = result[6]
 
             if not resolved:
                 # Not yet processed by the main polling loop, skip
@@ -209,7 +209,7 @@ class WithdrawalProcessor:
             nonce = decode(["uint64"], tx_identifier)[0]
 
             # Get chain_id for this withdrawal
-            token_id_bytes = result[3]
+            token_id_bytes = result[4]
             try:
                 context = await self.accounting_service._get_token_context(HexBytes(token_id_bytes))
                 withdrawal_chain_id = context.chain_id
@@ -312,7 +312,7 @@ class WithdrawalProcessor:
             withdrawal_data = await self._rate_limited_call(
                 lambda: contract_reader.functions.withdrawals(index).call()
             )
-            is_resolved = withdrawal_data[4]
+            is_resolved = withdrawal_data[5]
 
             # Step 2: If not resolved, submit resolveWithdrawal and wait
             if not is_resolved:
@@ -328,7 +328,7 @@ class WithdrawalProcessor:
                     withdrawal_data = await self._rate_limited_call(
                         lambda: contract_reader.functions.withdrawals(index).call()
                     )
-                    if withdrawal_data[4]:  # resolved
+                    if withdrawal_data[5]:  # resolved
                         is_resolved = True
                         break
 

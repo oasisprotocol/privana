@@ -4,7 +4,6 @@ Issue #47: Response models must serialize token amounts as strings to prevent
 JavaScript precision loss for integers above 2^53 - 1.
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -97,26 +96,6 @@ class TestResponseModelStrAmounts:
 
 class TestServiceLayerStrAmounts:
     """Verify service layer returns str amounts in response dicts."""
-
-    @pytest.mark.asyncio
-    async def test_deposit_quote_returns_str_amount(self):
-        service = AccountingContractService.__new__(AccountingContractService)
-        user = Web3.to_checksum_address("0x1111111111111111111111111111111111111111")
-        token_hex = bytes.fromhex("ab" * 32)
-
-        service._require_address = MagicMock(return_value=user)
-        service._require_hex = MagicMock(return_value=token_hex)
-        service._get_deposit_address = AsyncMock(
-            return_value="0x2222222222222222222222222222222222222222"
-        )
-        service._get_token_context = AsyncMock(
-            return_value=SimpleNamespace(chain_id=84532, token_address=None, is_native=True)
-        )
-
-        result = await service.deposit_quote(user, "0x" + "ab" * 32, 10**18)
-
-        assert isinstance(result["amount"], str)
-        assert result["amount"] == str(10**18)
 
     def test_lock_to_info_returns_str_amount(self):
         service = AccountingContractService.__new__(AccountingContractService)

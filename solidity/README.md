@@ -1,36 +1,75 @@
 # Accounting Module - Solidity Contracts
 
-A cross-chain accounting system built on Oasis Sapphire that enables secure deposits, transfers, and withdrawals across multiple chains. The system uses cryptographic transaction proofs for deposit verification and EIP-712 signatures for user authorization.
+A cross-chain accounting system on Oasis Sapphire. Confidential balance management, deposit/withdrawal orchestration, and EVM transaction signing — gated by a TEE-attested off-chain service (ROFL).
 
 ## Overview
 
 The Accounting module consists of these main components:
 
-- **Accounting.sol** - Core accounting contract managing user balances and operations
-- **auth/AccountingSiweAuth.sol** - SIWE authentication helper for private view-call reads on Sapphire
-- **EVMSignerAndVerifier.sol** - EVM transaction verification and signing capabilities  
-- **EIP712SignatureVerifier.sol** - User authorization via EIP-712 signatures
+- **Accounting.sol** — Core accounting contract (UUPS upgradeable). Manages balances, deposits, locks, transfers, withdrawals, and emergency withdraws.
+- **EVMSignerAndVerifier.sol** — Sapphire-confidential EVM keypair management; signs sweep, gas-funding, and withdrawal transactions for source chains using the `EIP155Signer` precompile.
+- **EIP712SignatureVerifier.sol** — Verifies user-authored EIP-712 signatures for transfer / lock / withdrawal operations.
+- **auth/AccountingSiweAuth.sol** — SIWE-based authentication for confidential Sapphire view calls.
+- **Types.sol** — Shared structs and enums (`TokenInfo`, `ChainType`, `EVMKeypair`, …).
 
 ### Key Features
 
-- **Multi-chain Deposits**: Verify and credit deposits from any EVM chain using transaction inclusion proofs
+- **TEE-Attested Deposits**: ROFL verifies source-chain deposits off-chain via RPC; on-chain `creditDeposit` trusts the TEE attestation
+- **Per-User Deposit Addresses**: Deterministic, Sapphire-derived address per `(beneficiary, chainType, version)`; funds swept to a single encumbered wallet
+- **Confidential Signing**: Withdrawal/sweep transactions signed inside Sapphire via `EIP155Signer` + `SIGN_DIGEST`; private keys never leave the TEE
 - **Fund Locking**: Escrow-like functionality for service interactions with time-bounded locks
-- **P2P Transfers**: Internal transfers between users without on-chain transactions
-- **Secure Withdrawals**: Generate signed transactions for withdrawing funds to origin chains
-- **Universal Token Support**: Native tokens (ETH, MATIC, BNB) and ERC20 tokens across chains
+- **P2P Transfers**: Internal transfers between users without source-chain transactions
+- **Emergency Withdraw**: User-driven escape hatch from the deposit address, no ROFL involvement required
+- **Universal Token Support**: Native tokens (ETH, MATIC, BNB, …) and ERC20 tokens across any registered EVM chain
 
 ## Architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   User Wallet   │    │   Accounting     │    │  ShoyuBashi     │
-│                 │    │   Contract       │    │  Oracle         │
-├─────────────────┤    ├──────────────────┤    ├─────────────────┤
-│ • EIP712 Sigs   │───▶│ • Balance Mgmt   │───▶│ • Block Hashes  │
-│ • Tx Proofs     │    │ • Fund Locking   │    │ • Cross-chain   │
-│ • Withdrawals   │◀───│ • Verification   │    │   Validation    │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌────────────────────────────┐   ┌──────────────────┐
+│   User Wallet   │    │       Oasis Sapphire       │   │   Source Chain   │
+│                 │    │                            │   │ (Base Sepolia,   │
+├─────────────────┤    │  ┌──────────────────────┐  │   │  Eth Sepolia,…)  │
+│ • SIWE login    │───▶│  │  Accounting (UUPS)   │  │   ├──────────────────┤
+│ • EIP-712 sigs  │    │  ├──────────────────────┤  │   │ • Deposit addrs  │
+│ • REST API      │    │  │ Balances / Locks     │  │   │ • Sweep dest.    │
+└────────┬────────┘    │  │ Tx signing (TEE keys)│  │   │ • Withdraw dest. │
+         │             │  └──────────┬───────────┘  │   └────────┬─────────┘
+         │             │             │              │            │
+         ▼             │             │  onlyROFL    │            │
+┌─────────────────┐    │             ▼              │            │
+│   ROFL TEE      │◀──▶│  ┌──────────────────────┐  │            │
+│ (Python svc)   │    │  │ creditDeposit        │  │            │
+├─────────────────┤    │  │ resolveWithdrawal    │  │            │
+│ • Verify deps. │    │  │ setRoflSignerAddress │  │            │
+│ • Sweep engine │    │  └──────────────────────┘  │            │
+│ • Withdraw poll│    └────────────────────────────┘            │
+└────────┬────────┘                                              │
+         │                                                       │
+         └───────── RPC reads / broadcasts ──────────────────────┘
 ```
+
+The ROFL TEE is the only authorized caller of `creditDeposit`. Trust anchor: TEE attestation, enforced by `roflEnsureAuthorizedOrigin(roflAppID)`.
+
+## Deposit Verification
+
+ROFL verifies deposits off-chain by reading the source-chain RPC directly. For each `/deposits/check` call:
+
+1. Fetch the transaction receipt; require `status == 1`.
+2. Wait for the per-chain finality depth.
+3. Match the deposit:
+   - **ERC20**: find a `Transfer(_, deposit_address, amount)` log (matched by `logIndex`).
+   - **Native**: match `tx.to == deposit_address` with `tx.value`, falling back to a balance-delta check across the deposit-address balance before/after the tx block (catches internal calls).
+4. Confirm on-chain amount ≥ user-claimed amount.
+
+Once verified, ROFL calls `creditDeposit(beneficiary, tokenId, amount, depositId)`. The contract trusts the TEE attestation and credits the balance — no on-chain proof of the source-chain transaction is verified.
+
+### Alternative Solutions
+
+The TEE-RPC path is one of several plausible ways to bridge deposit facts into the Accounting contract. The contract surface is intentionally agnostic — `creditDeposit` only requires *some* trusted oracle. Other approaches considered:
+
+- **Hashi / ShoyuBashi + ProvethVerifier** — user submits a Merkle Patricia Trie proof of the source-chain transaction; the contract validates it against a block hash supplied by a Hashi block-hash oracle adapter. Strong trust model (any single honest adapter is enough), but gas-heavy and adds an oracle dependency.
+- **FDC (Flare Data Connector)** — Flare's attestation network signs off-chain attestations of source-chain transactions; the contract verifies the signed attestation. Removes the on-chain MPT cost but adds a fee-bearing attestation round-trip and a Flare-validator-set trust assumption.
+- **Direct TEE RPC verification (current)** — TEE reads the source chain itself. Cheapest, fastest, no third-party oracle. Trust anchor is the TEE attestation gating `creditDeposit`.
 
 ## Installation
 
@@ -87,22 +126,30 @@ bun run coverage
 
 ## Deployment
 
+The `deploy` task provisions both the SIWE auth helper and the Accounting proxy/implementation in one step.
+
 ### Deploy to Sapphire Localnet
 
 ```shell
-npx hardhat deploy --network sapphire-localnet \
-  --shoyubashi <shoyubashi-address> \
-  --provethverifier <proveth-verifier-address> \
-  --domain localhost
+npx hardhat deploy --network sapphire-localnet --roflappid <rofl1…>
 ```
 
 ### Deploy to Sapphire Testnet
 
 ```shell
-npx hardhat deploy --network sapphire-testnet \
-  --shoyubashi <shoyubashi-address> \
-  --provethverifier <proveth-verifier-address> \
-  --domain <siwe-domain>
+npx hardhat deploy --network sapphire-testnet --roflappid <rofl1…>
+```
+
+Outputs: SIWE-auth address, proxy address, implementation address, EVM signing address, owner.
+
+### Standalone subtasks
+
+```shell
+# Deploy AccountingSiweAuth alone (e.g., to roll the auth contract):
+npx hardhat deploy-siwe-auth --network sapphire-testnet --roflappid <rofl1…>
+
+# Force-import an existing proxy into hardhat-upgrades' deployment registry:
+npx hardhat force-import --network sapphire-testnet --proxy <proxy-address>
 ```
 
 ### Upgrade
@@ -113,7 +160,7 @@ The Accounting contract uses the UUPS upgradeable proxy pattern. To upgrade:
 
 ```shell
 cd solidity
-pnpm build
+bun run build
 ```
 
 #### 2. Run the upgrade task
@@ -135,7 +182,7 @@ npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --siweaut
 
 #### 3. Update the README
 
-After a successful upgrade, update the implementation address in the Contract Addresses section below.
+After a successful upgrade, refresh the implementation address in the [Contract Addresses](#contract-addresses) section below.
 
 #### Troubleshooting
 
@@ -156,42 +203,81 @@ After deployment, register tokens that the accounting system should support:
 #### Native Token (ETH, MATIC, etc.)
 
 ```shell
-npx hardhat addEVMNativeToken --network sapphire-localnet --chainid 1 --address <deployed-accounting-address>
+npx hardhat addEVMNativeToken --network sapphire-testnet --chainid 1 --address <deployed-accounting-address>
 ```
 
 #### ERC20 Token
 
 ```shell
-npx hardhat addEVMERC20Token --network sapphire-localnet --chainid 1 --token-address 0x... --address <deployed-accounting-address>
+npx hardhat addEVMErc20Token --network sapphire-testnet --chainid 1 --tokenaddress 0x... --address <deployed-accounting-address>
 ```
+
+Both tasks call `setTokenInfo(...)` (owner-only).
 
 ### Setting Gas Prices
 
 Configure gas prices for different chains:
 
 ```shell
-npx hardhat setGasPrice --network sapphire-localnet --chainid 1 --gas-price 20000000000 --address <deployed-accounting-address>
+npx hardhat setGasPrice --network sapphire-testnet --chainid 1 --gasprice 20000000000 --contract <deployed-accounting-address>
 ```
+
+### ROFL Signer Address
+
+`roflSignerAddress` is published on-chain by `src/services/rofl_signer_bootstrap.py` on first ROFL start. It's the address whose signed view calls satisfy the `onlyROFLQuery` modifier — no manual setup required, but the same address must remain stable across ROFL deployments (it's derived from the ROFL-managed query-signer keypair).
 
 ## Usage Examples
 
 ### Deposit Flow
 
-1. User sends tokens to the accounting contract's EVM address on any supported chain
-2. User generates transaction inclusion proof using block header and Merkle proof
-3. User calls `includeEVMDeposit()` with proof to credit their balance
+1. User authenticates with SIWE (`/auth/login`); receives an opaque `siweToken`.
+2. User calls `getDepositAddress(chainType, version, siweToken)` (signed view call) → receives a per-user EVM address derived deterministically from a Sapphire-generated master key.
+3. User sends funds to that address on the source chain.
+4. User POSTs `/deposits/check` with `(chain_id, tx_hash, amount, log_index, version)`.
+5. ROFL verifies the deposit (see [Deposit Verification](#deposit-verification)), then runs the **sweep state machine** in the background:
+   - `PENDING` → optionally `GAS_FUNDED` (ERC20 only — gas tank funds the deposit address with native gas) → `SWEPT` (sweep tx confirmed) → calls `creditDeposit` → record deleted.
+   - State persisted to disk; survives ROFL restart via a recovery loop.
 
 ### Transfer Flow
 
-1. User signs EIP-712 transfer message
+1. User signs an EIP-712 `Transfer` message
 2. Anyone can submit the signature to execute the transfer
-3. Balances are updated atomically within the accounting system
+3. `transferBalance(...)` decrements the sender and increments the recipient atomically within the accounting system
 
 ### Withdrawal Flow
 
-1. User signs EIP-712 withdrawal message  
-2. Contract generates signed transaction for the origin chain
-3. Signed transaction is broadcast to complete the withdrawal
+1. User signs an EIP-712 `Withdraw` message specifying token, amount, and destination address
+2. ROFL submits `requestWithdrawal(...)` on Sapphire — assigns a destination-chain nonce, queues the request, emits `Withdrawal`
+3. Once a 1-block delay passes, ROFL calls `resolveWithdrawal(index)` — marks the request resolved, emits `WithdrawalResolved`, and returns a Sapphire-signed RLP transaction
+4. ROFL broadcasts the signed transaction on the destination chain
+
+### Emergency Withdraw
+
+User-driven escape hatch from a per-user deposit address, with no ROFL involvement. Useful when ROFL is unavailable or the user wants to reclaim funds before sweeping.
+
+1. User calls `requestEmergencyWithdraw(tokenId, toAddress, version)` — overwrites any prior request for the same `(beneficiary, tokenId, version)` slot
+2. After a 1-block delay, user calls `executeEmergencyWithdraw(...)` — returns a signed transaction from the deposit address to `toAddress`. The user broadcasts it on the source chain
+
+## Hardhat Tasks
+
+| Task | Purpose |
+|------|---------|
+| `deploy` | Deploy Accounting + SIWE auth |
+| `deploy-siwe-auth` | Deploy `AccountingSiweAuth` standalone |
+| `force-import` | Import an existing proxy into hardhat-upgrades |
+| `upgrade` | UUPS upgrade Accounting implementation |
+| `addEVMNativeToken` / `addEVMErc20Token` | Register tokens |
+| `setGasPrice` | Set per-chain gas price |
+| `getBalance` | Read user balance |
+| `transferERC20` | Sign + submit an EIP-712 transfer |
+| `withdraw` / `watchWithdrawal` | User-side withdrawal flow |
+| `directWithdraw` | Withdraw on-chain without ROFL/API |
+| `emergencyRequest` / `emergencyExecute` / `emergencyStatus` | Emergency-withdraw flow from deposit address |
+| `getDepositAddress` / `checkDeposit` | User-side deposit helpers |
+| `accounts` | List configured signer accounts |
+| `getAuthKeyHash` / `sign` / `transfer` | Auth/SIWE helpers |
+
+Run `npx hardhat <task> --help` for parameter details.
 
 ## Contract Addresses
 
@@ -199,31 +285,27 @@ npx hardhat setGasPrice --network sapphire-localnet --chainid 1 --gas-price 2000
 
 | Contract | Address |
 |----------|---------|
-| ProvethVerifier | `0x9Cf97f9EaC17a55B87E5A2aD4B1E935CB57027D9` |
 | AccountingSiweAuth | `0x8675DB981c1CE71c1F5346465C8E36daF3d05468` |
 | Accounting (Proxy) | `0xFfB141bF8269E458b074A274bE6E8F971f08A401` |
-| Accounting (Implementation) | `0x42fF2a35c4584040c6859e22d52E5b3aF4d996A2` |
-| EVM Signing Address | `0x1d5D19e0e68001624323f63c60479BD3AeE7E029` |
-| Deposit Address (Base Sepolia) | `0x1d5D19e0e68001624323f63c60479BD3AeE7E029` |
+| Accounting (Implementation) | refresh after each upgrade |
 
 **ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
-**ShoyuBashi Oracle:** `0x7D3B4dd07bd523E519e0A91afD8e3B325586fb5b`
 
 ### Production (Sapphire Mainnet)
 
 | Contract | Address |
 |----------|---------|
-| ProvethVerifier | TBD |
 | AccountingSiweAuth | TBD |
 | Accounting (Proxy) | TBD |
 | Accounting (Implementation) | TBD |
 
 ## Security Considerations
 
-- Transaction proofs are verified using Merkle Patricia Trie validation
-- All user operations require EIP-712 signatures to prevent unauthorized access
-- Block hashes are verified through the ShoyuBashi oracle system
-- Private keys for withdrawal signing are managed securely within Sapphire's confidential environment
+- **Trust anchor for deposits:** ROFL TEE attestation. `creditDeposit` is gated by `roflEnsureAuthorizedOrigin(roflAppID)` — no on-chain transaction proof is verified
+- **Confidential signing:** Sapphire's `EIP155Signer` + `SIGN_DIGEST` precompile keeps the contract-held EVM private key inside the secure environment; signed transactions are returned only to authorized callers
+- **EIP-712:** All user-authored balance operations require typed-data signatures, validated by `EIP712SignatureVerifier`
+- **Signed view-call auth:** `onlyROFLQuery` matches `msg.sender` against the ROFL-published `roflSignerAddress`. `roflEnsureAuthorizedOrigin` is unavailable inside `eth_call`, so signed-query reads use this alternative gate
+- **1-block delays** on `resolveWithdrawal` and `executeEmergencyWithdraw` mitigate same-block read-then-act simulation attacks
 
 ## Development
 
@@ -231,25 +313,27 @@ npx hardhat setGasPrice --network sapphire-localnet --chainid 1 --gas-price 2000
 
 ```
 contracts/
-├── Accounting.sol              # Main accounting contract
+├── Accounting.sol              # Main accounting contract (UUPS proxy)
+├── EVMSignerAndVerifier.sol    # EVM keypairs + tx signing
+├── EIP712SignatureVerifier.sol # User auth via EIP-712
+├── Types.sol                   # Shared structs and enums
 ├── auth/
-│   └── AccountingSiweAuth.sol  # SIWE auth for private reads
-├── EVMSignerAndVerifier.sol    # EVM transaction handling
-├── __(Network)SignerAndVerifier.sol    # Sui, Solana, etc transaction handling
-├── EIP712SignatureVerifier.sol # User authorizations and signatures
-├── Types.sol                   # Shared data structures
-├── interfaces/                 # External contract interfaces
-└── lib/                       # Utility libraries
+│   └── AccountingSiweAuth.sol  # SIWE auth for view-call reads
+├── interfaces/                 # Contract interfaces
+├── lib/                        # Utility libraries (SliceBytes, …)
+└── test/                       # Mock contracts for non-Sapphire tests
 
 test/
-├── Accounting.E2E.ts          # End-to-end integration test
-├── EVMSignerAndVerifier.ts    # EVM functionality tests
-└── utils.ts                   # Test utilities
+├── Accounting.E2E.ts           # End-to-end integration test
+├── EVMSignerAndVerifier.ts     # EVM signing tests
+├── AuthTokenDecryption.ts      # SIWE auth-token tests
+├── RoflAppId.ts                # ROFL app ID parsing tests
+└── utils.ts                    # Test utilities
 ```
 
 ### Key Dependencies
 
 - **Hardhat** - Development environment and testing framework
-- **Oasis Sapphire Contracts** - Confidential computing primitives
-- **OpenZeppelin** - Security-audited contract libraries
+- **Oasis Sapphire Contracts** - Confidential computing primitives (`EIP155Signer`, `Sapphire`, `SiweAuth`, …)
+- **OpenZeppelin** - Security-audited contract libraries (UUPS proxy, access control)
 - **Solidity RLP** - RLP encoding/decoding for Ethereum data

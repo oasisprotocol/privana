@@ -12,6 +12,7 @@ from typing import Optional
 from eth_abi import decode, encode
 from web3 import Web3
 
+from src.auth.auth_token_keys import get_auth_token_key_manager
 from src.crypto.deoxysii import AEAD, NONCE_SIZE, DecryptionError
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,6 @@ class AuthTokenService:
         if self._aead is not None:
             logger.debug("AuthTokenService already initialized")
             return
-
-        from src.auth.auth_token_keys import get_auth_token_key_manager
 
         key_manager = get_auth_token_key_manager()
         # key_manager should already be initialized by main.py lifespan

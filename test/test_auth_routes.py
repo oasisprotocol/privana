@@ -1,12 +1,14 @@
 """Tests for auth API routes."""
 
+import secrets
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import jwt
 import pytest
 from fastapi import HTTPException, Request, Response
-from siwe import SiweMessage
+from fastapi.security import HTTPAuthorizationCredentials
+from siwe import ExpiredMessage, InvalidSignature, MalformedSession, SiweMessage
 from web3 import Web3
 
 import src.api.routes as routes
@@ -14,8 +16,12 @@ import src.auth.auth_token_keys
 import src.auth.auth_token_service
 import src.auth.dependencies as auth_dependencies
 import src.auth.jwt_keys
+import src.auth.jwt_service
 import src.auth.token_store
+import src.config
+from src.auth.jwt_service import JWTService
 from src.auth.token_store import TokenStore
+from src.models.accounting import SiweLoginRequest
 from src.models.types import Settings
 
 TEST_ADDRESS = "0x0000000000000000000000000000000000000001"
@@ -165,8 +171,6 @@ class TestSiweLogin:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         # Mock the siwe verify to pass (since we don't have a real signature)
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
@@ -222,8 +226,6 @@ class TestSiweLogin:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         request = SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
 
         # Mock the siwe verify to pass (since we don't have a real signature)
@@ -242,8 +244,6 @@ class TestSiweLogin:
     @pytest.mark.asyncio
     async def test_rejects_invalid_nonce(self, reset_auth_singletons, monkeypatch, tmp_path):
         """Test that login rejects requests with invalid/unknown nonces."""
-        import secrets
-
         storage_dir = tmp_path / "invalid_nonce_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         src.auth.token_store._token_store_instance = None
@@ -262,8 +262,6 @@ class TestSiweLogin:
                 return {"token": "siwe-encrypted-token"}
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         with pytest.raises(HTTPException) as exc:
             await _call_siwe_login(
@@ -459,8 +457,6 @@ class TestSiweValidationEdgeCases:
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         # The siwe.verify() method validates domain internally
         # When domain doesn't match, it raises an exception
         def _verify_with_domain_check(signature, domain=None, nonce=None, **kwargs):
@@ -479,8 +475,6 @@ class TestSiweValidationEdgeCases:
     @pytest.mark.asyncio
     async def test_rejects_expired_siwe_message(self, reset_auth_singletons, monkeypatch, tmp_path):
         """Test that login rejects expired SIWE messages."""
-        from siwe import ExpiredMessage
-
         storage_dir = tmp_path / "expired_siwe_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -502,8 +496,6 @@ class TestSiweValidationEdgeCases:
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         # Simulate expired message
         with patch.object(SiweMessage, "verify", side_effect=ExpiredMessage("Message has expired")):
             with pytest.raises(HTTPException) as exc:
@@ -519,8 +511,6 @@ class TestSiweValidationEdgeCases:
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
         """Test that login rejects SIWE messages with invalid signatures."""
-        from siwe import InvalidSignature
-
         storage_dir = tmp_path / "invalid_sig_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -541,8 +531,6 @@ class TestSiweValidationEdgeCases:
                 return {"domain": "localhost:5173"}
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         # Simulate invalid signature
         with patch.object(
@@ -568,8 +556,6 @@ class TestSiweValidationEdgeCases:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        from src.models.accounting import SiweLoginRequest
-
         # Send a completely malformed message
         with pytest.raises(HTTPException) as exc:
             await _call_siwe_login(
@@ -584,8 +570,6 @@ class TestSiweValidationEdgeCases:
     @pytest.mark.asyncio
     async def test_rejects_malformed_session(self, reset_auth_singletons, monkeypatch, tmp_path):
         """Test that login rejects SIWE messages with malformed session data."""
-        from siwe import MalformedSession
-
         storage_dir = tmp_path / "malformed_session_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -606,8 +590,6 @@ class TestSiweValidationEdgeCases:
                 return {"domain": "localhost:5173"}
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         # Simulate malformed session
         with patch.object(
@@ -655,8 +637,6 @@ class TestSiweTimestampValidation:
                 return {"domain": "localhost:5173"}
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
             with pytest.raises(HTTPException) as exc:
@@ -711,8 +691,6 @@ class TestSiweTimestampValidation:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -751,8 +729,6 @@ class TestSiweTimestampValidation:
                 return {"domain": "localhost:5173"}
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
             with pytest.raises(HTTPException) as exc:
@@ -805,8 +781,6 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
@@ -862,8 +836,6 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
@@ -962,8 +934,6 @@ class TestLoginRetryBehavior:
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
         """Test that the same nonce can be used again after a signature failure."""
-        from siwe import InvalidSignature
-
         storage_dir = tmp_path / "retry_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -995,8 +965,6 @@ class TestLoginRetryBehavior:
 
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        from src.models.accounting import SiweLoginRequest
 
         request = SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
 
@@ -1056,8 +1024,6 @@ class TestLoginRetryBehavior:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         request = SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
 
         # Verify nonce is valid before login
@@ -1113,8 +1079,6 @@ class TestMissingTimestampFields:
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         # Patch the parsed message to have no issued_at
         def _verify_no_op(*args, **kwargs):
             pass
@@ -1163,8 +1127,6 @@ class TestMissingTimestampFields:
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         def _verify_no_op(*args, **kwargs):
             pass
 
@@ -1193,8 +1155,6 @@ class TestChainIdValidation:
     @pytest.mark.asyncio
     async def test_rejects_disallowed_chain_id(self, reset_auth_singletons, monkeypatch, tmp_path):
         """Test that login rejects SIWE messages with chain_id not in allowed list."""
-        import src.config
-
         storage_dir = tmp_path / "chain_id_reject_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -1221,8 +1181,6 @@ class TestChainIdValidation:
 
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         with pytest.raises(HTTPException) as exc:
             await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -1234,8 +1192,6 @@ class TestChainIdValidation:
     @pytest.mark.asyncio
     async def test_accepts_allowed_chain_id(self, reset_auth_singletons, monkeypatch, tmp_path):
         """Test that login accepts SIWE messages with chain_id in allowed list."""
-        import src.config
-
         storage_dir = tmp_path / "chain_id_accept_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -1272,8 +1228,6 @@ class TestChainIdValidation:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -1287,8 +1241,6 @@ class TestChainIdValidation:
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
         """Test that built-in supported SIWE chains are allowed when no explicit list is set."""
-        import src.config
-
         storage_dir = tmp_path / "chain_id_default_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -1326,8 +1278,6 @@ class TestChainIdValidation:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -1341,8 +1291,6 @@ class TestChainIdValidation:
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
         """Test that hex chain IDs (e.g. 0x5afe) are parsed correctly from config."""
-        import src.config
-
         storage_dir = tmp_path / "chain_id_hex_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -1380,8 +1328,6 @@ class TestChainIdValidation:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -1399,8 +1345,6 @@ class TestConfigErrors:
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
         """Test that login fails when SIWE_DOMAINS is not configured."""
-        import src.config
-
         storage_dir = tmp_path / "missing_domain_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -1421,8 +1365,6 @@ class TestConfigErrors:
 
         test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
-
-        from src.models.accounting import SiweLoginRequest
 
         with pytest.raises(HTTPException) as exc:
             await _call_siwe_login(
@@ -1482,8 +1424,6 @@ class TestLoginAddressNormalization:
         monkeypatch.setattr(routes, "get_jwt_service", lambda: jwt_service)
         monkeypatch.setattr(routes, "_service", _MockAccountingService())
 
-        from src.models.accounting import SiweLoginRequest
-
         with patch.object(SiweMessage, "verify"):
             response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -1503,9 +1443,6 @@ class TestLoginFlowIntegration:
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
         """Test full login flow with real JWT service (not mocked)."""
-        import src.auth.jwt_keys
-        import src.auth.jwt_service
-
         storage_dir = tmp_path / "integration_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
@@ -1522,8 +1459,6 @@ class TestLoginFlowIntegration:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         # Use real JWT service
-        from src.auth.jwt_service import JWTService
-
         jwt_service = JWTService()
         monkeypatch.setattr(routes, "get_jwt_service", lambda: jwt_service)
 
@@ -1541,8 +1476,6 @@ class TestLoginFlowIntegration:
         siwe_msg = _build_siwe_message(TEST_ADDRESS, nonce_response.nonce)
 
         # Step 3: Login
-        from src.models.accounting import SiweLoginRequest
-
         with patch.object(SiweMessage, "verify"):
             login_response = await _call_siwe_login(
                 SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
@@ -1580,7 +1513,6 @@ class TestAuthDependencies:
         self, reset_auth_singletons, monkeypatch
     ):
         """Test that get_current_user returns a generic error message."""
-        from fastapi.security import HTTPAuthorizationCredentials
 
         class _JWTService:
             def get_address_from_token(self, token):

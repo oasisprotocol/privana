@@ -50,7 +50,7 @@ const config: HardhatUserConfig = {
       optimizer: {
         enabled: true,
         // Keep bytecode size below EIP-170 limits; large "runs" can bloat size significantly.
-        runs: 50,
+        runs: 20,
       },
       viaIR: true,
     },

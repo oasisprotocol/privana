@@ -2,331 +2,205 @@
 
 **Base URL:** `/v1/accounting`
 
-Requests and responses are JSON. Hex strings must include the `0x` prefix. Signatures follow the EIP-712 payloads defined in the contracts.
+This document is the **narrative companion** to the API. It explains *how* the flows fit together — the polling patterns, the auth choices, the status semantics — and points at the live OpenAPI spec for exact field shapes.
 
-## Authentication (private reads)
+## Source of Truth
 
-Balances and lock details are private.
+Exact request/response schemas (types, validation rules, defaults) are generated from the FastAPI app's Pydantic models. Three surfaces expose them:
 
-Supported authentication modes:
-1. **Direct SIWE on the Flexvaults auth origin**
-   - `GET /auth/domain` to fetch the configured SIWE domain.
-   - `GET /auth/nonce?address=<user>` to fetch a single-use nonce.
-   - Sign a SIWE message on the current wallet chain using that domain and nonce.
-   - `POST /auth/login` with `{ siwe_message, signature }`.
-   - Use the returned `jwt_access_token` as `Authorization: Bearer <token>` on private read endpoints.
-   - The returned `siwe_token` can also be passed via `X-SIWE-Token` for direct token-based private reads.
-   - Browser requests to `/auth/nonce` and `/auth/login` must originate from the configured Flexvaults auth origin. Non-browser clients may omit the `Origin` header.
-2. **Cross-domain / third-party apps**
-   - Redirect or open a popup to `GET /auth/authorize` with `client_id`, exact `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `chain_id`, `state`, and `response_mode`.
-   - The Flexvaults auth page performs SIWE on the canonical Flexvaults domain and returns a short-lived authorization code.
-   - If the wallet is already on a supported chain, the auth page signs there. Otherwise it switches to the requested `chain_id` and signs on that chain.
-   - Exchange that code at `POST /auth/token` with `grant_type=authorization_code`, the code, and the PKCE verifier to receive:
-     - `access_token` for Flexvaults API calls
-     - `id_token` for third-party backend identity verification
-     - `refresh_token` for Flexvaults access-token rotation
-   - Registered `redirect_uri` values must use `https`, except `http://localhost` / loopback development callbacks.
+| Surface | Where | Purpose |
+|---|---|---|
+| Committed spec | [`docs/openapi.json`](openapi.json) | **Authoritative snapshot.** Pin SDK builds and contract tests against this. Regenerated via `make openapi`; CI fails on drift. |
+| Swagger UI | `/docs` (running service) | Interactive exploration, "Try it out" requests, browseable schemas. |
+| ReDoc | `/redoc` (running service) | Read-only single-page view of the same spec. |
 
-## Endpoints
+If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`**. Contributors who change a Pydantic model must run `make openapi` and commit the regenerated file — the CI lint job runs `make openapi-check` and fails on drift.
 
-### POST `/quote/deposit`
-Generate deposit instructions and transaction data for a user/token/amount combination.
-- **Request body**
-  - `user_address` (string, required) – EVM address of the user.
-  - `token_id` (string, required) – Bytes32 token identifier (hex).
-  - `amount` (integer, required) – Amount to deposit in base units (e.g., wei for ETH).
-- **Response body**
-  - `user_address` (string) – Checksummed address.
-  - `token_id` (string) – Normalised bytes32 token identifier.
-  - `amount` (integer) – Amount to deposit.
-  - `deposit_address` (string) – ROFL-controlled destination address.
-  - `transaction` (object) – Transaction data to execute:
-    - `to` (string) – Destination address.
-    - `value` (string) – Value in wei (hex).
-    - `data` (string) – Transaction data (hex).
-    - `chain_id` (integer) – Chain ID for the transaction.
-  - `instructions` (string) – Deposit guidance for clients.
+## Conventions
 
-### POST `/deposits`
-Submit an EVM deposit inclusion transaction (automatically detects native/ERC20 based on token_id). Uses the `creditEVMDeposit` contract function.
-- **Request body**
-  - `user_address` (string, required) – Depositor address.
-  - `token_id` (string, required) – Bytes32 token identifier (hex).
-  - `evm_transaction_data` (string, required) – RLP-encoded EVM transaction payload.
-  - `rlp_block_header` (string, optional) – RLP-encoded block header.
-  - `transaction_index_rlp` (string, optional) – RLP-encoded transaction index.
-  - `transaction_proof_stack` (string, optional) – Merkle proof stack.
-- **Response body**
-  - `submission_id` (string) – ROFL submission identifier.
-  - `status` (string) – Submission status, e.g. `submitted`.
-- **Note:** This endpoint is specifically for EVM-compatible chains. Future endpoints for other blockchains (Solana, Sui, etc.) will be added separately.
+- **JSON** for all request and response bodies.
+- **Hex strings** include the `0x` prefix and are normalised to lowercase.
+- **Amounts** are integers in the token's base units (wei for ETH, smallest unit for ERC-20). Strings are accepted; scientific notation is parsed with `Decimal` to preserve precision.
+- **Signatures** are EIP-712 typed-data signatures. Each signed operation has its own typed-data schema defined in the contracts (`solidity/contracts/EVMSignerAndVerifier.sol`).
+- **Nonces** are per-user, per-operation. Always fetch the current nonce immediately before signing — locks, modify-lock, transfer, transfer-locked, and withdrawals each have their own nonce endpoint.
+- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for validation errors, `401` for missing/invalid auth, `422` for contract reverts, `429` for rate-limit, `500` for internal failures.
 
-### POST `/funds/lock`
-Lock user funds for a service using the user's EIP-712 signature.
-- **Request body**
-  - `user_address` (string, required).
-  - `service_address` (string, required).
-  - `token_id` (string, required).
-  - `amount` (integer, required).
-  - `expiry` (integer, required) – Unix timestamp.
-  - `signature` (string, required) – User EIP-712 `Lock` signature.
-- **Response body**
-  - `submission_id` (string).
-  - `status` (string).
-  - `detail` (string, optional).
+## Authentication
 
-### POST `/funds/modify-lock`
-Modify an existing lock by adding funds and/or extending the expiry.
-- **Request body**
-  - `user_address` (string, required) – Owner of the lock.
-  - `lock_id` (integer, required) – ID of the lock to modify.
-  - `amount` (integer, required) – Amount to add in base units (use 0 to only extend expiry).
-  - `new_expiry` (integer, required) – New expiry timestamp (must be >= current expiry).
-  - `signature` (string, required) – User EIP-712 `ModifyLock` signature.
-- **Response body**
-  - `submission_id` (string).
-  - `status` (string).
-  - `detail` (string, optional).
-- **Note:** At least one of `amount > 0` or `new_expiry > current_expiry` must be true; otherwise the call is rejected as a no-op.
+Most write operations are authorized **per-request** by an EIP-712 signature embedded in the body — no session needed.
 
-### GET `/funds/locked`
-Get locked funds for the authenticated user, optionally filtered by `service_address`.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
-  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
-- **Query parameters**
-  - `service_address` (string, optional) – Filter locks by service.
-- **Note**
-  - `service_address` is a response filter on user-authenticated reads. It does not grant service-only access. Service backends should use contract-level `getServiceLocks(...)` with Sapphire authenticated view calls.
+A subset of endpoints expose **private state** (per-user balances, locks, deposit address) and require an authenticated session token instead. Two flows produce one:
 
-### POST `/funds/transfer`
-Transfer balances between users with the originator's EIP-712 signature.
-- **Request body**
-  - `user_address` (string, required).
-  - `to_address` (string, required).
-  - `token_id` (string, required).
-  - `amount` (integer, required).
-  - `signature` (string, required) – User EIP-712 `Transfer` signature.
-- **Response body** – same structure as `/funds/lock`.
+### 1. Direct SIWE (first-party Flexvaults origin)
 
-### POST `/funds/transfer-locked`
-Consume or release locked funds using the service's EIP-712 signature.
-- **Request body**
-  - `user_address` (string, required) – Owner of the lock.
-  - `lock_id` (integer, required).
-  - `to_address` (string, required).
-  - `amount` (integer, required).
-  - `signature` (string, required) – Service EIP-712 `TransferLocked` signature.
-- **Response body** – same structure as `/funds/lock`.
+```
+GET  /auth/domain                       → which SIWE domain to sign
+GET  /auth/nonce?address=<user>         → single-use SIWE nonce
+POST /auth/login {siwe_message, sig}    → siwe_token + JWT pair
+```
 
-### POST `/funds/unlock`
-Unlock a single expired lock without a signature.
-- **Request body**
-  - `user_address` (string, required).
-  - `lock_id` (integer, required).
-- **Response body** – same structure as `/funds/lock`.
+The login response returns:
+- `siwe_token` — encrypted Sapphire AuthToken; pass via `X-SIWE-Token` header for direct on-chain confidential reads.
+- `jwt_access_token` / `jwt_refresh_token` — pass `Authorization: Bearer <jwt_access_token>` for normal API auth.
 
-### POST `/funds/unlock-all-expired`
-Unlock all expired locks for a user in a single transaction.
-- **Request body**
-  - `user_address` (string, required).
-- **Response body**
-  - `submission_id` (string) – ROFL submission identifier.
-  - `status` (string) – Submission status.
-  - `detail` (string, optional).
+Browser requests to `/auth/nonce` and `/auth/login` are **origin-checked** — they must come from a configured Flexvaults SIWE origin. Non-browser clients (no `Origin` header) are accepted.
 
-### GET `/funds/expired`
-Get all expired locks for the authenticated user.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
-  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
-- **Response body**
-  - `user_address` (string) – Checksummed user address.
-  - `expired_locks` (array) – List of expired lock records:
-    - `lock_id` (integer)
-    - `user_address` (string)
-    - `service_address` (string)
-    - `token_id` (string)
-    - `amount` (integer)
-    - `expiry` (integer)
-    - `is_expired` (boolean, always `true`)
+### 2. OAuth-style cross-domain (third-party apps)
 
-### GET `/withdraw/nonce/{user_address}`
-Get the current withdrawal nonce for a user. Use this nonce in `POST /withdraw` and include it in the EIP-712 `Withdraw` signature.
-- **Path parameters**
-  - `user_address` (string, required) – User's EVM address.
-- **Response body**
-  - `user_address` (string) – Checksummed user address.
-  - `nonce` (integer) – Current withdrawal nonce.
+For apps on other origins, use the hosted authorization page with PKCE:
 
-### POST `/withdraw`
-Request a withdrawal based on the user's EIP-712 signature. This schedules the withdrawal for resolution in a later block (simulation attack protection). The user's balance is debited immediately and a nonce is reserved for the withdrawal transaction.
-- **Request body**
-  - `user_address` (string, required).
-  - `token_id` (string, required).
-  - `amount` (integer, required).
-  - `nonce` (integer, required) – Current withdrawal nonce for the user (use `GET /withdraw/nonce/{user_address}`).
-  - `signature` (string, required) – User EIP-712 `Withdraw` signature.
-- **Response body**
-  - `submission_id` (string) – ROFL submission identifier.
-  - `status` (string) – Submission status, e.g. `submitted`.
-  - `detail` (string, optional) – Metadata such as `chain_id` and `token_address`.
-- **Note:** Withdrawals are automatically resolved by the backend after the required block delay. Frontend clients only need to call this endpoint once. Use `/withdraw/pending/{user_address}` to check withdrawal status.
+```
+GET  /auth/authorize?client_id=…&redirect_uri=…&code_challenge=…&state=…&chain_id=…
+                                              → HTML page; user signs SIWE on Flexvaults origin
+POST /auth/authorize {siwe_message, sig, …}   → short-lived `code`
+POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
+                                              → access_token + id_token + refresh_token
+```
 
-### GET `/withdraw/pending/{user_address}`
-Get all pending (unresolved) withdrawal requests for a user. Use this to display withdrawal status in the UI.
-- **Path parameters**
-  - `user_address` (string, required) – User's EVM address.
-- **Response body**
-  - `user_address` (string) – Checksummed user address.
-  - `pending_withdrawals` (array) – List of pending withdrawal requests:
-    - `index` (integer) – Withdrawal request index.
-    - `user_address` (string) – Address of the user who requested the withdrawal.
-    - `amount` (string) – Amount requested in base units.
-    - `block_number` (integer) – Block number when the withdrawal was requested.
-    - `token_id` (string) – Token identifier.
-    - `resolved` (boolean) – Always `false` for pending withdrawals.
-    - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
+- `code_challenge_method` must be `S256`.
+- `redirect_uri` must exactly match a value registered for the client. `http://localhost` and loopback callbacks are allowed; everything else must be `https`.
+- `id_token` is client-scoped (audience = configured client audience or `client_id`) — use it for third-party backend identity verification, not for Flexvaults API calls.
 
-### GET `/withdraw/{index}`
-Get information about a specific withdrawal request.
-- **Path parameters**
-  - `index` (integer, required) – Index of the withdrawal request.
-- **Response body**
-  - `index` (integer) – Withdrawal request index.
-  - `user_address` (string) – Address of the user who requested the withdrawal.
-  - `amount` (string) – Amount requested in base units.
-  - `block_number` (integer) – Block number when the withdrawal was requested.
-  - `token_id` (string) – Token identifier.
-  - `resolved` (boolean) – Whether the withdrawal has been resolved.
-  - `tx_identifier` (string) – Transaction identifier (nonce) reserved for this withdrawal.
+### Endpoint matrix
 
-### GET `/balances/{token_id}`
-Get the authenticated user's balance for a specific token.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
-  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
+| Endpoint | Auth | Auth header |
+|---|---|---|
+| `POST /deposits/address` | required | `Authorization: Bearer …` or `X-SIWE-Token` |
+| `POST /deposits/check` | required | same |
+| `GET /deposits/status/{id}` | required | same |
+| `POST /funds/withdraw-from-lock` | required | same |
+| `GET /balances/{token_id}` | required | same |
+| `POST /balances/batch` | required | same |
+| `GET /funds/locked` | required | same |
+| `GET /funds/locked/total/{token_id}` | required | same |
+| `GET /funds/expired` | required | same |
+| `POST /auth/jwt/logout`, `GET /auth/jwt/me` | required | `Authorization: Bearer …` |
+| Everything else | none (signature-gated where applicable) | — |
 
-### POST `/balances/batch`
-Get balances for multiple tokens for the authenticated user.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
-  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
-- **Request body**
-  - `token_ids` (array[string], required) – Bytes32 token identifiers (hex), max 100 items
+`Authorization` and `X-SIWE-Token` are mutually exclusive — sending both yields `400`.
 
-### GET `/funds/locked/total/{token_id}`
-Get total locked balance for a specific token across all locks for the authenticated user.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (preferred) – JWT access token from `POST /auth/login` or `POST /auth/token`.
-  - `X-SIWE-Token` (direct SIWE token flow) – Encrypted SIWE token from `POST /auth/login`.
+## Deposit Flow
 
-### GET `/auth/domain`
-Get the configured SIWE domain that clients must use in the SIWE message.
+The deposit path is **address-based**: the contract derives a per-user address (one per `chain_type` × `version`), the user funds it directly, and the backend verifies + sweeps + credits.
 
-### GET `/auth/nonce`
-Get a single-use nonce for SIWE login.
-- **Query parameters**
-  - `address` (string, required) – User's EVM address.
-- **Response body**
-  - `address` (string) – Checksummed Ethereum address associated with the nonce.
-  - `nonce` (string)
-  - `expires_in` (integer) – Nonce TTL in seconds.
-- **Browser restriction**
-  - Browser requests must originate from the configured Flexvaults auth origin.
+```
+1. POST /deposits/address           → returns the user's per-user deposit address
+                                      (auth-gated — only the user can learn it)
+2. user sends funds to that address on the source chain
+3. POST /deposits/check             → backend verifies the tx, returns 202
+                                      with status="pending" and a deposit_id
+4. GET /deposits/status/{deposit_id}  → poll until status="credited"
+```
 
-### POST `/auth/login`
-Perform SIWE login, mint an encrypted Sapphire auth token, and issue JWT credentials.
-- **Request body**
-  - `siwe_message` (string, required)
-  - `signature` (string, required) – `signMessage` signature for the SIWE message (hex)
-- **Browser restriction**
-  - Browser requests must originate from the configured Flexvaults auth origin.
-- **Response body**
-  - `siwe_token` (string) – Encrypted SIWE token (hex) for direct `X-SIWE-Token` private reads.
-  - `jwt_access_token` (string) – JWT access token for `Authorization: Bearer`.
-  - `jwt_refresh_token` (string) – Refresh token for `POST /auth/jwt/refresh`.
-  - `address` (string) – Authenticated Ethereum address.
-  - `jwt_expires_in` (integer) – Access-token TTL in seconds.
-  - `jwt_refresh_expires_in` (integer) – Refresh-token TTL in seconds.
+Behaviour notes:
 
-### POST `/auth/jwt/refresh`
-Rotate a refresh token and obtain a fresh access token pair.
-- **Request body**
-  - `refresh_token` (string, required)
-- **Response body**
-  - `token` (string) – New JWT access token.
-  - `refresh_token` (string) – New refresh token.
-  - `expires_in` (integer)
-  - `refresh_expires_in` (integer)
+- `POST /deposits/check` is **idempotent**. If the same `(chain_id, tx_hash, log_index)` is submitted twice, the second call short-circuits — returning `200` with `status="credited"` once the credit has landed on Sapphire, or `202` with `status="pending"` while the sweep is still running.
+- Sweeps run as background tasks. The processor returns within ~2-3s. Don't block on the response — poll `GET /deposits/status/{deposit_id}`.
+- The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
+- The `min_deposit` field of the address response is a per-chain map — clients should use it to gate the UI.
 
-### POST `/auth/jwt/logout`
-Revoke one refresh token or all refresh tokens for the current JWT-authenticated user.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (required)
-- **Request body**
-  - `refresh_token` (string, optional) – Specific refresh token to revoke.
-  - `revoke_all` (boolean, optional) – Revoke all refresh tokens belonging to the caller.
+## Withdrawal Flow
 
-### GET `/auth/jwt/jwks.json`
-Return the public JWKS document used to verify JWTs issued by this service.
+```
+1. GET /withdraw/nonce/{user}       → current nonce, sign EIP-712 Withdraw(nonce, …)
+2. POST /withdraw {…, nonce, sig}   → balance debited immediately, nonce reserved,
+                                      withdrawal queued for later block
+3. GET /withdraw/pending/{user}     → poll; resolution + broadcast happens automatically
+                                      in the WithdrawalProcessor (~12s loop)
+```
 
-### GET `/auth/jwt/me`
-Return the authenticated Ethereum address for the provided access token.
-- **Headers**
-  - `Authorization: Bearer <access_token>` (required)
+- The user's balance is debited at request time. Resolution is delayed by one block (simulation-attack protection) and runs in a background poll loop on the service side — frontends do **not** need to call `resolveWithdrawal` themselves.
+- Withdrawals are processed **sequentially per destination chain** to preserve nonce ordering. A failure on one chain does not block others.
+- `GET /withdraw/{index}` returns information about a specific withdrawal (resolved or not) — useful for status pages and audit views.
 
-### GET `/auth/authorize`
-Serve the Flexvaults authorization page used for cross-domain sign-in.
-- **Query parameters**
-  - `client_id` (string, required)
-  - `redirect_uri` (string, required) – Must exactly match a registered URI for the client.
-  - `code_challenge` (string, required)
-  - `code_challenge_method` (string, required) – Only `S256` is supported.
-  - `chain_id` (integer, required) – Preferred fallback chain for hosted SIWE. If the wallet is already on another supported chain, the auth page signs there without switching.
-  - `state` (string, required)
-  - `response_mode` (string, optional) – `web_message` or `redirect`. Defaults to `web_message`.
+## Lock Flow
 
-### POST `/auth/authorize`
-Verify SIWE on the Flexvaults auth origin and mint a short-lived authorization code.
-- **Request body**
-  - `siwe_message` (string, required)
-  - `signature` (string, required)
-  - `client_id` (string, required)
-  - `redirect_uri` (string, required) – Must exactly match the registered URI.
-  - `code_challenge` (string, required)
-  - `code_challenge_method` (string, required) – Only `S256` is supported.
-- **Browser restriction**
-  - Browser requests must originate from the configured Flexvaults auth origin.
-- **Response body**
-  - `code` (string) – Single-use authorization code.
+Locks are escrow primitives: a user locks funds for a service, and the service can spend within the locked amount until expiry; after expiry, anyone can release the funds back to the user.
 
-### POST `/auth/token`
-Exchange an authorization code and PKCE verifier for JWT credentials.
-- **Request body**
-  - `grant_type` (string, required) – Must be `authorization_code`.
-  - `code` (string, required)
-  - `code_verifier` (string, required)
-  - `client_id` (string, required)
-  - `redirect_uri` (string, required) – Must exactly match the authorization request.
-- **Response body**
-  - `access_token` (string) – JWT access token for Flexvaults API calls only.
-  - `id_token` (string) – Client-scoped identity token for third-party backend verification. The audience comes from the configured auth client audience and defaults to `client_id`.
-  - `refresh_token` (string) – Refresh token for rotating the Flexvaults API access token.
-  - `token_type` (string) – `Bearer`
-  - `expires_in` (integer)
-  - `refresh_expires_in` (integer)
-  - `address` (string)
+| Endpoint | Signer | Purpose |
+|---|---|---|
+| `GET /funds/lock/nonce/{user}` | — | Fetch nonce for `LockFunds` EIP-712 |
+| `POST /funds/lock` | user | Create a new lock (`{user_address, service_address, token_id, amount, expiry, nonce, signature}`) |
+| `GET /funds/modify-lock/nonce/{user}` | — | Fetch nonce for `ModifyLock` EIP-712 |
+| `POST /funds/modify-lock` | user | Add funds and/or extend expiry. At least one of `amount > 0` or `new_expiry > current_expiry` must hold; pure no-ops are rejected. |
+| `GET /funds/transfer-locked/nonce/{service}` | — | Fetch nonce for `TransferFromLock` EIP-712 |
+| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`) |
+| `POST /funds/withdraw-from-lock` | user (auth) | User withdraws locked funds directly to an external destination (`{to_address, lock_id, amount, nonce, signature}` — the user is resolved from the auth header, not the body) |
+| `POST /funds/unlock` | — | Unlock a single expired lock (`{user_address, lock_id}`, no signature; reverts if not yet expired) |
+| `POST /funds/unlock-all-expired` | — | Unlock every expired lock for a user in one tx |
 
-### GET `/tokens/{token_id}`
-Get information about a registered token.
-- **Path parameters**
-  - `token_id` (string, required) – Token identifier (bytes32 hex).
-- **Response body**
-  - `token_id` (string) – Token identifier.
-  - `token_type` (integer) – Token type (0 = NativeEVM, 1 = ERC20).
-  - `token_type_name` (string) – Human-readable token type.
-  - `data` (string) – Raw token data (hex).
-  - `chain_id` (integer, optional) – Chain ID for the token.
-  - `chain_name` (string, optional) – Human-readable chain name.
-  - `token_address` (string, optional) – ERC20 contract address (only for ERC20 tokens).
+Reads:
+- `GET /funds/locked` (auth) — active locks; optional `?service_address=…` is a **response-side filter only**, not an authorization gate. Service backends should hit the contract's `getServiceLocks(...)` directly with their own SIWE token.
+- `GET /funds/locked/total/{token_id}` (auth) — total locked across all the user's locks for a token.
+- `GET /funds/expired` (auth) — every expired lock for the authenticated user.
+
+## Transfer Flow
+
+Direct user-to-user balance transfer inside the accounting module — no on-chain settlement.
+
+```
+GET  /funds/transfer/nonce/{user}     → current Transfer nonce
+POST /funds/transfer                  → {user_address, to_address, token_id, amount, nonce, signature}
+```
+
+The signature is an EIP-712 `Transfer` from the source user.
+
+## Private Read Endpoints
+
+All require a session token (`Authorization: Bearer …` or `X-SIWE-Token`). The user is resolved from the token; never trust a user address in the body for reads.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /balances/{token_id}` | One token balance for the caller. |
+| `POST /balances/batch` | Up to 100 token balances in one round trip. Body: `{token_ids: string[]}`. |
+| `GET /funds/locked` | Active locks (optional `?service_address` filter). |
+| `GET /funds/locked/total/{token_id}` | Sum of locked amounts for one token. |
+| `GET /funds/expired` | Locks past their expiry. |
+
+A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid or expired SIWE token` — clients should reauth and retry.
+
+## Public Read Endpoints
+
+| Endpoint | Returns |
+|---|---|
+| `GET /tokens` | List of every registered token. |
+| `GET /tokens/{token_id}` | One token's metadata: type, chain, address, symbol, decimals. |
+| `GET /withdraw/{index}` | Public withdrawal record. |
+| `GET /withdraw/pending/{user}` | Pending withdrawals (public — knowing pending state isn't sensitive). |
+| `GET /withdraw/nonce/{user}` | Current withdrawal nonce. |
+| `GET /funds/transfer/nonce/{user}` | Current transfer nonce. |
+| `GET /funds/lock/nonce/{user}` | Current createLock nonce. |
+| `GET /funds/modify-lock/nonce/{user}` | Current modifyLock nonce. |
+| `GET /funds/transfer-locked/nonce/{service}` | Current transferFromLock nonce. |
+
+## Auth Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /auth/domain` | Configured SIWE domain. |
+| `GET /auth/nonce?address=…` | Single-use SIWE nonce. Browser-origin-checked. Rate-limited. |
+| `POST /auth/login` | SIWE login → `siwe_token` + JWT pair. Browser-origin-checked. Rate-limited. |
+| `POST /auth/jwt/refresh` | Rotate the refresh token; returns a fresh access/refresh pair. |
+| `POST /auth/jwt/logout` (Bearer) | Revoke one or all refresh tokens for the current user. |
+| `GET /auth/jwt/jwks.json` | JWKS document for verifying issued JWTs. |
+| `GET /auth/jwt/me` (Bearer) | Returns the authenticated address. Useful for client-side identity checks. |
+| `GET /auth/authorize` | HTML auth page for cross-domain sign-in. Query params: `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `chain_id`, `state`, `response_mode`. |
+| `POST /auth/authorize` | Verify SIWE on the Flexvaults origin and mint a short-lived authorization code. Browser-origin-checked. Rate-limited. |
+| `POST /auth/token` | Exchange an authorization code + PKCE verifier for `access_token`, `id_token`, `refresh_token`. |
+
+## Status Code Semantics
+
+| Code | Meaning |
+|---|---|
+| `200 OK` | Synchronous success — the response body has the result. |
+| `202 Accepted` | Work continues in the background. Currently only `POST /deposits/check` when a sweep is in flight. Poll the corresponding status endpoint. |
+| `400 Bad Request` | Pydantic validation, malformed hex/address, business rule violation (e.g. modify-lock no-op). |
+| `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once. |
+| `404 Not Found` | Status check for an unknown deposit. |
+| `422 Unprocessable Entity` | Contract revert (transaction submitted but the chain rejected it). The response `detail` carries the revert reason when available. |
+| `429 Too Many Requests` | Auth rate-limiter tripped. Honour the `Retry-After` header. |
+| `500 Internal Server Error` | Unexpected failure in the service layer. Errors are logged with stack traces — file an issue with the request id. |
+
+## Schemas
+
+For exact request/response shapes — including field types, constraints, and enum values — read [`docs/openapi.json`](openapi.json) (committed snapshot) or browse `/docs` against a running service. The Pydantic source models live in `src/models/accounting.py` and `src/models/authorize.py`.

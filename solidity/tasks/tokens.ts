@@ -111,7 +111,7 @@ task("transferERC20")
     console.log("\nRaw receipt status:", rawReceipt.status);
     console.log("Receipt type field:", rawReceipt.type);
 
-    console.log("\n=== Use these values for creditEVMDeposit ===");
+    console.log("\n=== Transaction details ===");
     console.log("Block number:", receipt?.blockNumber);
     console.log("Transaction index:", receipt?.index);
     console.log("User address:", signer.address);

@@ -1,10 +1,11 @@
-.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage format format-check
+.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage format format-check openapi openapi-check
 
 install:
 	uv sync --no-dev
 
 dev:
 	uv sync
+	-uv run pre-commit install
 
 run:
 	uv run python -m src.main
@@ -26,6 +27,12 @@ format:
 
 format-check:
 	uv run ruff format --check src test
+
+openapi:
+	uv run python scripts/gen_openapi.py > docs/openapi.json
+
+openapi-check:
+	uv run python scripts/gen_openapi.py --check
 
 clean:
 	rm -rf .venv __pycache__ .pytest_cache .ruff_cache

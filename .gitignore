@@ -64,6 +64,8 @@ venv.bak/
 *.swp
 *.swo
 *~
+.superset/
+.claude/worktrees/
 
 # OS
 .DS_Store

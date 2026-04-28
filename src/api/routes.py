@@ -3,7 +3,7 @@
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -22,15 +22,16 @@ from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
 from src.config import load_settings
+from src.config.chain_config import MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
 from src.models.accounting import (
     BalanceResponse,
     BatchBalancesRequest,
     BatchBalancesResponse,
-    DepositQuoteRequest,
-    DepositQuoteResponse,
+    DepositAddressRequest,
+    DepositAddressResponse,
+    DepositCheckRequest,
+    DepositCheckResponse,
     ExpiredLocksResponse,
-    IncludeDepositRequest,
-    IncludeDepositResponse,
     LockedFundsResponse,
     LockFundsRequest,
     LockNonceResponse,
@@ -54,11 +55,14 @@ from src.models.accounting import (
     WithdrawalInfoResponse,
     WithdrawalNonceResponse,
     WithdrawalRequest,
+    WithdrawFromLockRequest,
+    _normalise_hex,
 )
 from src.services.accounting_contract import (
     SubmissionResult,
     get_accounting_contract_service,
 )
+from src.services.deposit_processor import get_deposit_processor
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +125,39 @@ def _require_private_read_auth(
     return PrivateReadAuth(bytes(raw), auth_token.user_addr)
 
 
+async def _require_user_and_private_read_token(
+    current_user: Optional[str] = Depends(get_current_user_optional),
+    token: Optional[str] = Header(None, alias=_SIWE_TOKEN_HEADER),
+) -> tuple[str, bytes]:
+    """Authenticate and return (user_address, siwe_token).
+
+    JWT path: address from JWT, SIWE token minted server-side.
+    SIWE path: address resolved on-chain via authSender(), token used directly.
+    """
+    if current_user:
+        return current_user, _mint_private_read_token(current_user)
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Missing Authorization bearer token or {_SIWE_TOKEN_HEADER} header",
+        )
+    try:
+        raw = bytes(HexBytes(token))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {_SIWE_TOKEN_HEADER} header") from exc
+    try:
+        address = await _service.resolve_address_from_token(raw)
+    except Exception as exc:
+        logger.warning(
+            "resolve_address_from_token failed: %s: %s (token length: %d bytes)",
+            type(exc).__name__,
+            exc,
+            len(raw),
+        )
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+    return address, raw
+
+
 def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
     settings = load_settings()
     retry_after = get_auth_rate_limiter().hit(
@@ -153,39 +190,119 @@ def _enforce_browser_auth_origin(request: Request) -> None:
 
 def _wrap_submission(result: SubmissionResult) -> TransactionSubmissionResponse:
     return TransactionSubmissionResponse(
+        submission_id=result.submission_id,
         status=result.status,
         detail=result.detail,
     )
 
 
-@router.post("/quote/deposit", response_model=DepositQuoteResponse)
-async def create_deposit_quote(payload: DepositQuoteRequest) -> DepositQuoteResponse:
-    """Return deposit destination details and transaction data for a user/token/amount."""
-
+@router.post("/deposits/address", response_model=DepositAddressResponse)
+async def get_deposit_address(
+    payload: DepositAddressRequest,
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
+) -> DepositAddressResponse:
+    """Get the user's dedicated per-user deposit address."""
     try:
-        quote: Dict = await _service.deposit_quote(
-            payload.user_address, payload.token_id, payload.amount
+        address = await _service.get_deposit_address(
+            payload.chain_type, payload.version, auth.token
         )
-        return DepositQuoteResponse(**quote)
+        return DepositAddressResponse(
+            deposit_address=address,
+            chain_type=payload.chain_type,
+            version=payload.version,
+            min_deposit={
+                str(cid): {
+                    "native": str(MIN_DEPOSIT_NATIVE_WEI.get(cid, 0)),
+                    "erc20": str(MIN_DEPOSIT_ERC20_WEI.get(cid, 0)),
+                }
+                for cid in MIN_DEPOSIT_NATIVE_WEI
+            },
+        )
+    except ContractLogicError as exc:
+        if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
+            raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+        logger.error("Contract revert in get_deposit_address: %s", exc)
+        raise HTTPException(status_code=422, detail="Contract call failed") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get deposit address")
+        raise HTTPException(status_code=500, detail="Failed to get deposit address") from exc
 
 
-@router.post("/deposits", response_model=IncludeDepositResponse)
-async def include_deposit(payload: IncludeDepositRequest) -> IncludeDepositResponse:
-    """Submit a deposit inclusion transaction (automatically detects native/ERC20)."""
+@router.post("/deposits/check", response_model=DepositCheckResponse)
+async def check_deposit(
+    payload: DepositCheckRequest,
+    response: Response,
+    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+) -> DepositCheckResponse:
+    """Verify a deposit and start the sweep in the background.
 
+    Returns 200 with status="credited" for idempotent replays.
+    Returns 202 with status="pending" when sweep is started or in progress.
+    Clients poll GET /deposits/status/{deposit_id} for completion.
+    """
+    beneficiary, siwe_token = auth
     try:
-        result = await _service.include_deposit(payload.model_dump())
-        return IncludeDepositResponse(status=result.status)
+        processor = get_deposit_processor()
+        result = await processor.process_deposit(
+            beneficiary=beneficiary,
+            chain_type=payload.chain_type,
+            chain_id=payload.chain_id,
+            tx_hash=payload.tx_hash,
+            amount=payload.amount,
+            log_index=payload.log_index,
+            version=payload.version,
+            siwe_token=siwe_token,
+        )
+        resp = DepositCheckResponse(**result)
+        if resp.status == "pending":
+            response.status_code = 202
+        return resp
+    except ContractLogicError as exc:
+        if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
+            raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+        logger.error("Contract revert in deposit check: %s", exc)
+        raise HTTPException(status_code=422, detail="Deposit credit failed") from exc
     except ValueError as exc:
+        logger.warning("Deposit check rejected: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except TransactionRevertedError as exc:
-        logger.error("Deposit inclusion transaction reverted: %s", exc)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - network errors
-        logger.exception("Failed to submit deposit inclusion")
-        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+    except Exception as exc:
+        logger.exception("Failed to process deposit")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
+
+
+@router.get("/deposits/status/{deposit_id}", response_model=DepositCheckResponse)
+async def get_deposit_status(
+    deposit_id: str,
+    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+) -> DepositCheckResponse:
+    """Poll deposit status by deposit_id.
+
+    Returns credited/pending/error based on sweep state.
+    Falls through to on-chain check when no in-memory record exists.
+    """
+    beneficiary, _siwe_token = auth
+    deposit_id_hex = _normalise_hex(deposit_id)
+
+    processor = get_deposit_processor()
+
+    # Fast path: check in-memory sweep record
+    local_status = processor.get_deposit_status(deposit_id_hex, beneficiary)
+    if local_status is not None:
+        return DepositCheckResponse(**local_status)
+
+    # No in-flight record — check on-chain
+    try:
+        deposit_id_bytes = bytes.fromhex(deposit_id_hex.removeprefix("0x"))
+        is_processed = await _service.is_deposit_processed(deposit_id_bytes)
+        if is_processed:
+            return DepositCheckResponse(status="credited", deposit_id=deposit_id_hex)
+    except Exception:
+        logger.exception("Failed to check deposit status on-chain for %s", deposit_id_hex)
+        raise HTTPException(status_code=500, detail="Failed to check deposit status")
+
+    raise HTTPException(status_code=404, detail=f"No deposit found for key {deposit_id_hex}")
 
 
 @router.post("/funds/lock", response_model=TransactionSubmissionResponse)
@@ -316,6 +433,28 @@ async def transfer_locked_funds(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer locked funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.post("/funds/withdraw-from-lock", response_model=TransactionSubmissionResponse)
+async def withdraw_from_lock(
+    payload: WithdrawFromLockRequest,
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
+) -> TransactionSubmissionResponse:
+    """Withdraw locked funds directly to an external destination."""
+
+    try:
+        submission = await _service.withdraw_from_lock(
+            payload.model_dump(), auth.user_address, auth.token
+        )
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Withdraw-from-lock transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to withdraw from lock")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
