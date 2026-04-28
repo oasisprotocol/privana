@@ -89,7 +89,7 @@ def _get_bool(name: str, default: bool) -> bool:
 def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
     if not alchemy_api_key or alchemy_api_key == "your-alchemy-api-key-here":
         logging.warning(
-            "ALCHEMY_API_KEY not configured. Proof generation will fail. "
+            "ALCHEMY_API_KEY not configured. Deposit verification will fail. "
             "Get an API key from https://dashboard.alchemy.com/"
         )
         return {}
@@ -118,19 +118,10 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_contract_address=os.getenv(
                 "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
             ),
-            rofl_adapter_address=os.getenv("ROFL_ADAPTER_ADDRESS", _defaults.rofl_adapter_address),
             sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
             accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit),
             chain_rpc_urls=chain_rpc_urls,
-            deposit_poll_interval=_get_int(
-                "DEPOSIT_POLL_INTERVAL", _defaults.deposit_poll_interval
-            ),
-            deposit_batch_size=_get_int("DEPOSIT_BATCH_SIZE", _defaults.deposit_batch_size),
-            deposit_lookback_blocks=_get_int(
-                "DEPOSIT_LOOKBACK_BLOCKS", _defaults.deposit_lookback_blocks
-            ),
-            deposit_reset_state=_get_bool("DEPOSIT_RESET_STATE", _defaults.deposit_reset_state),
             withdrawal_poll_interval=_get_int(
                 "WITHDRAWAL_POLL_INTERVAL", _defaults.withdrawal_poll_interval
             ),

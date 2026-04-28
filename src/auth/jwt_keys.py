@@ -9,6 +9,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from src.clients.rofl import RoflAppdClient
+
 logger = logging.getLogger(__name__)
 
 JWT_SIGNING_KEY_ID = "jwt_signing_seed.key"
@@ -32,8 +34,6 @@ class JWTKeyManager:
         Returns:
             32-byte seed derived from ROFL key generation.
         """
-        from src.clients.rofl import RoflAppdClient
-
         client = RoflAppdClient()
         # generate_key returns a hex string of 32 bytes (64 chars)
         seed_hex = await client._client.generate_key(JWT_SIGNING_KEY_ID)

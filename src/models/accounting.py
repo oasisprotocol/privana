@@ -3,9 +3,40 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import ClassVar, Optional
+from enum import IntEnum
+from typing import ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class ChainType(IntEnum):
+    """Chain family used for deposit-address derivation.
+
+    Mirrors the Solidity ``ChainType`` enum in ``Types.sol``. Values must stay
+    in sync with the contract: one deposit address serves all chains within
+    the same family, so this dimension is intentionally coarser than chainId.
+    """
+
+    EVM = 0
+
+
+_CHAIN_TYPE_BY_NAME: dict[str, ChainType] = {"evm": ChainType.EVM}
+
+
+def parse_chain_type(value: str) -> ChainType:
+    """Translate a wire-format string (e.g. ``"evm"``) into the on-chain enum value.
+
+    Accepts the lowercase name of a :class:`ChainType` variant; comparison is
+    case-insensitive. Raises :class:`ValueError` for unknown values. v1 only
+    recognises ``"evm"``.
+
+    Used at the HTTP boundary and at contract-call sites so the magic string
+    never leaves the translation layer.
+    """
+    try:
+        return _CHAIN_TYPE_BY_NAME[value.lower()]
+    except (AttributeError, KeyError) as exc:
+        raise ValueError(f"Unknown chain_type: {value!r}") from exc
 
 
 def _normalise_hex(value: str) -> str:
@@ -72,43 +103,6 @@ class DepositQuoteResponse(BaseModel):
     deposit_address: str
     transaction: TransactionData
     instructions: str
-
-
-class IncludeDepositRequest(BaseModel):
-    """Base payload for including an observed deposit."""
-
-    user_address: str = Field(..., min_length=1)
-    token_id: str = Field(..., min_length=4)
-    evm_transaction_data: str = Field(..., description="RLP encoded transaction payload (hex)")
-    rlp_block_header: Optional[str] = Field(
-        None, description="Optional RLP block header proof (hex)"
-    )
-    transaction_index_rlp: Optional[str] = Field(
-        None, description="Optional RLP encoded tx index proof (hex)"
-    )
-    transaction_proof_stack: Optional[str] = Field(
-        None, description="Optional proof stack data (hex)"
-    )
-
-    @field_validator("token_id", "evm_transaction_data")
-    def _normalise_required_hex(cls, value: str) -> str:
-        return _normalise_hex(value)
-
-    @field_validator(
-        "rlp_block_header",
-        "transaction_index_rlp",
-        "transaction_proof_stack",
-    )
-    def _normalise_optional_hex(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return value
-        return _normalise_hex(value)
-
-
-class IncludeDepositResponse(BaseModel):
-    """Response after submitting a deposit inclusion transaction."""
-
-    status: str
 
 
 class LockFundsRequest(BaseModel):
@@ -189,6 +183,24 @@ class TransferLockedFundsRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class WithdrawFromLockRequest(BaseModel):
+    """Payload for withdrawing funds directly from a lock to an external address."""
+
+    to_address: str = Field(..., min_length=1)
+    lock_id: int = Field(..., ge=1)
+    amount: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
+    signature: str
+
+    @field_validator("amount", "nonce", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("signature")
+    def _normalise_wfl_signature(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
 class UnlockFundsRequest(BaseModel):
     """Payload for unlocking funds after expiry."""
 
@@ -219,6 +231,7 @@ class WithdrawalInfo(BaseModel):
 
     index: int
     user_address: str
+    to_address: str
     amount: str
     block_number: int
     token_id: str
@@ -242,6 +255,7 @@ class PendingWithdrawalsResponse(BaseModel):
 class TransactionSubmissionResponse(BaseModel):
     """Generic response for contract transaction submissions."""
 
+    submission_id: str
     status: str
     detail: Optional[str] = None
 
@@ -432,3 +446,52 @@ class TransferLockedNonceResponse(BaseModel):
 
     service_address: str
     nonce: int
+
+
+class DepositAddressRequest(BaseModel):
+    """Request to get a per-user deposit address."""
+
+    # Literal pins the wire format and surfaces invalid input as 422 at parse time.
+    # Extend to Literal["evm", "utxo", ...] when adding a non-EVM chain family.
+    chain_type: Literal["evm"] = "evm"
+    version: int = 0
+
+
+class DepositAddressResponse(BaseModel):
+    """Response containing a user's dedicated deposit address."""
+
+    deposit_address: str
+    chain_type: Literal["evm"]
+    version: int
+    min_deposit: dict[str, dict[str, str]] = Field(
+        default_factory=dict
+    )  # {chain_id: {native, erc20}}
+
+
+class DepositCheckRequest(BaseModel):
+    """Request to check/trigger deposit verification for a specific tx."""
+
+    chain_type: Literal["evm"] = Field("evm", description="Chain family (v1: 'evm' only)")
+    chain_id: int = Field(..., description="Source chain ID where the deposit was made")
+    tx_hash: str = Field(..., description="Transaction hash of the deposit on the source chain")
+    amount: int = Field(..., gt=0, description="Claimed deposit amount in base units (e.g. wei)")
+    log_index: int = Field(0, description="Log index for ERC20 deposits (0 for native)")
+    version: int = Field(0, description="Deposit address derivation version")
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("tx_hash")
+    def _normalise_tx_hash(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
+class DepositCheckResponse(BaseModel):
+    """Response for deposit check status."""
+
+    status: Literal["credited", "pending", "error"]
+    deposit_id: str | None = None
+    amount: str | None = None
+    token_address: str | None = None
+    detail: str | None = None

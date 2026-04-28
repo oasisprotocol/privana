@@ -10,15 +10,10 @@ services:
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       - ACCOUNTING_CONTRACT_ADDRESS=${ACCOUNTING_CONTRACT_ADDRESS}
-      - ROFL_ADAPTER_ADDRESS=${ROFL_ADAPTER_ADDRESS}
       - SAPPHIRE_CHAIN_ID=${SAPPHIRE_CHAIN_ID:-23295}
       - SAPPHIRE_RPC_URL=${SAPPHIRE_RPC_URL:-https://testnet.sapphire.oasis.io}
       - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
       - ACCOUNTING_GAS_LIMIT=${ACCOUNTING_GAS_LIMIT:-500000}
-      - DEPOSIT_POLL_INTERVAL=${DEPOSIT_POLL_INTERVAL:-1}
-      - DEPOSIT_BATCH_SIZE=${DEPOSIT_BATCH_SIZE:-100}
-      - DEPOSIT_LOOKBACK_BLOCKS=${DEPOSIT_LOOKBACK_BLOCKS:-100}
-      - DEPOSIT_RESET_STATE=${DEPOSIT_RESET_STATE:-false}
       # Withdrawal processor configuration
       - WITHDRAWAL_POLL_INTERVAL=${WITHDRAWAL_POLL_INTERVAL:-12}
       - WITHDRAWAL_RESOLUTION_TIMEOUT=${WITHDRAWAL_RESOLUTION_TIMEOUT:-60}
@@ -42,9 +37,11 @@ services:
       - BLOCK_STATE_DIR=${BLOCK_STATE_DIR:-/data/deposit-listener}
       # ERC20 token addresses (format: ERC20_{SYMBOL}_{CHAIN_ID})
       - ERC20_USDC_84532=${ERC20_USDC_84532}
+      # Sweep engine state
+      - SWEEP_STATE_DIR=/data/sweep-engine
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
-      - deposit-listener-data:/data/deposit-listener
+      - sweep-engine-data:/data/sweep-engine
     ports:
       - "8000:8000"
     annotations:
@@ -52,4 +49,4 @@ services:
     restart: on-failure
 
 volumes:
-  deposit-listener-data:
+  sweep-engine-data:

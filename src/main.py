@@ -1,6 +1,7 @@
 """Main entry point for the Accounting Module API."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,9 +12,15 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.auth_routes import auth_router
 from src.api.routes import router
+from src.auth.auth_token_keys import get_auth_token_key_manager
 from src.auth.client_registry import get_client_registry
+from src.auth.jwt_keys import get_jwt_key_manager
 from src.auth.siwe_config import get_siwe_configs
 from src.config import load_settings
+from src.services.accounting_contract import get_accounting_contract_service
+from src.services.deposit_processor import get_deposit_processor
+from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
+from src.services.withdrawal_processor import get_withdrawal_processor
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +70,8 @@ async def lifespan(_app: FastAPI):
     Args:
         app: FastAPI application instance
     """
-    import os
-
-    from src.auth.auth_token_keys import get_auth_token_key_manager
-    from src.auth.jwt_keys import get_jwt_key_manager
-    from src.services.deposit_listener import get_deposit_listener
-    from src.services.withdrawal_processor import get_withdrawal_processor
-
     logger.info("Accounting Module API starting...")
+    logger.info("Accounting contract: %s", settings.accounting_contract_address)
 
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()
@@ -95,18 +96,30 @@ async def lifespan(_app: FastAPI):
                 "on restarts the key may already be set."
             )
 
-    deposit_listener = get_deposit_listener()
-    await deposit_listener.start()
-    logger.info("Deposit listener started")
+        await bootstrap_rofl_signer_address(get_accounting_contract_service())
 
     withdrawal_processor = get_withdrawal_processor()
     await withdrawal_processor.start()
     logger.info("Withdrawal processor started")
 
+    # Initialize deposit processor — failure here means broken config, crash startup.
+    processor = get_deposit_processor()
+    logger.info("Deposit processor initialized")
+
+    # Resume incomplete sweeps from a previous crash — best-effort, don't block startup.
+    try:
+        await processor.resume_incomplete_sweeps()
+        logger.info("Sweep recovery complete")
+    except Exception:
+        logger.exception("Sweep recovery failed — incomplete sweeps may need manual attention")
+
+    # Periodic retry for SWEPT records whose credit failed (at startup or runtime).
+    processor.start_recovery_loop()
+
     yield
 
+    await processor.stop()
     await withdrawal_processor.stop()
-    await deposit_listener.stop()
     logger.info("Accounting Module API shutting down...")
 
 

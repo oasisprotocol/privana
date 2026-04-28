@@ -36,14 +36,17 @@ function encodeAuthToken(
   return abiCoder.encode([AUTH_TOKEN_TYPE], [{ domain, userAddr, validUntil, statement, resources }]);
 }
 
-// Helper to get future timestamp
-function getFutureTimestamp(hoursAhead: number = 24): number {
-  return Math.floor(Date.now() / 1000) + hoursAhead * 3600;
+// Helper to get future timestamp relative to the EVM block clock
+// (resilient to evm_increaseTime in other test files)
+async function getFutureTimestamp(hoursAhead: number = 24): Promise<number> {
+  const block = await ethers.provider.getBlock('latest');
+  return block!.timestamp + hoursAhead * 3600;
 }
 
-// Helper to get past timestamp
-function getPastTimestamp(hoursAgo: number = 1): number {
-  return Math.floor(Date.now() / 1000) - hoursAgo * 3600;
+// Helper to get past timestamp relative to the EVM block clock
+async function getPastTimestamp(hoursAgo: number = 1): Promise<number> {
+  const block = await ethers.provider.getBlock('latest');
+  return block!.timestamp - hoursAgo * 3600;
 }
 
 describe('AuthTokenDecryption', function () {
@@ -76,7 +79,7 @@ describe('AuthTokenDecryption', function () {
        * Python encoding uses: ["string", "address", "uint256", "string", "string[]"]
        * which produces the same format as Solidity's abi.encode(struct)
        */
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const statement = 'Sign in with Ethereum to flexvaults.com';
       const resources: string[] = ['https://api.flexvaults.com/v1'];
@@ -90,7 +93,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should decode AuthToken with empty statement and resources', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
 
       const encoded = encodeAuthToken(TEST_DOMAIN, userAddress, validUntil, '', []);
@@ -100,7 +103,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should decode AuthToken with multiple resources', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const resources = [
         'https://api.flexvaults.com/v1',
@@ -125,7 +128,7 @@ describe('AuthTokenDecryption', function () {
        * Generate a token using the contract's encodeAuthToken() and verify
        * it can be decoded. This confirms the encoding format is consistent.
        */
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const statement = 'Test';
       const resources: string[] = [];
@@ -153,7 +156,7 @@ describe('AuthTokenDecryption', function () {
 
   describe('Token Validation', function () {
     it('Should reject expired token', async function () {
-      const expiredTime = getPastTimestamp(1); // 1 hour ago
+      const expiredTime = await getPastTimestamp(1); // 1 hour ago
       const userAddress = user1.address;
 
       const encoded = encodeAuthToken(TEST_DOMAIN, userAddress, expiredTime, '', []);
@@ -165,7 +168,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should accept token with any domain (domain not validated)', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const anyDomain = 'https://any-domain.com';
 
@@ -184,7 +187,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should handle tryDecodeAuthToken for valid token', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
 
       const encoded = encodeAuthToken(TEST_DOMAIN, userAddress, validUntil, '', []);
@@ -213,7 +216,7 @@ describe('AuthTokenDecryption', function () {
     it('Should handle maximum length domain', async function () {
       // Note: This uses the mock contract's domain which is fixed
       // but tests that long strings in other fields work
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const longStatement = 'A'.repeat(1000);
 
@@ -224,7 +227,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should handle many resources', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       // Create 100 resource URIs
       const resources = Array.from({ length: 100 }, (_, i) => `https://example.com/resource/${i}`);
@@ -247,7 +250,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should handle zero address (should still decode)', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const zeroAddress = ethers.ZeroAddress;
 
       const encoded = encodeAuthToken(TEST_DOMAIN, zeroAddress, validUntil, '', []);
@@ -257,7 +260,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should handle unicode in statement', async function () {
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const unicodeStatement = 'Sign in 你好 مرحبا 🔐🔑';
 
@@ -283,7 +286,7 @@ describe('AuthTokenDecryption', function () {
       // Note: using far future timestamp to avoid expiration errors
       const domain = 'https://flexvaults.com';
       const userAddr = '0x1234567890123456789012345678901234567890';
-      const validUntil = getFutureTimestamp(24 * 365); // 1 year from now
+      const validUntil = await getFutureTimestamp(24 * 365); // 1 year from now
       const statement = 'Sign in with Ethereum to flexvaults.com';
       const resources = ['https://api.flexvaults.com/v1'];
 
@@ -314,7 +317,7 @@ describe('AuthTokenDecryption', function () {
     it('Should produce consistent encoding for empty fields vector', async function () {
       const domain = 'https://flexvaults.com';
       const userAddr = '0xdead000000000000000000000000000000000000';
-      const validUntil = getFutureTimestamp(24 * 365); // 1 year from now
+      const validUntil = await getFutureTimestamp(24 * 365); // 1 year from now
       const statement = '';
       const resources: string[] = [];
 
@@ -337,7 +340,7 @@ describe('AuthTokenDecryption', function () {
       // Use the same values for both TypeScript and contract encoding
       const domain = 'https://flexvaults.com';
       const userAddr = '0xabcdef1234567890abcdef1234567890abcdef12';
-      const validUntil = getFutureTimestamp(24);
+      const validUntil = await getFutureTimestamp(24);
       const statement = 'Test statement';
       const resources = ['https://resource1.com', 'https://resource2.com'];
 

@@ -12,8 +12,6 @@ task("deploy-proveth-verifier")
   });
 
 task("deploy")
-  .addParam("shoyubashi", "The address of the ShoyuBashi oracle")
-  .addParam("provethverifier", "The address of the ProvethVerifier contract")
   .addParam("roflappid", "The ROFL app ID (hex 0x... or bech32 rofl1...)")
   .setAction(async (args, hre) => {
     const [deployer] = await hre.ethers.getSigners();
@@ -33,7 +31,7 @@ task("deploy")
     const Accounting = await hre.ethers.getContractFactory("Accounting");
     const proxy = await hre.upgrades.deployProxy(
       Accounting,
-      [args.shoyubashi, args.provethverifier, deployer.address],
+      [roflAppIdHex, deployer.address],
       {
         kind: 'uups',
         initializer: 'initialize',

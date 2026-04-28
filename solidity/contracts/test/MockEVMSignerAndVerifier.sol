@@ -15,44 +15,13 @@ contract MockEVMSignerAndVerifier is EVMSignerAndVerifier, UUPSUpgradeable {
         _disableInitializers();
     }
 
-    function initialize(address _shoyubashi, address _provethVerifier) external initializer {
-        __EVMSignerAndVerifier_init(_shoyubashi, _provethVerifier, msg.sender);
+    function initialize(bytes21 _roflAppID) external initializer {
+        __EVMSignerAndVerifier_init(_roflAppID, msg.sender);
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     function _generateKeypair() internal pure override returns (address, bytes32) {
         return (TEST_ADDRESS, TEST_SECRET);
-    }
-
-    function exposedDecodeEVMTransaction(
-        bytes memory evmTransactionData
-    )
-        external
-        returns (
-            uint256 chainId,
-            bytes32 hash,
-            address from,
-            address to,
-            uint256 value,
-            bytes memory txData,
-            uint256 v,
-            uint256 r,
-            uint256 s
-        )
-    {
-        return EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
-    }
-
-    function exposedDecodeTxReceipt(
-        bytes memory txReceiptData
-    ) external returns (uint256 status, uint256 gasUsed) {
-        return EVMSignerAndVerifier.decodeEVMTxReceipt(txReceiptData);
-    }
-
-    function exposedDecodeTxDataForErc20Transfer(
-        bytes memory txData
-    ) external returns (address to, uint256 amount) {
-        return EVMSignerAndVerifier.decodeTxDataForErc20Transfer(txData);
     }
 }

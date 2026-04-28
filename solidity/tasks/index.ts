@@ -5,3 +5,6 @@ import "./accounts";
 import "./admin";
 import "./withdraw";
 import "./transfer";
+import "./deposits";
+import "./emergencyWithdraw";
+import "./directWithdraw";

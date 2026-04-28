@@ -3,8 +3,14 @@ pragma solidity ^0.8.20;
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
-import {TokenInfo, TokenType, UserInfo, FundLock} from "./Types.sol";
-import {EVMTransactionProof, EVMReceiptProof} from "./interfaces/IProvethVerifier.sol";
+import {
+    ChainType,
+    TokenInfo,
+    TokenType,
+    UserInfo,
+    FundLock,
+    UnsupportedTokenType
+} from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
@@ -12,17 +18,9 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * @title Accounting
  * @notice Cross-chain accounting module for managing user balances and fund operations.
  *
- * This contract provides a unified accounting system that supports deposits from multiple
- * chains, fund locking for services, transfers between users, and withdrawals back
- * to origin chains. It combines transaction verification with EIP-712 signature
- * verification to ensure secure and authorized operations.
- *
- * Key features:
- * - Multi-chain deposit verification using ShoyuBashi oracle and transaction proofs
- * - Fund locking mechanism for service interactions
- * - Peer-to-peer transfers within the accounting system
- * - Automated withdrawal transaction generation
- * - Universal token abstraction supporting various tokens
+ * Deposits verified off-chain by ROFL TEE, credited via onlyROFL. Per-user deposit
+ * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
+ * and automated withdrawals via EIP-712 signatures.
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
@@ -31,7 +29,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
         internal balances;
     mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
-    mapping(bytes32 depositKey => bool processed) public processedDeposits;
+    mapping(bytes32 depositId => bool processed) public processedDeposits;
     mapping(address user => UserInfo) private userInfo;
 
     WithdrawalRequest[] public withdrawals;
@@ -41,10 +39,28 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     /// @dev Array of all registered token IDs for enumeration
     bytes32[] private registeredTokenIds;
 
+    // ─── Emergency Withdraw Storage ───────────────────────────────────
+
+    /// @dev requestId = keccak256(abi.encode(beneficiary, tokenId, version)).
+    /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
+    /// Re-requesting overwrites; no explicit cancel needed.
+    mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
+
+    struct EmergencyWithdrawRequest {
+        address toAddress;
+        uint256 blockNumber; // 0 ⇒ slot empty
+    }
+
+    error EmergencyWithdrawTooSoon();
+    error EmergencyWithdrawNotFound();
+
+    event EmergencyWithdrawRequested(bytes32 indexed requestId, bytes32 indexed tokenId);
+    event EmergencyWithdrawExecuted(bytes32 indexed requestId);
+
     event Deposit(
-        address indexed userAddress,
         bytes32 indexed tokenId,
-        uint256 amount
+        uint256 amount,
+        bytes32 depositId
     );
 
     event Withdrawal(
@@ -58,32 +74,29 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 indexed index,
         address indexed userAddress,
         bytes32 indexed tokenId,
+        address toAddress,
         uint256 amount,
         uint256 chainId
     );
 
     event TokenRegistered(bytes32 indexed tokenId, TokenType tokenType);
 
-    error InvalidDeposit();
     error InsufficientBalance();
     error TooManyActiveLocks();
     error InvalidLockId();
     error LockNotExpired();
     error InsufficientLockedAmount();
-    error UnsupportedTokenType();
-    error ChainIdMismatch();
     error AddressMismatch();
-    error InvalidTransactionData();
     error InvalidExpiry();
     error InvalidAmount();
     error WithdrawalTooSoon();
     error Unauthorized();
     error DepositAlreadyProcessed();
-    error ReceiptIndexMismatch();
     error InvalidSiweAuth();
 
     struct WithdrawalRequest {
         address userAddress;
+        address toAddress;
         uint256 amount;
         uint256 blockNumber;
         bytes32 tokenId;
@@ -101,27 +114,23 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     /**
      * @notice Internal initializer for the Accounting contract.
-     * @dev Sets up EIP-712 domain and EVM signing infrastructure.
-     * @param _shoyubashi Address of the ShoyuBashi oracle for cross-chain block hash verification
-     * @param _provethVerifier Address of the ProvethVerifier contract for proof validation
+     * @param _roflAppID The ROFL app identifier
      * @param _owner Address that will own this contract
      */
-    function __Accounting_init(address _shoyubashi, address _provethVerifier, address _owner) internal onlyInitializing {
+    function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
-        __EVMSignerAndVerifier_init(_shoyubashi, _provethVerifier, _owner);
+        __EVMSignerAndVerifier_init(_roflAppID, _owner);
         nextLockId = 1;
     }
 
     /**
-     * @notice Initializes the Accounting contract with EIP712 and EVM verification capabilities.
+     * @notice Initializes the Accounting contract.
      * @dev Replaces the constructor for upgradeable contracts.
-     *      The specified owner becomes the contract owner.
-     * @param _shoyubashi Address of the ShoyuBashi oracle for cross-chain block hash verification
-     * @param _provethVerifier Address of the ProvethVerifier contract for proof validation
+     * @param _roflAppID The ROFL app identifier (stable across redeployments)
      * @param _owner Address that will own this contract
      */
-    function initialize(address _shoyubashi, address _provethVerifier, address _owner) external virtual initializer {
-        __Accounting_init(_shoyubashi, _provethVerifier, _owner);
+    function initialize(bytes21 _roflAppID, address _owner) external virtual initializer {
+        __Accounting_init(_roflAppID, _owner);
     }
 
     /**
@@ -144,128 +153,161 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
-     * @notice Credits user's account after verifying an EVM deposit transaction.
-     *
-     * This function decodes and verifies a transaction from an EVM chain to confirm
-     * that a user has deposited tokens. It supports both native tokens (ETH, MATIC, etc.)
-     * and ERC20 tokens from any EVM-compatible chain.
-     *
-     * The verification process:
-     * 1. Validates the transaction proof using ProvethVerifier
-     * 2. Decodes the raw transaction data to extract all transaction fields
-     * 3. Verifies block hash through ShoyuBashi oracle for cross-chain security
-     * 4. Verifies the transaction sender matches the claimed user
-     * 5. Validates the transaction target and parameters match the token type
-     * 6. For native tokens: verifies the recipient is the deposit address
-     * 7. For ERC20 tokens: verifies the contract call and transfer recipient
-     * 8. Credits the verified amount to the user's account balance
-     *
-     * Security features:
-     * - Transaction proof verification via Merkle Patricia Trie
-     * - ShoyuBashi oracle block hash verification (multi-oracle consensus)
-     * - Sender address verification against claimed user
-     * - Token-specific validation (native vs ERC20)
-     * - Chain ID verification to prevent cross-chain replay attacks
-     * - Transaction data decoding and validation
-     *
-     * @param userAddress The address of the user making the deposit
-     * @param tokenId The identifier of the token being deposited
-     * @param txProof The cryptographic proof that the transaction was included in a block
+     * @notice Get the deposit address for an authenticated user.
+     * @param chainType The chain family (see ChainType enum)
+     * @param version Key derivation index
+     * @param siweToken Opaque SIWE auth token from /auth/login
+     * @return depositAddr The deposit address for the authenticated user
      */
-    function creditEVMDeposit(
-        address userAddress,
+    function getDepositAddress(
+        ChainType chainType,
+        uint256 version,
+        bytes calldata siweToken
+    ) external view returns (address depositAddr) {
+        address beneficiary = _authSender(siweToken);
+        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
+    }
+
+    /**
+     * @notice Credit a deposit to a beneficiary. ROFL-only.
+     * @param beneficiary The address to credit
+     * @param tokenId The token identifier
+     * @param amount The deposit amount (verified off-chain by TEE)
+     * @param depositId Unique deposit identifier: keccak256(chainId, txHash, tokenId, depositIndex)
+     */
+    function creditDeposit(
+        address beneficiary,
         bytes32 tokenId,
-        EVMTransactionProof calldata txProof,
-        EVMReceiptProof calldata receiptProof
-    ) public {
-        if (
-            keccak256(txProof.transactionIndexRlp) !=
-            keccak256(receiptProof.receiptIndexRlp)
-        ) revert ReceiptIndexMismatch();
+        uint256 amount,
+        bytes32 depositId
+    ) external onlyROFL {
+        if (beneficiary == address(0)) revert AddressMismatch();
+        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
+        if (amount == 0) revert InvalidAmount();
+        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
+        processedDeposits[depositId] = true;
+        balances[beneficiary][tokenId] += amount;
+        emit Deposit(tokenId, amount, depositId);
+    }
 
-        bytes memory evmTransactionData = provethVerifier.validateTxProof(txProof);
+    // ─── Emergency Withdraw ───────────────────────────────────────────
 
-        (
-            uint256 chainId,
-            bytes32 txHash,
-            address from,
-            address to,
-            uint256 value,
-            bytes memory txData,
-            ,
-            ,
+    /**
+     * @notice Deterministic key for an emergency withdrawal slot.
+     * @param beneficiary The user who owns the deposit address
+     * @param tokenId The token identifier
+     * @param version Key derivation index
+     * @return The request ID for the emergency withdrawal slot
+     */
+    function emergencyWithdrawKey(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 version
+    ) public pure returns (bytes32) {
+        return keccak256(abi.encode(beneficiary, tokenId, version));
+    }
 
-        ) = EVMSignerAndVerifier.decodeEVMTransaction(evmTransactionData);
+    /**
+     * @notice Request emergency withdrawal of unswept funds from deposit address.
+     * @dev Requires 1-block delay before execution (same as normal withdrawal).
+     *      No signature needed — msg.sender is the beneficiary and controls all
+     *      parameters directly (unlike normal withdrawals where ROFL submits on
+     *      the user's behalf).
+     *      One slot per (beneficiary, tokenId, version) — a second request
+     *      overwrites the first (which subsumes "cancel": re-request with any
+     *      new params to reset the timer/destination).
+     *      chainId and chainType are not parameters: they are derived from the
+     *      tokenId at execute time, so a caller cannot request a withdrawal for
+     *      one token and have it signed on a different chain.
+     * @param tokenId The token identifier
+     * @param toAddress Destination address for the emergency withdrawal
+     * @param version Key derivation index for the deposit keypair
+     * @return requestId Deterministic key for the emergency withdrawal slot
+     */
+    function requestEmergencyWithdraw(
+        bytes32 tokenId,
+        address toAddress,
+        uint256 version
+    ) external returns (bytes32 requestId) {
+        if (toAddress == address(0)) revert AddressMismatch();
+        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
+        requestId = emergencyWithdrawKey(msg.sender, tokenId, version);
+        emergencyWithdrawRequests[requestId] = EmergencyWithdrawRequest({
+            toAddress: toAddress,
+            blockNumber: block.number
+        });
 
-        bytes32 depositKey = keccak256(abi.encodePacked(chainId, txHash));
-        if (processedDeposits[depositKey]) revert DepositAlreadyProcessed();
+        emit EmergencyWithdrawRequested(requestId, tokenId);
+    }
 
-        bytes memory rawReceipt = provethVerifier.validateReceiptProof(
-            txProof.rlpBlockHeader,
-            receiptProof
-        );
-
-        (uint256 status, ) = EVMSignerAndVerifier.decodeEVMTxReceipt(
-            rawReceipt
-        );
-
-        if (status != 1) revert InvalidDeposit();
-
-        uint256 blockNumber = EVMSignerAndVerifier.getBlockNumber(
-            txProof.rlpBlockHeader
-        );
-
-        EVMSignerAndVerifier.verifyBlockHash(
-            keccak256(txProof.rlpBlockHeader),
-            blockNumber,
-            chainId
-        );
-
-        if (from != userAddress) revert AddressMismatch();
+    /**
+     * @notice Execute an emergency withdrawal after 1-block delay.
+     * @dev Contract derives deposit keypair, signs a transfer tx, returns raw signed tx bytes.
+     *      Caller broadcasts the signed tx on the source chain.
+     *      Caller supplies nonce/amount/gasPrice — the contract has no knowledge of source-chain
+     *      state when ROFL is down.
+     *      No msg.sender check: toAddress is fixed at request time, so any caller
+     *      can only send funds to the beneficiary's chosen destination. Safe to
+     *      call multiple times — source-chain nonce is the double-spend guard.
+     * @param beneficiary The user who owns the deposit address
+     * @param tokenId The token identifier (determines chainId and token type)
+     * @param version Key derivation index for the deposit keypair
+     * @param sourceChainNonce Current nonce of the deposit address on the source chain
+     * @param amount Amount to transfer out of the deposit address
+     * @param gasPrice Gas price (wei) to embed in the signed source-chain transaction
+     * @return signedTx Raw signed transaction ready to broadcast on the source chain
+     */
+    function executeEmergencyWithdraw(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 version,
+        uint64 sourceChainNonce,
+        uint256 amount,
+        uint256 gasPrice
+    ) public returns (bytes memory signedTx) {
+        bytes32 requestId = emergencyWithdrawKey(beneficiary, tokenId, version);
+        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[requestId];
+        if (req.blockNumber == 0) revert EmergencyWithdrawNotFound();
+        if (block.number - req.blockNumber < 1) revert EmergencyWithdrawTooSoon();
 
         TokenInfo memory tInfo = tokens[tokenId];
 
-        uint256 amount;
-
+        // Dispatch on tokenType; the else-revert is the single exhaustiveness guard.
+        // When a non-EVM TokenType is added, add a branch here with its ChainType.
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 tChainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
-                tInfo.data
+            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+            signedTx = generateDepositAddressTransfer(
+                beneficiary,
+                ChainType.EVM,
+                version,
+                chainId,
+                req.toAddress,
+                amount,
+                sourceChainNonce,
+                gasPrice
             );
-
-            if (tChainId != chainId) revert ChainIdMismatch();
-
-            if (to != EVMSignerAndVerifier.evmAddress) revert InvalidDeposit();
-
-            if (txData.length != 0) revert InvalidTransactionData();
-
-            amount = value;
         } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 tChainId, address tokenAddress) = EVMSignerAndVerifier
+            (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
-
-            if (tChainId != chainId) revert ChainIdMismatch();
-
-            if (to != tokenAddress) revert InvalidDeposit();
-
-            (address erc20To, uint256 erc20amount) = EVMSignerAndVerifier
-                .decodeTxDataForErc20Transfer(txData);
-
-            if (erc20To != EVMSignerAndVerifier.evmAddress)
-                revert AddressMismatch();
-
-            amount = erc20amount;
+            signedTx = generateDepositAddressERC20Transfer(
+                beneficiary,
+                ChainType.EVM,
+                version,
+                chainId,
+                req.toAddress,
+                tokenAddress,
+                amount,
+                sourceChainNonce,
+                gasPrice
+            );
         } else {
             revert UnsupportedTokenType();
         }
 
-        if (amount == 0) revert InvalidAmount();
-
-        processedDeposits[depositKey] = true;
-
-        balances[userAddress][tokenId] += amount;
-
-        emit Deposit(userAddress, tokenId, amount);
+        emit EmergencyWithdrawExecuted(requestId);
     }
+
+    // ─── Locks ────────────────────────────────────────────────────────
 
     /**
      * @notice Creates a lock on user funds for exclusive access by a designated service.
@@ -354,10 +396,55 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         revert InvalidLockId();
     }
 
+    function _scheduleWithdrawal(
+        address userAddress,
+        address toAddress,
+        bytes32 tokenId,
+        uint256 amount
+    ) internal {
+        TokenInfo memory tInfo = tokens[tokenId];
+
+        bytes memory txIdentifier;
+        uint256 chainId;
+
+        if (tInfo.tokenType == TokenType.NativeEVM) {
+            chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+
+            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+        } else if (tInfo.tokenType == TokenType.ERC20) {
+            (chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
+                tInfo.data
+            );
+            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+
+            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+        } else {
+            revert UnsupportedTokenType();
+        }
+
+        withdrawals.push(
+            WithdrawalRequest({
+                userAddress: userAddress,
+                toAddress: toAddress,
+                amount: amount,
+                blockNumber: block.number,
+                tokenId: tokenId,
+                txIdentifier: txIdentifier,
+                resolved: false
+            })
+        );
+
+        emit Withdrawal(userAddress, tokenId, amount, chainId);
+    }
+
     /**
+     * @notice Modifies an existing lock by increasing the locked amount and/or extending expiry.
+     * @dev Expiry can only be extended (newExpiry >= current expiry). Amount increases are
+     *      drawn from the user's available balance. Authorized via EIP-712 user signature.
      * @param userAddress The address of the user whose lock is being modified
      * @param lockId The unique identifier of the lock to modify
-     * @param amount The new amount for the lock
+     * @param amount Additional amount to add to the lock (0 to only extend expiry)
      * @param newExpiry The new expiry timestamp for the lock
      * @param nonce The nonce for replay protection (must match user's current modifyLockNonces)
      * @param signature The EIP-712 signature from the user authorizing the modification
@@ -552,6 +639,60 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
+     * @notice Withdraws locked funds to an external on-chain address via scheduled withdrawal.
+     * @dev Service-authorized counterpart to `transferFromLock`: instead of crediting an
+     *      internal balance, this schedules a cross-chain withdrawal signed by ROFL.
+     *      Signature must come from the lock's serviceId. If `lock.amount` hits zero the
+     *      slot is removed via swap-and-pop.
+     * @param userAddress The user who originally created the lock
+     * @param toAddress The external destination address on the token's source chain
+     * @param lockId The unique identifier of the lock to withdraw from
+     * @param amount The amount of locked tokens to withdraw
+     * @param nonce The nonce for replay protection (must match service's current withdrawFromLock nonce)
+     * @param signature The EIP-712 signature from the service authorizing the withdrawal
+     */
+    function withdrawFromLock(
+        address userAddress,
+        address toAddress,
+        uint256 lockId,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) public {
+        if (amount == 0) revert InvalidAmount();
+        if (toAddress == address(0)) revert AddressMismatch();
+
+        UserInfo storage uInfo = userInfo[userAddress];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        uint256 lockIndex = _findLockIndex(locks, lockId);
+        FundLock storage lock = locks[lockIndex];
+
+        EIP712SignatureVerifier.verifyWithdrawFromLockSignature(
+            lock.serviceId,
+            userAddress,
+            toAddress,
+            lockId,
+            amount,
+            nonce,
+            signature
+        );
+
+        if (lock.amount < amount) revert InsufficientLockedAmount();
+
+        lock.amount -= amount;
+
+        bytes32 tokenId = lock.tokenId;
+
+        if (lock.amount == 0) {
+            locks[lockIndex] = locks[locks.length - 1];
+            locks.pop();
+        }
+
+        _scheduleWithdrawal(userAddress, toAddress, tokenId, amount);
+    }
+
+    /**
      * @notice Transfers funds between users within the accounting system.
      *
      * This function enables peer-to-peer transfers of tokens between users
@@ -643,40 +784,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         balances[userAddress][tokenId] -= amount;
 
-        TokenInfo memory tInfo = tokens[tokenId];
-
-        bytes memory txIdentifier;
-
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
-                tInfo.data
-            );
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
-
-            emit Withdrawal(userAddress, tokenId, amount, chainId);
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
-                tInfo.data
-            );
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
-
-            emit Withdrawal(userAddress, tokenId, amount, chainId);
-        } else {
-            revert UnsupportedTokenType();
-        }
-
-        withdrawals.push(
-            WithdrawalRequest({
-                userAddress: userAddress,
-                amount: amount,
-                blockNumber: block.number,
-                tokenId: tokenId,
-                txIdentifier: txIdentifier,
-                resolved: false
-            })
-        );
+        _scheduleWithdrawal(userAddress, userAddress, tokenId, amount);
     }
 
     /**
@@ -714,6 +822,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         address userAddress = withdrawalRequest.userAddress;
+        address toAddress = withdrawalRequest.toAddress;
         bytes32 tokenId = withdrawalRequest.tokenId;
         uint256 amount = withdrawalRequest.amount;
         TokenInfo memory tInfo = tokens[tokenId];
@@ -724,7 +833,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
             signedTx = EVMSignerAndVerifier.generateNativeTransfer(
                 chainId,
-                userAddress,
+                toAddress,
                 amount,
                 nonce
             );
@@ -735,7 +844,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
             signedTx = EVMSignerAndVerifier.generateERC20Transfer(
                 chainId,
-                userAddress,
+                toAddress,
                 tokenAddress,
                 amount,
                 nonce
@@ -747,7 +856,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         // Only mark resolved and emit event if not already resolved
         if (!withdrawalRequest.resolved) {
             withdrawalRequest.resolved = true;
-            emit WithdrawalResolved(index, userAddress, tokenId, amount, chainId);
+            emit WithdrawalResolved(
+                index,
+                userAddress,
+                tokenId,
+                toAddress,
+                amount,
+                chainId
+            );
         }
 
         return signedTx;
@@ -817,7 +933,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return withdrawals.length;
     }
 
-    /// @notice Returns active locks for the authenticated user. Requires auth token for private reads.
+    /**
+     * @notice Returns active locks for the authenticated user. Requires auth token for private reads.
+     * @param token SIWE auth token identifying the caller
+     * @return Array of active fund locks owned by the authenticated user
+     */
     function getUserLocks(
         bytes memory token
     ) public view returns (FundLock[] memory) {
@@ -826,7 +946,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return userInfo[user].activeLocks;
     }
 
-    /// @notice Returns locks for `user` scoped to authenticated service identity.
+    /**
+     * @notice Returns locks for `user` scoped to authenticated service identity.
+     * @param user The lock owner whose locks should be filtered
+     * @param token SIWE auth token identifying the caller as the service
+     * @return Array of `user`'s locks where serviceId matches the authenticated caller
+     */
     function getServiceLocks(
         address user,
         bytes memory token
@@ -856,7 +981,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return serviceLocks;
     }
 
-    /// @notice Returns the authenticated user's balance for a token. Requires auth token.
+    /**
+     * @notice Returns the authenticated user's balance for a token. Requires auth token.
+     * @param tokenId The token identifier
+     * @param token SIWE auth token identifying the caller
+     * @return The authenticated user's balance for `tokenId`
+     */
     function balanceOf(
         bytes32 tokenId,
         bytes memory token
@@ -870,5 +1000,5 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[43] private __gap;
+    uint256[41] private __gap;
 }
