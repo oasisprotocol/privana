@@ -341,6 +341,110 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HistoryEntry": {
+        "description": "A single authenticated user activity entry.",
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "chain_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Id"
+          },
+          "counterparty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty"
+          },
+          "deposit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Id"
+          },
+          "kind": {
+            "enum": [
+              "deposit",
+              "withdraw",
+              "createLock",
+              "transferFromLock",
+              "transferBalance",
+              "unknown"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "integer"
+          },
+          "token_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Id"
+          }
+        },
+        "required": [
+          "kind",
+          "timestamp"
+        ],
+        "title": "HistoryEntry",
+        "type": "object"
+      },
+      "HistoryResponse": {
+        "description": "Paginated user history response.",
+        "properties": {
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntry"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "history",
+          "total"
+        ],
+        "title": "HistoryResponse",
+        "type": "object"
+      },
       "JWKSResponse": {
         "description": "JWKS response for public key distribution.",
         "properties": {
@@ -3062,6 +3166,103 @@
           }
         ],
         "summary": "Withdraw From Lock",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/history": {
+      "get": {
+        "description": "Get one page of authenticated user history.",
+        "operationId": "get_history_v1_accounting_history_get",
+        "parameters": [
+          {
+            "description": "0-indexed page number from the oldest entries, or negative page number from the end (-1 is the latest page)",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": -1,
+              "description": "0-indexed page number from the oldest entries, or negative page number from the end (-1 is the latest page)",
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page size, max 100",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size, max 100",
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get History",
         "tags": [
           "Accounting"
         ]

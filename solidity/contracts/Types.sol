@@ -24,6 +24,14 @@ enum ChainType {
 ///         or references a tokenId that has not been registered via registerToken.
 error UnsupportedTokenType();
 
+enum HistoryKind {
+    Deposit,
+    Withdraw,
+    CreateLock,
+    TransferFromLock,
+    TransferBalance
+}
+
 struct TokenInfo {
     TokenType tokenType;
     bytes data; // e.g. chainId and contract address for ERC20
@@ -40,6 +48,12 @@ struct FundLock {
     bytes32 tokenId;
     uint256 amount;
     uint256 expiry;
+}
+
+struct HistoryEntry {
+    HistoryKind kind;
+    uint64 timestamp;
+    bytes payload;
 }
 
 struct EVMKeypair {

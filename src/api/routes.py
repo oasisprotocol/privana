@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import jwt
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from hexbytes import HexBytes
 from pydantic import BaseModel, Field
 from web3 import Web3
@@ -32,6 +32,7 @@ from src.models.accounting import (
     DepositCheckRequest,
     DepositCheckResponse,
     ExpiredLocksResponse,
+    HistoryResponse,
     LockedFundsResponse,
     LockFundsRequest,
     LockNonceResponse,
@@ -71,6 +72,7 @@ router = APIRouter(prefix="/v1/accounting", tags=["Accounting"])
 _service = get_accounting_contract_service()
 
 _SIWE_TOKEN_HEADER = "X-SIWE-Token"
+_ZERO_ADDRESS = Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
 
 
 def _mint_private_read_token(user_address: str) -> bytes:
@@ -145,6 +147,8 @@ async def _require_user_and_private_read_token(
         raw = bytes(HexBytes(token))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid {_SIWE_TOKEN_HEADER} header") from exc
+    if not raw:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token")
     try:
         address = await _service.resolve_address_from_token(raw)
     except Exception as exc:
@@ -155,6 +159,8 @@ async def _require_user_and_private_read_token(
             len(raw),
         )
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+    if not Web3.is_address(address) or Web3.to_checksum_address(address) == _ZERO_ADDRESS:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token")
     return address, raw
 
 
@@ -581,6 +587,32 @@ async def get_balance(
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to get balance")
         raise HTTPException(status_code=500, detail="Failed to retrieve balance") from exc
+
+
+@router.get("/history", response_model=HistoryResponse)
+async def get_history(
+    offset: int = Query(
+        -1,
+        description=(
+            "0-indexed page number from the oldest entries, or negative page number "
+            "from the end (-1 is the latest page)"
+        ),
+    ),
+    limit: int = Query(50, ge=0, le=100, description="Page size, max 100"),
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
+) -> HistoryResponse:
+    """Get one page of authenticated user history."""
+    try:
+        result = await _service.get_history(offset, limit, auth.token)
+        return HistoryResponse(**result)
+    except ContractLogicError as exc:
+        logger.warning("History token validation failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get history")
+        raise HTTPException(status_code=500, detail="Failed to retrieve history") from exc
 
 
 @router.post("/funds/unlock-all-expired", response_model=TransactionSubmissionResponse)

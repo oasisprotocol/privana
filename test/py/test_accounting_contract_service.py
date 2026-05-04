@@ -1,5 +1,6 @@
 """Tests for AccountingContractService parsing and request validation."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -7,6 +8,7 @@ from hexbytes import HexBytes
 from web3 import Web3
 
 from src.clients.rofl import RoflSubmissionResult
+from src.models.accounting import HistoryKind
 from src.services.accounting_contract import AccountingContractService
 
 
@@ -91,6 +93,255 @@ async def test_get_pending_withdrawals_includes_to_address() -> None:
 
 
 USER_A = "0x1234567890123456789012345678901234567890"
+
+
+def _history_amount(value: int) -> bytes:
+    return value.to_bytes(32, "big")
+
+
+def _history_payload(token_id: bytes, amount: int, tail: bytes) -> bytes:
+    return token_id + _history_amount(amount) + tail
+
+
+@pytest.mark.asyncio
+async def test_get_history_parses_contract_entries() -> None:
+    reader = MagicMock()
+    deposit_id = bytes.fromhex("dd" * 32)
+    destination = bytes.fromhex("12" * 20)
+    reader.functions.getHistory.return_value.call = AsyncMock(
+        return_value=(
+            [
+                (
+                    0,
+                    1710000000,
+                    _history_payload(bytes.fromhex("33" * 32), 123, deposit_id),
+                ),
+                (
+                    4,
+                    1710000001,
+                    _history_payload(bytes.fromhex("44" * 32), 456, destination),
+                ),
+            ],
+            9,
+        )
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_confidential_reader_contract = AsyncMock(return_value=reader)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
+
+    parsed = await service.get_history(2, 5, b"\x12\x34")
+
+    assert parsed["total"] == 9
+    assert parsed["history"][0] == {
+        "kind": "deposit",
+        "timestamp": 1710000000,
+        "token_id": "0x" + ("33" * 32),
+        "amount": "123",
+        "counterparty": None,
+        "deposit_id": "0x" + ("dd" * 32),
+        "chain_id": 84532,
+    }
+    assert parsed["history"][1] == {
+        "kind": "transferBalance",
+        "timestamp": 1710000001,
+        "token_id": "0x" + ("44" * 32),
+        "amount": "456",
+        "counterparty": Web3.to_checksum_address("0x" + ("12" * 20)),
+        "deposit_id": None,
+        "chain_id": 84532,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "kind_name"),
+    [
+        (1, "withdraw"),
+        (2, "createLock"),
+        (3, "transferFromLock"),
+        (4, "transferBalance"),
+    ],
+)
+async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name: str) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
+
+    parsed = await service._history_entry_to_dict(
+        (
+            kind,
+            1710000002,
+            _history_payload(bytes.fromhex("55" * 32), 789, bytes.fromhex("ab" * 20)),
+        )
+    )
+
+    assert parsed == {
+        "kind": kind_name,
+        "timestamp": 1710000002,
+        "token_id": "0x" + ("55" * 32),
+        "amount": "789",
+        "counterparty": Web3.to_checksum_address("0x" + ("ab" * 20)),
+        "deposit_id": None,
+        "chain_id": 84532,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "match"),
+    [
+        (HistoryKind.Deposit, b"\x00", "must be 96 bytes"),
+        (
+            HistoryKind.Withdraw,
+            bytes.fromhex("77" * 32) + _history_amount(1) + bytes.fromhex("cd" * 19),
+            "must be 84 bytes",
+        ),
+    ],
+)
+def test_decode_history_payload_rejects_invalid_shapes(
+    kind: HistoryKind, payload: bytes, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        AccountingContractService._decode_history_payload(kind, payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry",
+    [
+        (0, 1710000000, b"\x00"),
+        (
+            1,
+            1710000001,
+            bytes.fromhex("77" * 32) + _history_amount(1) + bytes.fromhex("cd" * 19),
+        ),
+    ],
+)
+async def test_history_entry_degrades_for_invalid_payload(entry: tuple) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
+
+    parsed = await service._history_entry_to_dict(entry)
+
+    assert parsed == {
+        "kind": "unknown",
+        "timestamp": entry[1],
+        "token_id": None,
+        "amount": None,
+        "counterparty": None,
+        "deposit_id": None,
+        "chain_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_history_entry_degrades_for_unknown_kind() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+
+    parsed = await service._history_entry_to_dict((99, 1710000002, b""))
+
+    assert parsed["kind"] == "unknown"
+    assert parsed["timestamp"] == 1710000002
+    assert parsed["token_id"] is None
+    assert parsed["chain_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_history_preserves_page_when_one_entry_is_unknown() -> None:
+    reader = MagicMock()
+    reader.functions.getHistory.return_value.call = AsyncMock(
+        return_value=(
+            [
+                (
+                    0,
+                    1710000000,
+                    _history_payload(bytes.fromhex("11" * 32), 1, b"\xdd" * 32),
+                ),
+                (99, 1710000001, b""),
+            ],
+            2,
+        )
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_confidential_reader_contract = AsyncMock(return_value=reader)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
+
+    parsed = await service.get_history(0, 10, b"\x12\x34")
+
+    assert parsed["total"] == 2
+    assert parsed["history"][0]["kind"] == "deposit"
+    assert parsed["history"][1]["kind"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_history_entry_preserves_decoded_payload_without_token_context() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_token_context = AsyncMock(side_effect=ValueError("missing token context"))
+
+    parsed = await service._history_entry_to_dict(
+        (
+            1,
+            1710000003,
+            _history_payload(bytes.fromhex("66" * 32), 321, bytes.fromhex("12" * 20)),
+        )
+    )
+
+    assert parsed == {
+        "kind": "withdraw",
+        "timestamp": 1710000003,
+        "token_id": "0x" + ("66" * 32),
+        "amount": "321",
+        "counterparty": Web3.to_checksum_address("0x" + ("12" * 20)),
+        "deposit_id": None,
+        "chain_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_history_accepts_negative_offset() -> None:
+    reader = MagicMock()
+    reader.functions.getHistory.return_value.call = AsyncMock(return_value=([], 9))
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_confidential_reader_contract = AsyncMock(return_value=reader)
+
+    parsed = await service.get_history(-1, 10, b"\x12")
+
+    assert parsed == {"history": [], "total": 9}
+    reader.functions.getHistory.assert_called_once_with(-1, 10, b"\x12")
+
+
+@pytest.mark.asyncio
+async def test_get_history_rejects_offset_outside_int256() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+
+    with pytest.raises(ValueError, match="offset must fit int256"):
+        await service.get_history(-(2**255) - 1, 10, b"\x12")
+
+    with pytest.raises(ValueError, match="offset must fit int256"):
+        await service.get_history(2**255, 10, b"\x12")
+
+
+@pytest.mark.asyncio
+async def test_get_history_rejects_negative_limit() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+
+    with pytest.raises(ValueError, match="limit must be >= 0"):
+        await service.get_history(0, -1, b"\x12")
+
+
+@pytest.mark.asyncio
+async def test_get_history_preserves_empty_pages_and_total() -> None:
+    reader = MagicMock()
+    reader.functions.getHistory.return_value.call = AsyncMock(return_value=([], 9))
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_confidential_reader_contract = AsyncMock(return_value=reader)
+
+    parsed = await service.get_history(9, 0, b"\x12\x34")
+
+    assert parsed == {"history": [], "total": 9}
+    reader.functions.getHistory.assert_called_once_with(9, 0, b"\x12\x34")
 
 
 @pytest.mark.asyncio

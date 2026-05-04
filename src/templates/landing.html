@@ -737,6 +737,47 @@
                     </div>
                 </div>
 
+                <div class="endpoint-item">
+                    <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                        <span class="method method-get">GET</span>
+                        <span class="path">/v1/accounting/history</span>
+                        <span class="chevron">▼</span>
+                    </div>
+                    <div class="endpoint-details">
+                        <div class="details-content">
+                            <div class="description">Get one page of the authenticated user's on-chain activity history (oldest first within the page).</div>
+                            <div class="params-section">
+                                <h4>Query Parameters</h4>
+                                <div class="param">
+                                    <span class="param-name">offset</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">0-indexed page number from oldest; negative selects pages from the end (default -1)</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">limit</span>
+                                    <span class="param-type">integer</span>
+                                    <span class="optional">optional</span>
+                                    <div class="param-desc">Page size, 0&ndash;100 (default 50)</div>
+                                </div>
+                            </div>
+                            <div class="params-section">
+                                <h4>Response</h4>
+                                <div class="param">
+                                    <span class="param-name">history</span>
+                                    <span class="param-type">array</span>
+                                    <div class="param-desc">Rows with kind and timestamp plus optional token_id, amount, chain_id, deposit_id, or counterparty</div>
+                                </div>
+                                <div class="param">
+                                    <span class="param-name">total</span>
+                                    <span class="param-type">integer</span>
+                                    <div class="param-desc">Total number of entries for the authenticated user</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div>
     </div>
