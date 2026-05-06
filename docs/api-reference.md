@@ -21,9 +21,18 @@ If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`
 - **JSON** for all request and response bodies.
 - **Hex strings** include the `0x` prefix and are normalised to lowercase.
 - **Amounts** are integers in the token's base units (wei for ETH, smallest unit for ERC-20). Strings are accepted; scientific notation is parsed with `Decimal` to preserve precision.
-- **Signatures** are EIP-712 typed-data signatures. Each signed operation has its own typed-data schema defined in the contracts (`solidity/contracts/EVMSignerAndVerifier.sol`).
-- **Nonces** are per-user, per-operation. Always fetch the current nonce immediately before signing — locks, modify-lock, transfer, transfer-locked, and withdrawals each have their own nonce endpoint.
+- **Signatures** are EIP-712 typed-data signatures. User-signed accounting operations are defined in `solidity/contracts/EIP712SignatureVerifier.sol`.
+- **Nonces** are per-operation. User-signed operations key nonces by recovered signer; service-signed lock operations key nonces by service. Always fetch the current nonce immediately before signing.
 - **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for validation errors, `401` for missing/invalid auth, `422` for contract reverts, `429` for rate-limit, `500` for internal failures.
+
+### User-Signed EIP-712 Types
+
+| Type | Fields |
+|---|---|
+| `Lock` | `serviceAddress address`, `tokenId bytes32`, `amount uint256`, `expiry uint256`, `nonce uint256` |
+| `ModifyLock` | `lockId uint256`, `amount uint256`, `newExpiry uint256`, `nonce uint256` |
+| `Transfer` | `toAddress address`, `tokenId bytes32`, `amount uint256`, `nonce uint256` |
+| `Withdraw` | `tokenId bytes32`, `amount uint256`, `nonce uint256` |
 
 ## Authentication
 
@@ -117,9 +126,9 @@ Behaviour notes:
 ## Withdrawal Flow
 
 ```
-1. GET /withdraw/nonce/{user}       → current nonce, sign EIP-712 Withdraw(nonce, …)
-2. POST /withdraw {…, nonce, sig}   → balance debited immediately, nonce reserved,
-                                      withdrawal queued for later block
+1. GET /withdraw/nonce/{user}       → current nonce, sign EIP-712 Withdraw(token_id, amount, nonce)
+2. POST /withdraw                  → {token_id, amount, nonce, signature};
+                                      balance debited immediately and withdrawal queued
 3. GET /withdraw/pending/{user}     → poll; resolution + broadcast happens automatically
                                       in the WithdrawalProcessor (~12s loop)
 ```
@@ -134,10 +143,10 @@ Locks are escrow primitives: a user locks funds for a service, and the service c
 
 | Endpoint | Signer | Purpose |
 |---|---|---|
-| `GET /funds/lock/nonce/{user}` | — | Fetch nonce for `LockFunds` EIP-712 |
-| `POST /funds/lock` | user | Create a new lock (`{user_address, service_address, token_id, amount, expiry, nonce, signature}`) |
+| `GET /funds/lock/nonce/{user}` | — | Fetch nonce for `Lock` EIP-712 |
+| `POST /funds/lock` | user | Create a new lock (`{service_address, token_id, amount, expiry, nonce, signature}`) |
 | `GET /funds/modify-lock/nonce/{user}` | — | Fetch nonce for `ModifyLock` EIP-712 |
-| `POST /funds/modify-lock` | user | Add funds and/or extend expiry. At least one of `amount > 0` or `new_expiry > current_expiry` must hold; pure no-ops are rejected. |
+| `POST /funds/modify-lock` | user | Add funds and/or extend expiry (`{lock_id, amount, new_expiry, nonce, signature}`). Pure no-ops are rejected. |
 | `GET /funds/transfer-locked/nonce/{service}` | — | Fetch nonce for `TransferFromLock` EIP-712 |
 | `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`) |
 | `POST /funds/withdraw-from-lock` | user (auth) | User withdraws locked funds directly to an external destination (`{to_address, lock_id, amount, nonce, signature}` — the user is resolved from the auth header, not the body) |
@@ -155,7 +164,7 @@ Direct user-to-user balance transfer inside the accounting module — no on-chai
 
 ```
 GET  /funds/transfer/nonce/{user}     → current Transfer nonce
-POST /funds/transfer                  → {user_address, to_address, token_id, amount, nonce, signature}
+POST /funds/transfer                  → {to_address, token_id, amount, nonce, signature}
 ```
 
 The signature is an EIP-712 `Transfer` from the source user.

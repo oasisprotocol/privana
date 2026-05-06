@@ -56,14 +56,12 @@ task("directWithdraw", "Withdraw directly on-chain without ROFL/API")
     // 3. Sign EIP-712 withdrawal
     const types = {
       Withdraw: [
-        { name: "userAddress", type: "address" },
         { name: "tokenId", type: "bytes32" },
         { name: "amount", type: "uint256" },
         { name: "nonce", type: "uint256" },
       ],
     };
     const message = {
-      userAddress,
       tokenId: args.tokenid,
       amount,
       nonce,
@@ -78,7 +76,6 @@ task("directWithdraw", "Withdraw directly on-chain without ROFL/API")
     // 5. Submit requestWithdrawal directly on Sapphire
     console.log("Submitting requestWithdrawal on Sapphire...");
     const requestTx = await accounting.requestWithdrawal(
-      userAddress,
       args.tokenid,
       amount,
       nonce,

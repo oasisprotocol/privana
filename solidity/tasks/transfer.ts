@@ -91,10 +91,9 @@ task("transfer")
     const nonce = await accounting.transferNonces(userAddress);
     console.log("Transfer nonce:", nonce.toString());
 
-    // Define Transfer type (now includes nonce)
+    // Define Transfer type
     const types = {
       Transfer: [
-        { name: "userAddress", type: "address" },
         { name: "toAddress", type: "address" },
         { name: "tokenId", type: "bytes32" },
         { name: "amount", type: "uint256" },
@@ -104,7 +103,6 @@ task("transfer")
 
     // Create message
     const message = {
-      userAddress: userAddress,
       toAddress: toAddress,
       tokenId: args.tokenid,
       amount: BigInt(args.amount),
@@ -115,7 +113,6 @@ task("transfer")
       "\nMessage to sign:",
       JSON.stringify(
         {
-          userAddress: message.userAddress,
           toAddress: message.toAddress,
           tokenId: message.tokenId,
           amount: message.amount.toString(),
@@ -135,7 +132,6 @@ task("transfer")
     // Submit to API
     const apiUrl = `${apiBaseUrl}/v1/accounting/funds/transfer`;
     const payload = {
-      user_address: userAddress,
       to_address: toAddress,
       token_id: args.tokenid,
       amount: args.amount,

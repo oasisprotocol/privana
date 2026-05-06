@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from eth_account import Account
+from eth_account.messages import encode_typed_data
 from eth_account.signers.local import LocalAccount
 from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
@@ -122,6 +123,7 @@ class AccountingContractService:
         self._siwe_auth_address: Optional[ChecksumAddress] = None
         self._siwe_auth_reader: Optional[AsyncContract] = None
         self._confidential_siwe_auth_reader: Optional[AsyncContract] = None
+        self._eip712_domain: Optional[Dict[str, Any]] = None
 
         self.rofl_client = RoflAppdClient()
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
@@ -217,6 +219,51 @@ class AccountingContractService:
         if self.contract_reader is None:
             raise ValueError("SAPPHIRE_RPC_URL must be configured to perform withdrawal operations")
         return self.contract_reader
+
+    async def _get_eip712_domain(self) -> Dict[str, Any]:
+        if self._eip712_domain is not None:
+            return self._eip712_domain
+
+        contract_reader = self._get_reader_contract()
+        domain = await contract_reader.functions.eip712Domain().call()
+        self._eip712_domain = {
+            "name": domain[1],
+            "version": domain[2],
+            "chainId": int(domain[3]),
+            "verifyingContract": _to_checksum(domain[4]),
+        }
+        return self._eip712_domain
+
+    async def _recover_eip712_signer(
+        self,
+        primary_type: str,
+        message_types: list[Dict[str, str]],
+        message: Dict[str, Any],
+        signature: HexBytes,
+    ) -> ChecksumAddress:
+        domain = await self._get_eip712_domain()
+        try:
+            signable = encode_typed_data(
+                domain_data=domain,
+                message_types={primary_type: message_types},
+                message_data=message,
+            )
+            signer = Account.recover_message(signable, signature=signature)
+        except Exception as exc:
+            raise ValueError("Invalid EIP-712 signature") from exc
+
+        return _to_checksum(signer)
+
+    async def _validate_user_nonce(
+        self, user: ChecksumAddress, nonce: int, nonce_fn: str, label: str
+    ) -> None:
+        contract_reader = self._get_reader_contract()
+        expected_nonce = await getattr(contract_reader.functions, nonce_fn)(user).call()
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"{label} nonce mismatch: got {nonce}, expected {expected_nonce}. "
+                f"The nonce may already have been used by another request."
+            )
 
     async def _get_siwe_auth_address(self) -> ChecksumAddress:
         if self._siwe_auth_address is not None:
@@ -622,24 +669,33 @@ class AccountingContractService:
     # ------------------------------------------------------------------
 
     async def lock_funds(self, payload: Dict) -> SubmissionResult:
-        user = self._require_address(payload["user_address"], "user_address")
         service = self._require_address(payload["service_address"], "service_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         expiry = self._require_positive(payload["expiry"], "expiry")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-
-        contract_reader = self._get_reader_contract()
-        expected_nonce = await contract_reader.functions.createLockNonces(user).call()
-        if nonce != expected_nonce:
-            raise ValueError(
-                f"createLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                f"The nonce may already have been used by another request."
-            )
+        user = await self._recover_eip712_signer(
+            "Lock",
+            [
+                {"name": "serviceAddress", "type": "address"},
+                {"name": "tokenId", "type": "bytes32"},
+                {"name": "amount", "type": "uint256"},
+                {"name": "expiry", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+            ],
+            {
+                "serviceAddress": service,
+                "tokenId": _to_prefixed_hex(token),
+                "amount": amount,
+                "expiry": expiry,
+                "nonce": nonce,
+            },
+            signature,
+        )
+        await self._validate_user_nonce(user, nonce, "createLockNonces", "createLock")
 
         fn = self.contract.functions.createLock(
-            user,
             service,
             token,
             amount,
@@ -650,23 +706,30 @@ class AccountingContractService:
         return await self._submit(fn._encode_transaction_data())
 
     async def modify_lock(self, payload: Dict) -> SubmissionResult:
-        user = self._require_address(payload["user_address"], "user_address")
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
         amount = self._require_positive(payload["amount"], "amount", allow_zero=True)
         new_expiry = self._require_positive(payload["new_expiry"], "new_expiry")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-
-        contract_reader = self._get_reader_contract()
-        expected_nonce = await contract_reader.functions.modifyLockNonces(user).call()
-        if nonce != expected_nonce:
-            raise ValueError(
-                f"modifyLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                f"The nonce may already have been used by another request."
-            )
+        user = await self._recover_eip712_signer(
+            "ModifyLock",
+            [
+                {"name": "lockId", "type": "uint256"},
+                {"name": "amount", "type": "uint256"},
+                {"name": "newExpiry", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+            ],
+            {
+                "lockId": lock_id,
+                "amount": amount,
+                "newExpiry": new_expiry,
+                "nonce": nonce,
+            },
+            signature,
+        )
+        await self._validate_user_nonce(user, nonce, "modifyLockNonces", "modifyLock")
 
         fn = self.contract.functions.modifyLock(
-            user,
             lock_id,
             amount,
             new_expiry,
@@ -676,24 +739,30 @@ class AccountingContractService:
         return await self._submit(fn._encode_transaction_data())
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
-        user = self._require_address(payload["user_address"], "user_address")
         to_addr = self._require_address(payload["to_address"], "to_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-
-        # Validate transfer nonce matches on-chain state
-        contract_reader = self._get_reader_contract()
-        expected_nonce = await contract_reader.functions.transferNonces(user).call()
-        if nonce != expected_nonce:
-            raise ValueError(
-                f"Transfer nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                f"The nonce may already have been used by another request."
-            )
+        user = await self._recover_eip712_signer(
+            "Transfer",
+            [
+                {"name": "toAddress", "type": "address"},
+                {"name": "tokenId", "type": "bytes32"},
+                {"name": "amount", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+            ],
+            {
+                "toAddress": to_addr,
+                "tokenId": _to_prefixed_hex(token),
+                "amount": amount,
+                "nonce": nonce,
+            },
+            signature,
+        )
+        await self._validate_user_nonce(user, nonce, "transferNonces", "Transfer")
 
         fn = self.contract.functions.transferBalance(
-            user,
             to_addr,
             token,
             amount,
@@ -786,20 +855,25 @@ class AccountingContractService:
         return await self._submit(fn._encode_transaction_data())
 
     async def request_withdrawal(self, payload: Dict) -> SubmissionResult:
-        user = self._require_address(payload["user_address"], "user_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-
-        # Validate withdrawal nonce matches on-chain state
-        contract_reader = self._get_reader_contract()
-        expected_nonce = await contract_reader.functions.withdrawalNonces(user).call()
-        if nonce != expected_nonce:
-            raise ValueError(
-                f"Withdrawal nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                f"The nonce may already have been used by another request."
-            )
+        user = await self._recover_eip712_signer(
+            "Withdraw",
+            [
+                {"name": "tokenId", "type": "bytes32"},
+                {"name": "amount", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+            ],
+            {
+                "tokenId": _to_prefixed_hex(token),
+                "amount": amount,
+                "nonce": nonce,
+            },
+            signature,
+        )
+        await self._validate_user_nonce(user, nonce, "withdrawalNonces", "Withdrawal")
 
         # Validate token and destination chain before on-chain submission
         context = await self._get_token_context(token)
@@ -820,7 +894,6 @@ class AccountingContractService:
         await self._check_destination_balance(context.chain_id, context.is_native, amount)
 
         fn = self.contract.functions.requestWithdrawal(
-            user,
             token,
             amount,
             nonce,

@@ -14,7 +14,6 @@ from src.models.accounting import (
 def test_lock_funds_request_requires_nonce():
     with pytest.raises(ValidationError):
         LockFundsRequest(
-            user_address="0x1234567890123456789012345678901234567890",
             service_address="0x1234567890123456789012345678901234567890",
             token_id="0xdeadbeef",
             amount=1000000,
@@ -26,7 +25,6 @@ def test_lock_funds_request_requires_nonce():
 
 def test_lock_funds_request_accepts_nonce():
     req = LockFundsRequest(
-        user_address="0x1234567890123456789012345678901234567890",
         service_address="0x1234567890123456789012345678901234567890",
         token_id="0xdeadbeef",
         amount=1000000,
@@ -40,7 +38,6 @@ def test_lock_funds_request_accepts_nonce():
 def test_lock_funds_request_rejects_negative_nonce():
     with pytest.raises(ValidationError):
         LockFundsRequest(
-            user_address="0x1234567890123456789012345678901234567890",
             service_address="0x1234567890123456789012345678901234567890",
             token_id="0xdeadbeef",
             amount=1000000,
@@ -53,7 +50,6 @@ def test_lock_funds_request_rejects_negative_nonce():
 def test_modify_lock_request_requires_nonce():
     with pytest.raises(ValidationError):
         ModifyLockRequest(
-            user_address="0x1234567890123456789012345678901234567890",
             lock_id=1,
             amount=0,
             new_expiry=9999999999,
@@ -64,7 +60,6 @@ def test_modify_lock_request_requires_nonce():
 
 def test_modify_lock_request_accepts_nonce():
     req = ModifyLockRequest(
-        user_address="0x1234567890123456789012345678901234567890",
         lock_id=1,
         amount=0,
         new_expiry=9999999999,

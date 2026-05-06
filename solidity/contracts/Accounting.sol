@@ -355,7 +355,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      *      Locked funds are stored in the user's activeLocks array.
      *      The expiry must be a timestamp in the future (> block.timestamp).
      *
-     * @param userAddress The address of the user whose funds will be locked
      * @param serviceAddress The address of the service that will have access to the locked funds
      * @param tokenId The identifier of the token to lock
      * @param amount The amount of tokens to lock
@@ -364,7 +363,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param signature The EIP-712 signature from the user authorizing the lock
      */
     function createLock(
-        address userAddress,
         address serviceAddress,
         bytes32 tokenId,
         uint256 amount,
@@ -375,8 +373,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (expiry <= block.timestamp) revert InvalidExpiry();
         if (amount == 0) revert InvalidAmount();
 
-        EIP712SignatureVerifier.verifyLockSignature(
-            userAddress,
+        address userAddress = EIP712SignatureVerifier.verifyLockSignature(
             serviceAddress,
             tokenId,
             amount,
@@ -471,7 +468,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @notice Modifies an existing lock by increasing the locked amount and/or extending expiry.
      * @dev Expiry can only be extended (newExpiry >= current expiry). Amount increases are
      *      drawn from the user's available balance. Authorized via EIP-712 user signature.
-     * @param userAddress The address of the user whose lock is being modified
      * @param lockId The unique identifier of the lock to modify
      * @param amount Additional amount to add to the lock (0 to only extend expiry)
      * @param newExpiry The new expiry timestamp for the lock
@@ -479,13 +475,20 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param signature The EIP-712 signature from the user authorizing the modification
      */
     function modifyLock(
-        address userAddress,
         uint256 lockId,
         uint256 amount,
         uint256 newExpiry,
         uint256 nonce,
         bytes calldata signature
     ) public {
+        address userAddress = EIP712SignatureVerifier.verifyModifyLockSignature(
+            lockId,
+            amount,
+            newExpiry,
+            nonce,
+            signature
+        );
+
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
@@ -495,15 +498,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (newExpiry < lock.expiry) revert InvalidExpiry();
 
         if (amount == 0 && newExpiry == lock.expiry) revert InvalidAmount();
-
-        EIP712SignatureVerifier.verifyModifyLockSignature(
-            userAddress,
-            lockId,
-            amount,
-            newExpiry,
-            nonce,
-            signature
-        );
 
         if (amount > 0) {
             if (balances[userAddress][lock.tokenId] < amount)
@@ -749,10 +743,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * - EIP-712 signature verification to authorize the transfer
      * - Balance verification before debiting
      *
-     * @dev The signature must be from the userAddress (sender).
+     * @dev The signature must be from the sender.
      *      This is an internal transfer that doesn't generate blockchain transactions.
      *
-     * @param userAddress The address of the user sending the funds
      * @param toAddress The address of the user receiving the funds
      * @param tokenId The identifier of the token being transferred
      * @param amount The amount of tokens to transfer
@@ -760,7 +753,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param signature The EIP-712 signature from the sender authorizing the transfer
      */
     function transferBalance(
-        address userAddress,
         address toAddress,
         bytes32 tokenId,
         uint256 amount,
@@ -769,8 +761,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        EIP712SignatureVerifier.verifyTransferSignature(
-            userAddress,
+        address userAddress = EIP712SignatureVerifier.verifyTransferSignature(
             toAddress,
             tokenId,
             amount,
@@ -804,14 +795,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * - Balance verification before debiting
      * - Nonce setting when scheduling transactions
      *
-     * @param userAddress The address of the user requesting the withdrawal
      * @param tokenId The identifier of the token to withdraw
      * @param amount The amount of tokens to withdraw
      * @param nonce The user's current withdrawal nonce for replay protection
      * @param signature The EIP-712 signature from the user authorizing the withdrawal
      */
     function requestWithdrawal(
-        address userAddress,
         bytes32 tokenId,
         uint256 amount,
         uint256 nonce,
@@ -819,8 +808,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        EIP712SignatureVerifier.verifyWithdrawSignature(
-            userAddress,
+        address userAddress = EIP712SignatureVerifier.verifyWithdrawSignature(
             tokenId,
             amount,
             nonce,

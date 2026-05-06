@@ -3,8 +3,8 @@ import { task } from "hardhat/config";
 task("sign")
   .addParam("contract", "The address of the Accounting contract")
   .addParam("type", "Signature type: lock, transfer, transferlocked, or withdraw")
-  .addParam("user", "User address")
   .addParam("amount", "Amount in ether units (e.g., '1' for 1 token)")
+  .addOptionalParam("user", "Lock owner address (required for transferlocked)")
   .addOptionalParam("tokenid", "Token ID (32-byte hex, required for lock/transfer/withdraw)")
   .addOptionalParam("to", "Recipient address (required for transfer/transferlocked)")
   .addOptionalParam("service", "Service address (required for lock)")
@@ -24,6 +24,7 @@ task("sign")
 
     const amountWei = hre.ethers.parseEther(args.amount);
     const signatureType = args.type.toLowerCase();
+    const userAddress = hre.ethers.getAddress(signer.address);
     let types: any;
     let message: any;
 
@@ -37,31 +38,32 @@ task("sign")
 
         types = {
           Lock: [
-            { name: "userAddress", type: "address" },
             { name: "serviceAddress", type: "address" },
             { name: "tokenId", type: "bytes32" },
             { name: "amount", type: "uint256" },
             { name: "expiry", type: "uint256" },
+            { name: "nonce", type: "uint256" },
           ]
         };
+        const lockNonce = await accounting.createLockNonces(userAddress);
         message = {
-          userAddress: args.user,
           serviceAddress: args.service,
           tokenId: args.tokenid,
           amount: amountWei,
           expiry: expiry,
+          nonce: lockNonce,
         };
         console.log(`Expiry: ${expiry} (${new Date(expiry * 1000).toISOString()})`);
+        console.log(`Lock nonce: ${lockNonce}`);
         break;
 
       case "transfer":
         if (!args.tokenid || !args.to) {
           throw new Error("Transfer requires: tokenid and to");
         }
-        const transferNonce = await accounting.transferNonces(args.user);
+        const transferNonce = await accounting.transferNonces(userAddress);
         types = {
           Transfer: [
-            { name: "userAddress", type: "address" },
             { name: "toAddress", type: "address" },
             { name: "tokenId", type: "bytes32" },
             { name: "amount", type: "uint256" },
@@ -69,7 +71,6 @@ task("sign")
           ]
         };
         message = {
-          userAddress: args.user,
           toAddress: args.to,
           tokenId: args.tokenid,
           amount: amountWei,
@@ -79,8 +80,8 @@ task("sign")
         break;
 
       case "transferlocked":
-        if (!args.to || args.lockid === undefined) {
-          throw new Error("TransferLocked requires: to and lockid");
+        if (!args.user || !args.to || args.lockid === undefined) {
+          throw new Error("TransferLocked requires: user, to and lockid");
         }
         types = {
           TransferLocked: [
@@ -104,16 +105,18 @@ task("sign")
         }
         types = {
           Withdraw: [
-            { name: "userAddress", type: "address" },
             { name: "tokenId", type: "bytes32" },
             { name: "amount", type: "uint256" },
+            { name: "nonce", type: "uint256" },
           ]
         };
+        const withdrawalNonce = await accounting.withdrawalNonces(userAddress);
         message = {
-          userAddress: args.user,
           tokenId: args.tokenid,
           amount: amountWei,
+          nonce: withdrawalNonce,
         };
+        console.log(`Withdrawal nonce: ${withdrawalNonce}`);
         break;
 
       default:

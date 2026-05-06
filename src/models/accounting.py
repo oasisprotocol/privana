@@ -132,7 +132,6 @@ class DepositQuoteResponse(BaseModel):
 class LockFundsRequest(BaseModel):
     """Payload for locking user funds for a service."""
 
-    user_address: str = Field(..., min_length=1)
     service_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
@@ -152,7 +151,6 @@ class LockFundsRequest(BaseModel):
 class ModifyLockRequest(BaseModel):
     """Payload for modifying an existing lock (add funds and/or extend expiry)."""
 
-    user_address: str = Field(..., min_length=1)
     lock_id: int = Field(..., ge=1)
     amount: int = Field(..., ge=0)
     new_expiry: int = Field(..., gt=0)
@@ -171,7 +169,6 @@ class ModifyLockRequest(BaseModel):
 class TransferFundsRequest(BaseModel):
     """Payload for transferring funds between users."""
 
-    user_address: str = Field(..., min_length=1)
     to_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
@@ -235,7 +232,6 @@ class UnlockFundsRequest(BaseModel):
 class WithdrawalRequest(BaseModel):
     """Payload for requesting a withdrawal transaction."""
 
-    user_address: str = Field(..., min_length=1)
     token_id: str = Field(..., min_length=4)
     amount: int = Field(..., gt=0)
     nonce: int = Field(..., ge=0)
