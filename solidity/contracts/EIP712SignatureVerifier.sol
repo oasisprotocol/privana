@@ -17,7 +17,8 @@ import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/crypt
  * Features:
  * - EIP-712 compliant typed data signatures for better UX and security
  * - Nonce-based replay protection per user/service per operation type
- * - Support for withdraw, lock, transfer, and locked transfer operations
+ * - Support for withdraw, lock, transfer, locked transfer, lock modification,
+ *   and locked-fund withdrawal operations
  * - Domain separation with name "AccountingModule" and version "1"
  *
  * The contract prevents signature replay attacks via per-operation nonces and ensures
@@ -57,20 +58,18 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
 
     /// @notice EIP-712 type hash for withdraw operations
     bytes32 private constant WITHDRAW_TYPEHASH =
-        keccak256(
-            "Withdraw(address userAddress,bytes32 tokenId,uint256 amount,uint256 nonce)"
-        );
+        keccak256("Withdraw(bytes32 tokenId,uint256 amount,uint256 nonce)");
 
     /// @notice EIP-712 type hash for lock operations
     bytes32 private constant LOCK_TYPEHASH =
         keccak256(
-            "Lock(address userAddress,address serviceAddress,bytes32 tokenId,uint256 amount,uint256 expiry,uint256 nonce)"
+            "Lock(address serviceAddress,bytes32 tokenId,uint256 amount,uint256 expiry,uint256 nonce)"
         );
 
     /// @notice EIP-712 type hash for transfer operations
     bytes32 private constant TRANSFER_TYPEHASH =
         keccak256(
-            "Transfer(address userAddress,address toAddress,bytes32 tokenId,uint256 amount,uint256 nonce)"
+            "Transfer(address toAddress,bytes32 tokenId,uint256 amount,uint256 nonce)"
         );
 
     /// @notice EIP-712 type hash for locked fund transfer operations
@@ -82,7 +81,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /// @notice EIP-712 type hash for modifying an existing lock (add funds and/or extend expiry)
     bytes32 private constant MODIFY_LOCK_TYPEHASH =
         keccak256(
-            "ModifyLock(address userAddress,uint256 lockId,uint256 amount,uint256 newExpiry,uint256 nonce)"
+            "ModifyLock(uint256 lockId,uint256 amount,uint256 newExpiry,uint256 nonce)"
         );
 
     /// @notice EIP-712 type hash for withdrawing directly from a lock to an external address
@@ -91,69 +90,62 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             "WithdrawFromLock(address userAddress,address toAddress,uint256 lockId,uint256 amount,uint256 nonce)"
         );
 
-
     /**
      * @notice Verifies a user's EIP-712 signature for withdrawing funds.
-     * @dev Internal function to prevent front-running attacks where an attacker
-     *      could call this directly to consume the nonce before requestWithdrawal.
+     * @dev Internal-only verifier; consumes the recovered signer's nonce so callers
+     *      cannot bump another user's nonce.
      *
-     * @param userAddress The address of the user requesting the withdrawal
      * @param tokenId The identifier of the token to withdraw
      * @param amount The amount of tokens to withdraw
-     * @param nonce The nonce for replay protection (must match user's current nonce)
+     * @param nonce The nonce for replay protection (must match signer's current nonce)
      * @param signature The EIP-712 signature authorizing the withdrawal
+     * @return userAddress The recovered signer authorizing the withdrawal
      */
     function verifyWithdrawSignature(
-        address userAddress,
         bytes32 tokenId,
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) internal {
-        if (nonce != withdrawalNonces[userAddress]) {
-            revert InvalidNonce();
-        }
-
+    ) internal returns (address userAddress) {
         bytes32 structHash = keccak256(
-            abi.encode(WITHDRAW_TYPEHASH, userAddress, tokenId, amount, nonce)
+            abi.encode(WITHDRAW_TYPEHASH, tokenId, amount, nonce)
         );
         bytes32 digest = _hashTypedDataV4(structHash);
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != userAddress) {
+        userAddress = ECDSA.recover(digest, signature);
+        if (userAddress == address(0)) {
             revert InvalidSignature();
         }
 
+        if (nonce != withdrawalNonces[userAddress]) {
+            revert InvalidNonce();
+        }
         withdrawalNonces[userAddress]++;
     }
 
     /**
      * @notice Verifies a user's EIP-712 signature for locking funds to a service.
+     * @dev Internal-only verifier; consumes the recovered signer's nonce so callers
+     *      cannot bump another user's nonce.
      *
-     * @param userAddress The address of the user whose funds are being locked
      * @param serviceAddress The address of the service that will have access to the locked funds
      * @param tokenId The identifier of the token to lock
      * @param amount The amount of tokens to lock
      * @param expiry The timestamp when the lock expires
-     * @param nonce The nonce for replay protection (must match user's current createLockNonces)
+     * @param nonce The nonce for replay protection (must match signer's current createLockNonces)
      * @param signature The EIP-712 signature authorizing the lock
+     * @return userAddress The recovered signer authorizing the lock
      */
     function verifyLockSignature(
-        address userAddress,
         address serviceAddress,
         bytes32 tokenId,
         uint256 amount,
         uint256 expiry,
         uint256 nonce,
         bytes calldata signature
-    ) internal {
-        if (nonce != createLockNonces[userAddress]) {
-            revert InvalidNonce();
-        }
-
+    ) internal returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(
                 LOCK_TYPEHASH,
-                userAddress,
                 serviceAddress,
                 tokenId,
                 amount,
@@ -162,42 +154,39 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             )
         );
         bytes32 digest = _hashTypedDataV4(structHash);
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != userAddress) {
+        userAddress = ECDSA.recover(digest, signature);
+        if (userAddress == address(0)) {
             revert InvalidSignature();
         }
 
+        if (nonce != createLockNonces[userAddress]) {
+            revert InvalidNonce();
+        }
         createLockNonces[userAddress]++;
     }
 
     /**
      * @notice Verifies a user's EIP-712 signature for transferring funds to another address.
-     * @dev Internal function to prevent front-running attacks where an attacker
-     *      could call this directly to consume the nonce before transferBalance.
+     * @dev Internal-only verifier; consumes the recovered signer's nonce so callers
+     *      cannot bump another user's nonce.
      *
-     * @param userAddress The address of the user initiating the transfer (sender)
      * @param toAddress The address receiving the funds
      * @param tokenId The identifier of the token to transfer
      * @param amount The amount of tokens to transfer
-     * @param nonce The nonce for replay protection (must match user's current transfer nonce)
+     * @param nonce The nonce for replay protection (must match signer's current transfer nonce)
      * @param signature The EIP-712 signature authorizing the transfer
+     * @return userAddress The recovered signer authorizing the transfer
      */
     function verifyTransferSignature(
-        address userAddress,
         address toAddress,
         bytes32 tokenId,
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) internal {
-        if (nonce != transferNonces[userAddress]) {
-            revert InvalidNonce();
-        }
-
+    ) internal returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(
                 TRANSFER_TYPEHASH,
-                userAddress,
                 toAddress,
                 tokenId,
                 amount,
@@ -205,11 +194,14 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             )
         );
         bytes32 digest = _hashTypedDataV4(structHash);
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != userAddress) {
+        userAddress = ECDSA.recover(digest, signature);
+        if (userAddress == address(0)) {
             revert InvalidSignature();
         }
 
+        if (nonce != transferNonces[userAddress]) {
+            revert InvalidNonce();
+        }
         transferNonces[userAddress]++;
     }
 
@@ -292,31 +284,26 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
 
     /**
      * @notice Verifies a user's EIP-712 signature for modifying an existing lock.
-     * @dev Internal function to prevent front-running attacks.
+     * @dev Internal-only verifier; consumes the recovered signer's nonce so callers
+     *      cannot bump another user's nonce.
      *
-     * @param userAddress The address of the user modifying the lock
      * @param lockId The unique identifier of the lock to modify
      * @param amount Additional funds to add to the lock (0 if only extending expiry)
      * @param newExpiry The new expiry timestamp for the lock
-     * @param nonce The nonce for replay protection (must match user's current modifyLockNonces)
+     * @param nonce The nonce for replay protection (must match signer's current modifyLockNonces)
      * @param signature The EIP-712 signature authorizing the modification
+     * @return userAddress The recovered signer authorizing the modification
      */
     function verifyModifyLockSignature(
-        address userAddress,
         uint256 lockId,
         uint256 amount,
         uint256 newExpiry,
         uint256 nonce,
         bytes calldata signature
-    ) internal {
-        if (nonce != modifyLockNonces[userAddress]) {
-            revert InvalidNonce();
-        }
-
+    ) internal returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(
                 MODIFY_LOCK_TYPEHASH,
-                userAddress,
                 lockId,
                 amount,
                 newExpiry,
@@ -324,11 +311,14 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             )
         );
         bytes32 digest = _hashTypedDataV4(structHash);
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != userAddress) {
+        userAddress = ECDSA.recover(digest, signature);
+        if (userAddress == address(0)) {
             revert InvalidSignature();
         }
 
+        if (nonce != modifyLockNonces[userAddress]) {
+            revert InvalidNonce();
+        }
         modifyLockNonces[userAddress]++;
     }
 

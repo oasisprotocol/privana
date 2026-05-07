@@ -7,7 +7,6 @@ import { MockAccounting, MockSiweAuth } from '../typechain-types';
 
 const types = {
   Lock: [
-    { name: 'userAddress', type: 'address' },
     { name: 'serviceAddress', type: 'address' },
     { name: 'tokenId', type: 'bytes32' },
     { name: 'amount', type: 'uint256' },
@@ -15,7 +14,6 @@ const types = {
     { name: 'nonce', type: 'uint256' },
   ],
   ModifyLock: [
-    { name: 'userAddress', type: 'address' },
     { name: 'lockId', type: 'uint256' },
     { name: 'amount', type: 'uint256' },
     { name: 'newExpiry', type: 'uint256' },
@@ -30,14 +28,12 @@ const types = {
     { name: 'serviceAddress', type: 'address' },
   ],
   Transfer: [
-    { name: 'userAddress', type: 'address' },
     { name: 'toAddress', type: 'address' },
     { name: 'tokenId', type: 'bytes32' },
     { name: 'amount', type: 'uint256' },
     { name: 'nonce', type: 'uint256' },
   ],
   Withdraw: [
-    { name: 'userAddress', type: 'address' },
     { name: 'tokenId', type: 'bytes32' },
     { name: 'amount', type: 'uint256' },
     { name: 'nonce', type: 'uint256' },
@@ -223,7 +219,6 @@ describe('Accounting history', function () {
     const expiry = (await latestTimestamp()) + 3600;
     const createLockNonce = await accounting.createLockNonces(userWallet1.address);
     const createLockSignature = await userWallet1.signTypedData(domain, { Lock: types.Lock }, {
-      userAddress: userWallet1.address,
       serviceAddress: userWallet2.address,
       tokenId: TEST_TOKEN.tokenId,
       amount: parseUsdt('10'),
@@ -231,7 +226,6 @@ describe('Accounting history', function () {
       nonce: createLockNonce,
     });
     await accounting.createLock(
-      userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
       parseUsdt('10'),
@@ -277,14 +271,12 @@ describe('Accounting history', function () {
 
     const transferNonce = await accounting.transferNonces(userWallet1.address);
     const transferSignature = await userWallet1.signTypedData(domain, { Transfer: types.Transfer }, {
-      userAddress: userWallet1.address,
       toAddress: userWallet3.address,
       tokenId: TEST_TOKEN.tokenId,
       amount: parseUsdt('1'),
       nonce: transferNonce,
     });
     await accounting.transferBalance(
-      userWallet1.address,
       userWallet3.address,
       TEST_TOKEN.tokenId,
       parseUsdt('1'),
@@ -294,13 +286,11 @@ describe('Accounting history', function () {
 
     const withdrawalNonce = await accounting.withdrawalNonces(userWallet1.address);
     const withdrawalSignature = await userWallet1.signTypedData(domain, { Withdraw: types.Withdraw }, {
-      userAddress: userWallet1.address,
       tokenId: TEST_TOKEN.tokenId,
       amount: parseUsdt('1'),
       nonce: withdrawalNonce,
     });
     await accounting.requestWithdrawal(
-      userWallet1.address,
       TEST_TOKEN.tokenId,
       parseUsdt('1'),
       withdrawalNonce,
@@ -342,7 +332,6 @@ describe('Accounting history', function () {
 
     const createLockNonce = await accounting.createLockNonces(userWallet1.address);
     const createLockSignature = await userWallet1.signTypedData(domain, { Lock: types.Lock }, {
-      userAddress: userWallet1.address,
       serviceAddress: userWallet2.address,
       tokenId: TEST_TOKEN.tokenId,
       amount: parseUsdt('3'),
@@ -350,7 +339,6 @@ describe('Accounting history', function () {
       nonce: createLockNonce,
     });
     await accounting.createLock(
-      userWallet1.address,
       userWallet2.address,
       TEST_TOKEN.tokenId,
       parseUsdt('3'),
@@ -361,14 +349,12 @@ describe('Accounting history', function () {
 
     const modifyLockNonce = await accounting.modifyLockNonces(userWallet1.address);
     const modifyLockSignature = await userWallet1.signTypedData(domain, { ModifyLock: types.ModifyLock }, {
-      userAddress: userWallet1.address,
       lockId: 1,
       amount: parseUsdt('2'),
       newExpiry: initialExpiry + 300,
       nonce: modifyLockNonce,
     });
     await accounting.modifyLock(
-      userWallet1.address,
       1,
       parseUsdt('2'),
       initialExpiry + 300,
@@ -392,7 +378,6 @@ describe('Accounting history', function () {
     for (let lockIndex = 0; lockIndex < 3; lockIndex++) {
       const nonce = await accounting.createLockNonces(userWallet1.address);
       const signature = await userWallet1.signTypedData(domain, { Lock: types.Lock }, {
-        userAddress: userWallet1.address,
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt('1'),
@@ -400,7 +385,6 @@ describe('Accounting history', function () {
         nonce,
       });
       await accounting.createLock(
-        userWallet1.address,
         userWallet2.address,
         TEST_TOKEN.tokenId,
         parseUsdt('1'),
@@ -462,7 +446,6 @@ describe('Accounting history', function () {
   it('rejects zero-amount direct withdrawals before appending history', async function () {
     const withdrawalNonce = await accounting.withdrawalNonces(userWallet1.address);
     const withdrawalSignature = await userWallet1.signTypedData(domain, { Withdraw: types.Withdraw }, {
-      userAddress: userWallet1.address,
       tokenId: TEST_TOKEN.tokenId,
       amount: 0,
       nonce: withdrawalNonce,
@@ -470,7 +453,6 @@ describe('Accounting history', function () {
 
     await expect(
       accounting.requestWithdrawal(
-        userWallet1.address,
         TEST_TOKEN.tokenId,
         0,
         withdrawalNonce,

@@ -144,7 +144,6 @@ task("withdraw")
     // Define Withdraw type
     const types = {
       Withdraw: [
-        { name: "userAddress", type: "address" },
         { name: "tokenId", type: "bytes32" },
         { name: "amount", type: "uint256" },
         { name: "nonce", type: "uint256" },
@@ -153,7 +152,6 @@ task("withdraw")
 
     // Create message
     const message = {
-      userAddress: userAddress,
       tokenId: args.tokenid,
       amount: BigInt(args.amount),
       nonce: nonce,
@@ -168,7 +166,6 @@ task("withdraw")
     // Submit to API
     const apiUrl = `${apiBaseUrl}/v1/accounting/withdraw`;
     const payload = {
-      user_address: userAddress,
       token_id: args.tokenid,
       amount: args.amount, // Keep as string to preserve precision for large values
       nonce: nonce.toString(),

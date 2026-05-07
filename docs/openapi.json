@@ -492,15 +492,9 @@
             "minLength": 4,
             "title": "Token Id",
             "type": "string"
-          },
-          "user_address": {
-            "minLength": 1,
-            "title": "User Address",
-            "type": "string"
           }
         },
         "required": [
-          "user_address",
           "service_address",
           "token_id",
           "amount",
@@ -697,15 +691,9 @@
           "signature": {
             "title": "Signature",
             "type": "string"
-          },
-          "user_address": {
-            "minLength": 1,
-            "title": "User Address",
-            "type": "string"
           }
         },
         "required": [
-          "user_address",
           "lock_id",
           "amount",
           "new_expiry",
@@ -1209,15 +1197,9 @@
             "minLength": 4,
             "title": "Token Id",
             "type": "string"
-          },
-          "user_address": {
-            "minLength": 1,
-            "title": "User Address",
-            "type": "string"
           }
         },
         "required": [
-          "user_address",
           "to_address",
           "token_id",
           "amount",
@@ -1565,15 +1547,9 @@
             "minLength": 4,
             "title": "Token Id",
             "type": "string"
-          },
-          "user_address": {
-            "minLength": 1,
-            "title": "User Address",
-            "type": "string"
           }
         },
         "required": [
-          "user_address",
           "token_id",
           "amount",
           "nonce",
