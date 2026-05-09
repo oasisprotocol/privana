@@ -167,7 +167,7 @@ bun run build
 
 For staging (Sapphire Testnet):
 ```shell
-npx hardhat upgrade --network sapphire-testnet --proxy 0xFfB141bF8269E458b074A274bE6E8F971f08A401
+npx hardhat upgrade --network sapphire-testnet --proxy 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642
 ```
 
 For production (Sapphire Mainnet):
@@ -285,11 +285,18 @@ Run `npx hardhat <task> --help` for parameter details.
 
 | Contract | Address |
 |----------|---------|
-| AccountingSiweAuth | `0x8675DB981c1CE71c1F5346465C8E36daF3d05468` |
-| Accounting (Proxy) | `0xFfB141bF8269E458b074A274bE6E8F971f08A401` |
-| Accounting (Implementation) | refresh after each upgrade |
+| AccountingSiweAuth | `0xFc97d47F0bc8f4E50333D34c281705E0666D3fD7` |
+| Accounting (Proxy) | `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642` |
+| Accounting (Implementation) | `0x12fb6720c445aa2d38009eb64e191e26C30b4CAA` (refresh after each upgrade) |
 
 **ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
+
+**Source-chain operator addresses** (derived inside Sapphire; query via `cast call`):
+
+| Role | Address | Funding |
+|------|---------|---------|
+| `evmAddress` (sweep / withdrawal signer) | `0xF0006F3222b033De6DBE4CeB1E5AE99E54Aa398F` | None — does not pay gas directly. |
+| `gasTankAddress` (funds deposit addresses for ERC20 sweeps) | `0xDfFE6d45F1D52320d8F05CCd6623b09EcA05CF53` | **Must hold native gas on every source chain** (Base Sepolia at minimum). |
 
 ### Production (Sapphire Mainnet)
 
