@@ -10,7 +10,7 @@ task("getBalance")
   .addOptionalParam(
     "apiurl",
     "API base URL",
-    "https://flexvaults-staging.rofl.build",
+    "https://testnet.privana.finance",
   )
   .addOptionalParam("chainid", "Chain ID for SIWE message", "84532")
   .setDescription("Get user balance for a token (requires SIWE authentication)")

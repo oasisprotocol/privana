@@ -41,7 +41,7 @@ services:
     ports:
       - "8000:8000"
     annotations:
-      net.oasis.proxy.ports.8000.custom_domain: flexvaults-staging.rofl.build
+      net.oasis.proxy.ports.8000.custom_domain: testnet.privana.finance
     restart: on-failure
 
 volumes:
