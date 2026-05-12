@@ -1,0 +1,39 @@
+{
+  "name": "privana-docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Privana product documentation — built with Docusaurus 3",
+  "scripts": {
+    "start": "docusaurus start",
+    "build": "docusaurus build",
+    "serve": "docusaurus serve",
+    "clear": "docusaurus clear",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.1",
+    "@docusaurus/preset-classic": "3.10.1",
+    "@docusaurus/theme-mermaid": "3.10.1",
+    "@fontsource-variable/geist": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource/corben": "^5.2.8",
+    "@mdx-js/react": "^3.0.0",
+    "@mermaid-js/layout-elk": "^0.2.1",
+    "clsx": "^2.0.0",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "3.10.1",
+    "@docusaurus/tsconfig": "3.10.1",
+    "@docusaurus/types": "3.10.1",
+    "typescript": "~5.6.2"
+  },
+  "overrides": {
+    "webpackbar": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=20.0"
+  }
+}
