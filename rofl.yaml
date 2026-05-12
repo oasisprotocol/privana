@@ -57,7 +57,8 @@ deployments:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
         id: "0000000000000524"
-  staging:
+  testnet:
+    default: true
     app_id: rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y
     network: testnet
     paratime: sapphire
@@ -73,75 +74,69 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: 9n71JtyeH/E5Yb3N2lWE1oA5gOIp/9ZjqWsSFZsLdtIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 1M4VPV6CgzkcJ17g9Dc2xv3Nh+nztm2AHX3A3NCkmCYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: DSzaY8WjOj9PNow/2AMw3DmQn8UwLar57cDswKmwdykAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: M+WEzvMPifBVSvgWHJXuGRZCl6czfQM0NcJpX4IH3PwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggEXeqjA3UPXW6jyMoB3+0tMc0qLV+tcjxW0CATnVSmmJkbmFtZVgr9xhGLc2k7lOl8m/cK45mEOGYssHVfWHBQuaBcOFRcPj6/e3VmVKSzJuecGVub25jZU/aWOeZ15zLtIb/E82ibCdldmFsdWVYOo9LJnEPmj5lpUi9V5d2R52n8EsAQvV6M6fTuRIgq9zPshbqI3Hha0kMaa6lyTnc0lJmC8dKgZb3xXc=
+        value: pGJwa1gglk3WcjdYm1qYP54nwLktbT00XefroBhD9hpOIvGRuQhkbmFtZVgrKmMgj5FEG01o5L2yzQ3EhYbB1X8PjbrkAmWtdH/USXFzMwBqahkPKaVVcWVub25jZU+T87togpz8I8DdALQs4JhldmFsdWVYOtu/qAcF7Ls9zauEzxMXBSD7/J1zXjVwyyw0jXkmNihotnY+tPwgo3CD0S34bGDYW4neLMswxt39o0M=
       - name: ACCOUNTING_GAS_LIMIT
-        value: pGJwa1ggDMbxa49gq0VcwabxCihMRvt7RXdTNCb6Q4jeS6usgWdkbmFtZVgkO4f5aa2CgJxT7aPiB1rbHrIlkAzHiyZc4C4GOnp5Bp27H0UGZW5vbmNlT5A/ssrpehiC9L4R/hgS22V2YWx1ZVY7alFDHmhstZb7tzWuG489oSid/Bo+
+        value: pGJwa1ggIJodS8IYFWfu73nnggx+wSE0aNlrzojj3pELqBiPXgNkbmFtZVgk8Wd0FpLNV2IbZD6kHgSZapE2hx3muXBuVLSs8EndNBFFvgGLZW5vbmNlT4Jf2pLv3N/Dc1pXznOfQ2V2YWx1ZVYNWRTn6o0tFUOyR2dVBXTXfCmpx5Ao
       - name: ALCHEMY_API_KEY
-        value: pGJwa1ggu6FBI1v/sfwSYNLT5I0By1tYB/ymZGnlMhRArPQQfUVkbmFtZVgf4BMncpoehnlcpVPj0y8fFpuSUriI3EiDuGAc3xAcfWVub25jZU/BZ5MJ6HsuFizZaHAe1VdldmFsdWVYJRF+MEZVxJm6hYxRqHIawcBAQ0ubyZM0BccbzdF4Hm+c5IIRTEY=
+        value: pGJwa1ggqWYdPZ+xmod3i2BwoE5AmtkzR1nKn1k55pqrLhbDOkFkbmFtZVgfTEEyHo41IfT0/S9rozpYdgiBOcxDRpVoIqPakZIRgGVub25jZU/niWQqTcYqDLSI/NnC5oVldmFsdWVYJTpmL2tVI1DdsZju0Ua/c229bCII/GPQzuhRoYPcwAPKWAQWsvc=
       - name: API_HOST
-        value: pGJwa1ggCNPWMVRGtY4kD3mICOCGGfbFKebYcjXU2cI+PrXhzmBkbmFtZVgY6M+uxlTP3V2co85MyuHZ6hPHh09/+Gt+ZW5vbmNlT0qsPsVFuFuItsOpzJ/SCmV2YWx1ZVelpf/ojlcT5afVcFUPZJXlQ9v2WXP5sw==
+        value: pGJwa1ggE75nBAo1u4M3tZdFZ5E6nYZEHo2Du4LCYe6zl5M/yW1kbmFtZVgY1FZpw2zW/LTlfX3ZNxk5VX02DKtuEw8SZW5vbmNlT7VMZQxMIoeOCoKlzWc5HmV2YWx1ZVdUSaOl/MZwM42/gULxMVHuCsEtPaauUw==
       - name: API_PORT
-        value: pGJwa1ggwgvbgBSdGY/svc+ZgCT6hEKHf1EDdZaRBIlHVl45SFRkbmFtZVgY1YWgW0zMcl7CHrL36KwTeR2RzHZS3Sb0ZW5vbmNlT4d9zVMltAvlnfF8fqqXUmV2YWx1ZVQuuAIJ+Tu32iMENvd3+Qh1jH2XCg==
+        value: pGJwa1ggh3IC9TbphAfFi43hxKtWk3XvrB4640NbH28N/kP1i1BkbmFtZVgY6UNfLxoBM+wZMDmvu07pGS9y4AHTph2zZW5vbmNlT9gg8OSSDEmEEx+C2S/OjWV2YWx1ZVSlII7E0i54kccNGH5brasGJnLcIw==
       - name: AUTH_TOKEN_STORAGE_DIR
-        value: pGJwa1ggQ63ZJYMmNwU43JiVA11S5LpEvOndWT1WxNRqH84wKyFkbmFtZVgm8FqvQKgMLozYluSRCKOV7grLWX9YnJulXIil/6+gb3AvJTA+ck1lbm9uY2VPQWXFYFsna/pitgN5+EjbZXZhbHVlWBxml2bsQqjjebmovG6j5odz64cnA0xw04mJfo29
+        value: pGJwa1ggVFyIGddWBEGVUu3Q53khQpiNHvsCprj1gS6CYGz3EG5kbmFtZVgmp1YB+0xUgtMvj5ieG1ek9KPp0twkERRUh4oOE06mFRM2t8BdXNllbm9uY2VPBfbqZKb73KwXIFyQ3t4EZXZhbHVlWByKuQPo2h7uf4f/lU6q6chufOp4KCN+17GmEQax
       - name: AUTH_TOKEN_VALIDITY_SECONDS
-        value: pGJwa1ggGEPc8+LrS7fEtRiVX97EesXaPsKcX5JXI4DcJDTJhGNkbmFtZVgrKAaCCDv0LyR4i8CHg/nsNFUeARoKFO7pj7MyO7O9Oyg3C/OLyNIdzIoj6mVub25jZU/y2gW6hdtoGBQDdMew2SNldmFsdWVVB+JUnl2co1Vwfa8yc9qfheLRd9bL
-      - name: BLOCK_STATE_DIR
-        value: pGJwa1ggjFLgUoD71zfilXP1pAgNbdomQ2OSd47ODFozE5davk9kbmFtZVgfsbCsHNFeiEjmNv89oXSN7f5Xq8GyXzAt6fyVodqA3GVub25jZU93+71Wn8evQymiL6vIsVhldmFsdWVYJqLwG7T96QJASRFyC6rurWEkCzXvM892HAeMEZS2EfLe5g1hQHs2
-      - name: DEPOSIT_POLL_INTERVAL
-        value: pGJwa1ggGDlSAdx63HvovVBLb2I+RMRWTd+QVmTFOz78iDa/IRRkbmFtZVglXirszL+dbIKJmcvurYqXN5j6vOtw5np+Uoz0ruq9Yl6pit9JxWVub25jZU9wREiPQ8Zy2Q23otlC7hpldmFsdWVRWUoBQQXzHvHpUlDA/ZiGRW0=
+        value: pGJwa1gg1C1FbFlZMz0egEUkLL6KfwLAv3Z8z7XwZJbZZATEvRNkbmFtZVgrR8b07CnVcYutNuO/Gsw9j+GSd/4M6Yz70g1+87i6/91nFR1BQ50o4yn+aGVub25jZU8TfP32a+aWEpTsIEIv8jVldmFsdWVV6YK/qf4DQXJ1eeWI9hkyqpGXBJPK
       - name: ENVIRONMENT
-        value: pGJwa1gginPLiA40w3csi5W+MSOrDPXs1CwJs/x2bZbNbS542BhkbmFtZVgbU3mGfno+r0tLRplpjxLJUCNlA4URMSE3nB99ZW5vbmNlT/0wQbACNhGUbESHVEBplmV2YWx1ZVeHmBXQu40qqPIaVrmVU5e0F3p8qjLiqw==
-      - name: ERC20_USDC_84532
-        value: pGJwa1gghvFJ6CqPWlIDe9RpHEJLqdMIftoPyOxBJNzxqHyeeQBkbmFtZVggmlrhzJyTuLYroSfmsM33rv2W1nfChU8dgnoZzftXbpFlbm9uY2VPeMIOst4ThNvEaF3iMMpOZXZhbHVlWDpwAtsTcQZrQK6pZxv4ZndbSKOeckfPIYJvilG61LNdwnBJ//X4YrWb7rmkNp8iOOL3JkzwPCHveeJp
+        value: pGJwa1gg1IVs19wz8Z+0DEDX1n/ihCKKBZbfJ6dS78rU6+D8AwdkbmFtZVgbPHmMtgbfv//U2VD9l8MGtMyCw6Tcl/pG3lwRZW5vbmNlT7Ew55W4O1wgY/ULyVwYO2V2YWx1ZVdqVhAHmKvsoBjiQ5CkfzoPIx2yQj3dbA==
       - name: JWT_AUDIENCE
-        value: pGJwa1ggwO1dYYmAq0agikAWy7HIrYeRNIxZUH/2JXDaYnNSmB9kbmFtZVgcCc37wYXcspI6Bop0RNajlk5jghBk07qBC/TSi2Vub25jZU+17j5I8EbzFysOtT5iqOBldmFsdWVYGtnrmHVkRrNtKzYFsR9MRKZv7xgjSpp6MVHH
+        value: pGJwa1ggQ18gPHshAd974eSEaAzxtpD7HChoHbanGZAZ/8w5TlRkbmFtZVgctD74z7di8t6avuSGWEnqANiMqmyBXscRMs/apmVub25jZU/tbb7d5mTr2csDBaS6j95ldmFsdWVYGryphRW3gjr5F7BhFe8ZAjt2+lt7d7oKZV8P
       - name: JWT_EXPIRY_HOURS
-        value: pGJwa1gg0VAF/00/Rz7CdWGhfdLv11ysY8L73LBaaEC37xegXBVkbmFtZVggSqyMFJ7QGgUfLFDM6SstLXdNgqgdLJsNIZd04TiJw29lbm9uY2VPYOvbVcXsgChBfJ5s5ThKZXZhbHVlUo/ebgu391BF8Ojad1wGWAx1pA==
+        value: pGJwa1gg0ZM9q5LCetsq4Jgolwf1vgKvd0EQ1ZEClI1CSwn3IBpkbmFtZVgglebrPcZdsF9RFwzyhcLjY7eAuShfJ212xuKvdRkeZ9Vlbm9uY2VPDic8tQWbq608Xuy8sAVtZXZhbHVlUlLd6gbfJod1F4mcyZMWIGjqAw==
       - name: JWT_ISSUER
-        value: pGJwa1ggx0NypDIyf7LHdZytd3YrLAln9nNsJ2sJR5rS28jvc05kbmFtZVgarmEXHX+/FOE97vEMX8Pcr5mT+IBoI631Ecplbm9uY2VP6Eg/hTR3vkvj+z5jQlP+ZXZhbHVlWBpaRpkuKH5AgBeqYJYzwpKweJSJ4vuO4pUc7A==
+        value: pGJwa1ggwXsKYp5WI5DCd3wzS5PLDehXtuzH3SYe5iw1A6BTcRhkbmFtZVgaTTUyhYrDbRjgHMdPMWsA2bYI5DcGurGiFgxlbm9uY2VPfdCCr6+lbrxIxuLmxwN5ZXZhbHVlWBrNDdYqfZBcEMamFxQQ+cjQymbK/d+SLrm5lg==
       - name: JWT_REFRESH_EXPIRY_DAYS
-        value: pGJwa1ggUHj07xbDfbeJYuOVVWcnkPC5qHsI4Te651xkGbx/pGtkbmFtZVgnsQ7DYAn++Gea6Ueo8e9tfNWIG/vJMvwiRkjbpwrXSOHOrdFQKxk4ZW5vbmNlT8PRjwPtN661EBXHbZYZyGV2YWx1ZVGs8zybMV3TQ42u7bmWBvK9/Q==
+        value: pGJwa1ggcSiRz8TBUG++tM8v3leprNezTaAsxvp5+7nWxYQ00XZkbmFtZVgnBkv/+rZ2zAJfNnGk4RWMyrQ3nk9O7UvRu2wEtz/QgSMBonAXehRNZW5vbmNlT5yIyu0A6fB6+RBRO+qu3WV2YWx1ZVG5UO63LliTFV8tS5oqTA5AGg==
       - name: LOG_LEVEL
-        value: pGJwa1ggCX8TVNZ8zeU5mSFU9aMRNzArATGH59KO4xfZ5XYCMy1kbmFtZVgZOqBE6e6xWTJeFz1xyymew16Y+jv99W3sZmVub25jZU+iEwo1QziLrxyKZGjMh8pldmFsdWVUH5BDO/6Bz++wD4+nLRNcF+40NaI=
+        value: pGJwa1ggYK4LMLjGQkvptzXSnzZCsChZdNbBzhSHx2IxYi4gBG1kbmFtZVgZ5fF0I+9kWh7s9nnKxues0eF159G/+DrQJGVub25jZU85uT745e8A4l3RGeK4ErJldmFsdWVUXNhWlEbYW1NYvsqKFl5ioKuMDeo=
       - name: MIN_WITHDRAWAL_GAS_BALANCE
-        value: pGJwa1gggUHCPWaFJUiqyn9Hv1OEa5wvFJGIOxGaPbSO6nugbxxkbmFtZVgquTorp0Rqsr3zTWURos/cK/2C+Nyj4BRA2LOupn7rT9fCrFEvqD8W9X7+ZW5vbmNlT2cvRhANY65WktQip6FJwmV2YWx1ZVgeC21yOisePPNNhsgJNMuD8EjgfS/xWd1fu1qi40hw
-      - name: ROFL_ADAPTER_ADDRESS
-        value: pGJwa1gg6sxI0tOW+P9i70mzaoiPV3kixASB8eb94OGWk9X5FgpkbmFtZVgkRYEHa26/SDJOAf9yvjImQLa9j6sflD3hRUmriij30QtRFHA+ZW5vbmNlT3hMgtaXUsMvvSLU1Ubj6WV2YWx1ZVg6eg9AKVDdhDk+Rs1A4oLMZZ1dnQkqyAORpN/eRjK0aTNdjR/RFNqlchQgQTReJBq5aNfSRIb/dSvEzg==
+        value: pGJwa1gg38uf6F/wi68mH1mZM5q5cimC8XtRViqgSIOg86QfNDdkbmFtZVgqmOPH7f5bMOcIlIjQKcBTDQ9wV1sbyww6ll1YYxufwtIGlVtE1edoQXKuZW5vbmNlTwI5tdeygL/qoz4KMfWFAWV2YWx1ZVgeTe2sLGMjwv4QhfKxcihub7SDO0tGH2F0ESrhPj+T
       - name: SAPPHIRE_CHAIN_ID
-        value: pGJwa1ggR7JjnBMdg9Qtad61oF5W8jGjfwZ3zI7gTu1w9BdwXDtkbmFtZVgh+0I1wBEbdkXXWVahFQXzti0wUbe2+OQHwBYJFXZf7j8NZW5vbmNlTw26j0FtdYYekuO4MTuU7GV2YWx1ZVUT1PHvRP9SmLXmy5Qj6TtUCwQfNxw=
+        value: pGJwa1gg9nKWRqF2LczYVD0X+zkHNRg03cTE24we0lWFP9KDBm5kbmFtZVghix/1UTIIoEnCuahRl7327qYqWJ/pVVCfNFXWenGfMXqsZW5vbmNlTxCCgww+yVl4sff1+taEKGV2YWx1ZVUOzxqMo4x/mBniLO6TgXUsN/EB8co=
       - name: SAPPHIRE_RPC_URL
-        value: pGJwa1gg8pxihOB/9+WfsfY/Or/A3VKlM9e5NtSN11Lj/ufEnXJkbmFtZVggC2x8YNGClTsjOidO5OVDHwkYCZEJbxqUpByzY6XILbxlbm9uY2VPtJJ2E8IxjKJSLpUmsTG/ZXZhbHVlWDFIYUVHZZSfftNmyTLHEcA+XqIVhPtJeVSWXGYRomrJL6SuSpsEHOlcyMw8p3j5j43t
+        value: pGJwa1ggBtocqqvTOvcyWBAyi46bHLReHCUdO1YDaJYFJyxr6UFkbmFtZVggPbDHSY2cY8j4Eo3KUpTYmNj4osIfwIppqR7ezWjL6Sxlbm9uY2VPlYt/NvEtaJODk5sGiaxgZXZhbHVlWDH45E7WbN8ziYsUOWKwInspi5DQALUjR2HzTiLWZX1FUveCd9M61A9EJTIz7cXWIp4H
       - name: SIWE_ALLOWED_CHAIN_IDS
-        value: pGJwa1ggVMdukVcdmc5RX9K3hCBJHsYHyG27TJR5e+5fm+bdaglkbmFtZVgmO4fB9P20UArh94eaMgcVLKc/D74sb9azJcdFTXVX/mHT3vkOuLJlbm9uY2VPL/Zj5km9oR1s4qihMwA+ZXZhbHVlUDMlh6vD3S4tnq+DtqsjF9Q=
+        value: pGJwa1gg8lQ5ob70vVADnycqS1SJvmGwIOo2RHV4JzBb5ajNglNkbmFtZVgmL/E16+zI/fx14gqxFKZC6qzfe4oBrbLXgaaOhkq8BMcKKm3x1ehlbm9uY2VP8KoQtauEJrdD9JCVS3HQZXZhbHVlUHbEJEgZfqGYwj1pAuCjYgE=
       - name: SIWE_DOMAINS
-        value: pGJwa1gg+EgyBFO57x1M0rax5Ovub2Khvy8DW9Cqetz8Am6sxEJkbmFtZVgcd88E13dYFsKn63gTji8oWrSxq8y+Bql6d7yTSGVub25jZU8Z9ug4mFrg8ZOTKIyIHedldmFsdWVYcjqpNOkDAerC1QdkAiPctEzvWydy01MtfVRUMsdjwnuTxuw81uP/e2TC4ur8HRVkmsIj2NTr32+T5+IyaAEjykacnS5xzl/EZM9hZhylh1rX8KiabQvlRGb/A2Da8JtPZ01QY4dGLKfVzbi8/iQrBgdjmg==
+        value: pGJwa1ggOzwZJzsObHhl1gzElYaQ/+J0AT3vZd5HSQzlbYCA/UJkbmFtZVgc8haZTGsTdp7Ayz8eN0CRerzrMDKAB0WfDb07FWVub25jZU8eSS+NFbIbm3CW40ui4CZldmFsdWVYbEDdeH+lMHgJpJzRk/ri5yjrPOSCPJAk0ENC81vXXjNe9w2jfc7PhdM3HumUAzF6whHuQkkyWZXixBYSWSg/YtXDuoqW/nRHPX8iN1Yd5mTw1JCtm9VpUZmzi3GyqVJCBjL9+tEZqtmoUAjBBQ==
       - name: SIWE_NONCE_EXPIRY_SECONDS
-        value: pGJwa1ggpRH9I85z4WZrhg+BNvlL1/9Kznxkp1sJ4ConfRJuqRpkbmFtZVgpC6LmzrNCVwMrDowcaRhEbnKPgoI5I1wFpMgJef9tJUUhAiW9NwLTvOxlbm9uY2VPHBXkcB5+4cZr6xBmPQHkZXZhbHVlUwemA/dJHC5M7AUN3tgqhj3iZP8=
+        value: pGJwa1ggNixMkTpR+B0EGn4naqRij9EWkKSKBG5q9BKCgE8s/0VkbmFtZVgpN9WkVbycHqEZBEgWzxn+0B+wML2UoNsyU95fCTUs/ZTJsgN2KX+JwD1lbm9uY2VP9j2VlS45OKM0XfveX/84ZXZhbHVlU+kf50hxv06Psl/tbVudpYGsBSY=
       - name: WITHDRAWAL_POLL_INTERVAL
-        value: pGJwa1gg9ApLuiUyq+N9ODJLGAHEq7ltYZhOhyQ8+Op2B9sChy9kbmFtZVgo2OWrDnl1GjZgGAIyAFKpke8iJReRWwYjzh0MVZ5a+7goYHMp8wvfQmVub25jZU+6eIFlhBh2R9zJN+hMfCpldmFsdWVSrgPfzH8cXmgpCO/peWod+tjW
+        value: pGJwa1ggYtHxR4Xgaa+f72J4uuJCJ3uZnDYFHFLBESgAiVtVYyRkbmFtZVgoTUgioSXMb1sMFzzoA2DFvU5bCkFLdskGS/N1l5B4Lee77P2W7Vy7ZWVub25jZU9sKeExFpvcDZFeuwwTPNtldmFsdWVSF9uH4jgFy/f3tnsDeucVDuvW
       - name: WITHDRAWAL_RESOLUTION_TIMEOUT
-        value: pGJwa1ggYA6yn3n7lwshYzY0r7yAl9JbtP4dpiTxIrnDwiWsH11kbmFtZVgtqSYfatpnbnOzzI4qiNtu9LO1DS6MIv0CvGkDKdOoRUrAQHCg88mOMAW0HTfuZW5vbmNlT9zevSfVLkuGZQjva0azu2V2YWx1ZVIK3cHCK+lr3KEuqZqxQhVoM/U=
+        value: pGJwa1gg79/21rbpenZYFcZaRvn7UOkoVZKjT5Lw7ALe3pYBiRdkbmFtZVgt10Xwe1kOfdjybov6AL0FoR99sPeQeW5TsRLUscIHvzb45dCoX+Drh7BmH3V2ZW5vbmNlT+81hRY0gRIK7DII8aO5tWV2YWx1ZVLwMu79nQFWClNsaDsAh+vPIfw=
       - name: AUTH_TOKEN_KEY_ID
-        value: pGJwa1ggCN1fO25OVo/Xz/o/fiNjTxj0V26ZHxRlR5iumuxtnDlkbmFtZVghGNUkqnoNOYjQ5X0xn8O0KHwqxnfrlSmLfeTvvWMzTUQlZW5vbmNlTxB1H/OmgE7c0GXfMA3T8mV2YWx1ZVgqYuu9b8FgMY2dQ/BclaZzsTuyHm/0pPYaT5CFtUjv7jrMNyPClgCmQeCr
-      - name: DEPOSIT_RESET_STATE
-        value: pGJwa1ggMGRwFUQTVUIFIsRTEuXdED2m5eds1ubkdM6GkVBjJGFkbmFtZVgj5F7R7Hob/yYXT4uPfx1BPOt5+3q2g4bhxlTwPZyl5sDznuBlbm9uY2VPDsqo6Jh9rdWRwuPFhHquZXZhbHVlVOLECJqdZ1bU5wHAwkWSOXMuyDhZ
+        value: pGJwa1ggZnKKgeL4cm3YEGa7CbmsO8KvXiGauM3PEYWa6beZ2n1kbmFtZVghHSyww9jC9/+nBuPaEKX1v1PFhtzKxswTuu24J6XboCFvZW5vbmNlT1CU3gy/uGjfxxywAh7KtmV2YWx1ZVgquvrrM/w2YwdPBBMU55iaJyPBj0ku5VzBjeZ3Cs7ibLMAjccZtZ5hlGFH
       - name: AUTH_CLIENTS
-        value: pGJwa1ggnihNfwrbNYhHTbUEOIVBom6LzVqW77cbMUqyJbbm6F1kbmFtZVgctGE28qBHJJNrsc8Qd3PvCmhq96EEkUkNQjau/GVub25jZU+enPVCo57G/NU5Va/g2UJldmFsdWVZAayZ+FoT9TmF7DdxFsA2BNXXrqcYrsQuJLAlDq7JSmlKTUFrn0FHxM5HNb8bHXnNAUUmcDRSTmHnjr+2oIjI5EhiXq0G2RtbOf7L3p89XXPoyk6cw/BBDK5a2hBl2QEx/v4E0QCuMvGxlFShdQAiMVNrCMqLOSGvM7wAqa4SWw7woEQmExCu53Q3xawwGcsMC92DERaX9lb8hnLY9fKE7+wTXsF+T0MIRuFpAb7clVmvJkFx23N6yoTDkNBttvm7rJXw5k2guHhuPRKOKuXbe4LTMdfNlhJIqXEjJ2iLOXseMpIqanndiUMPchFu/+mT3TRTge9HTqx05fAeNFQKNPTIJfoZILbVoNs+MB3YKxFGBlUY9w+bJLhnFATUUb6SFcyQXcw9xf+23Zn6zF12qXBf0CrG+UgfMkyYBJtgPiafft6xXAxtXvnYyVvrx+YKQ2aMH78P1AH0ZbyIUIVl/bugslW8KZT4DdzFZ4LvVzqMkmU9zu+rkVuwPj+k0NH1QlZOGfwH/neL65Fj6D8UTJnfPZkzSL4Y/5HAzEDWAiN+fpkdxhDPg2MTCwAYcA==
+        value: pGJwa1ggGgsXQsD9nCw3yNfnMM9q3J9Dy3ELH832SzSUr/s9Rk1kbmFtZVgcRwaKV1gLjLUDNifW1nyz8vfXo71LUK0s9xRmOmVub25jZU9PI37K3L3sVR7YVmGE9h5ldmFsdWVZAayIqqWfEVPY/n1aw2QhJOK8oZb3jIAzB/rOSVTys5KU4UgVia6xG+Rn4+CRQLr3p483ng/ldaMR3ZmNJ1A3Y4s9cz2Igwz4GUHNkT9jgAZRD0ffdIB6PEdPckOEZKcR3qODXYBtF2BWMA0PaTcLNs6hOevAH5g7tpnO+4Nl9TsPxRRT1vDpH1ix7G7sUFyTILtovJ9XQbcHfJ3GwGglZghn0gUBaOWRzMd2JE22Ex+AFYwP+dgQgnHMxztZFBtJvSXE925oGleFLJUy4RpYlRvyaxdWrfG5lX6pJsqz2X8jYq4FBPrkXVpNakB3AJKHpSF7TmwJu/J154kbSIVYOJhUs9a25yTI+65lDPxw8DeJjJv+FHvACHFcNeaMHuWRQZ2EyqIbSXpZMsA9Tuzy7Rj1l3Lt+je6vJRN74AARrNo2RTzDygfaypc+TNt4jvMnSJwgZaZ8a5o0Vy7RlEDs6+W1uxmCxDCRZZku18DutgUiOFIH8jd41oZ1v+B7v8XAleESJkESE+XVT0klyfgJvfTMPZgMD8Wvg2mM3Gw8rrf5akHzG4r62eAfMDyMw==
       - name: CORS_ALLOWED_ORIGINS
-        value: pGJwa1ggXse0XqykHAQSoMLPcadAvnjDmHUXKIVGXDhvewx/fwVkbmFtZVgkmNWQeLQAFb5sBHFlf3YEaWyqOs9YjIuz95cqlhuctqMeBd+8ZW5vbmNlT/cdXdzjnRI6j6LM+zMwoWV2YWx1ZVhsBY/MDQGDBkAE/yURSYyUQ1aXC13Tp/fa7cfU2rHnhVv9ABmxc02gqEcoG7Ir3KKS4GHV6534LJYFg1rzZ8mvySKFYSNaf96mUcPXyGesAOSFLpPBrnLL6u5BmYOoI37Cd7C1eOtNQ+W7ql4b
+        value: pGJwa1ggytME5JDVfZ/V13u6SQVR0k7IpLdsHr4TigQObLPPlTdkbmFtZVgkHirk0RiVbTBTiaGMIiGTXph8ycnqvgU76IlaAkWiHA9xsVTrZW5vbmNlT8MAMJwOPMiUD4IZr+PmoWV2YWx1ZVhsR7b/BrGTXISzJehXT0bfBBSJD3Y1/vTqVh/anPuiBoAzgBo59bvpMZ2f+GJmVftY9tCZMOGM4RmvG0BNb6azmuKbQ7/xpas88skvJL01cb/Dm/moodknLfxbX6cqPg820Bzx52oq0w0wgChH
+      - name: DEPOSIT_POLL_INTERVAL
+        value: pGJwa1ggiw47DBa02X0kJ6BCA3efTmSvA0/JSL6y1uBOc2it1nJkbmFtZVglgk2kp9SYmf7Bo6azaazsW5+JnboQcdTxaIOOILjnsiRmOvNZbWVub25jZU9TrGt+NetntsszHzYL4GNldmFsdWVRid/dFdD5prHaRbdtufjD/TA=
+      - name: ROFL_ADAPTER_ADDRESS
+        value: pGJwa1ggfyjzbEAk2yfqDdIxZSlVwQFYLqwFg0Ioqtgr/bs9CTBkbmFtZVgkNlIPvnKqW1NRBv0TfEvNrXFuYDydc6vr7vPhBRF6n90qpqYjZW5vbmNlT8C+Ovm5tr0Tff72Qw9vWWV2YWx1ZVg66jrIYFEvZXEi/wTvyV1GUm1lCar11dtVl6vuWzu04/YzLxuMHtss034TDXkSabkThJKAfS2GPKqrWA==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_short
         id: 00000000000005cc
 tooling:
-  version: 0.18.5
+  version: 0.18.6

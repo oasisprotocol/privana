@@ -33,10 +33,6 @@ services:
       - AUTH_TOKEN_KEY_ID=${AUTH_TOKEN_KEY_ID:-}
       # Auth client registry for redirect/popup auth flows
       - AUTH_CLIENTS=${AUTH_CLIENTS:-[]}
-      # Persistent state management
-      - BLOCK_STATE_DIR=${BLOCK_STATE_DIR:-/data/deposit-listener}
-      # ERC20 token addresses (format: ERC20_{SYMBOL}_{CHAIN_ID})
-      - ERC20_USDC_84532=${ERC20_USDC_84532}
       # Sweep engine state
       - SWEEP_STATE_DIR=/data/sweep-engine
     volumes:
@@ -45,7 +41,7 @@ services:
     ports:
       - "8000:8000"
     annotations:
-      net.oasis.proxy.ports.8000.custom_domain: flexvaults-staging.rofl.build
+      net.oasis.proxy.ports.8000.custom_domain: testnet.privana.finance
     restart: on-failure
 
 volumes:

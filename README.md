@@ -18,7 +18,7 @@ A reusable library for apps running in ROFL that enables:
 
 ### Staging (Sapphire Testnet)
 
-- **API**: https://flexvaults-staging.rofl.build
-- **Accounting Proxy**: `0xFfB141bF8269E458b074A274bE6E8F971f08A401`
+- **API**: https://testnet.privana.finance
+- **Accounting Proxy**: `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642`
 
 See [solidity/README.md](solidity/README.md) for full contract addresses and deployment instructions.

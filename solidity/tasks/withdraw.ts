@@ -110,7 +110,7 @@ task("withdraw")
   .addOptionalParam(
     "apiurl",
     "API base URL",
-    "https://flexvaults-staging.rofl.build",
+    "https://testnet.privana.finance",
   )
   .addOptionalParam("scanlimit", "How many latest withdrawals to scan when fallback-confirming on-chain", "250")
   .addOptionalParam("timeout", "Timeout in seconds to wait for resolution", "120")
