@@ -39,6 +39,18 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      sapphire-localnet-ci:
+        image: ghcr.io/oasisprotocol/sapphire-localnet
+        ports:
+          - 8545:8545
+        env:
+          OASIS_DOCKER_START_EXPLORER: no
+          TO: "chimney theory present latin find behave ankle clock shadow earn suit reflect"
+        options: >-
+          --rm
+          --health-cmd="test -f /CONTAINER_READY"
+          --health-start-period=90s
     steps:
       - uses: actions/checkout@v4
 
@@ -77,8 +89,6 @@ jobs:
 
       - name: Run Solidity tests
         run: make solidity-test
-        env:
-          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
 
       - name: Install dependencies
         run: make dev

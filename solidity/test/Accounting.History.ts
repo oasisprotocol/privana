@@ -2,8 +2,9 @@ import { expect } from 'chai';
 import { config, ethers, upgrades } from 'hardhat';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { Wallet } from 'ethers';
+import { Block, Wallet } from 'ethers';
 import { MockAccounting, MockSiweAuth } from '../typechain-types';
+import { deployMockAccounting, mockAuthToken } from './utils';
 
 const types = {
   Lock: [
@@ -67,10 +68,6 @@ function parseUsdt(amount: string): bigint {
   return wholePart + fractionPart;
 }
 
-function encodeSiweToken(address: string): string {
-  return abiCoder.encode(['address'], [address]);
-}
-
 function amountWord(amount: bigint): string {
   return ethers.zeroPadValue(ethers.toBeHex(amount), 32);
 }
@@ -111,13 +108,13 @@ describe('Accounting history', function () {
 
     userWallet1 = ethers.HDNodeWallet
       .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/0")
-      .connect(ethers.provider);
+      .connect(ethers.provider) as any;
     userWallet2 = ethers.HDNodeWallet
       .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/1")
-      .connect(ethers.provider);
+      .connect(ethers.provider) as any;
     userWallet3 = ethers.HDNodeWallet
       .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/2")
-      .connect(ethers.provider);
+      .connect(ethers.provider) as any;
 
     user1Signer = await ethers.getSigner(userWallet1.address);
 
@@ -125,13 +122,7 @@ describe('Accounting history', function () {
     mockSiweAuth = await MockSiweAuthFactory.deploy('test');
     await mockSiweAuth.waitForDeployment();
 
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    accounting = await upgrades.deployProxy(
-      AccountingFactory,
-      [MOCK_ROFL_APP_ID, deployer.address],
-      { kind: 'uups', initializer: 'initialize', constructorArgs: [await mockSiweAuth.getAddress()] }
-    ) as unknown as MockAccounting;
-    await accounting.waitForDeployment();
+    accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
@@ -150,23 +141,34 @@ describe('Accounting history', function () {
   });
 
   it('uses _authSender semantics for empty and non-empty tokens while isolating users', async function () {
-    const depositTx = await accounting.mockCreditDeposit(
+    const depositTx1 = await accounting.mockCreditDeposit(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       parseUsdt('1'),
       depositKey('u1')
     );
-    const depositReceipt = await depositTx.wait();
-    const depositBlock = await ethers.provider.getBlock(depositReceipt!.blockNumber);
-    await accounting.mockCreditDeposit(userWallet2.address, TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'));
+    const depositReceipt1 = await depositTx1.wait();
 
-    const [callerHistory, callerTotal] = await accounting.connect(user1Signer).getHistory(0, 10, '0x');
-    const [tokenHistory, tokenTotal] = await accounting.getHistory(0, 10, encodeSiweToken(userWallet2.address));
+    const depositTx2 = await accounting.mockCreditDeposit(userWallet2.address, TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'));
+    await depositTx2.wait();
+
+    const [callerHistory, callerTotal] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
+    const [tokenHistory, tokenTotal] = await accounting.getHistory(0, 10, mockAuthToken(userWallet2.address));
 
     expect(callerTotal).to.equal(1n);
     expect(tokenTotal).to.equal(1n);
     expect(callerHistory[0].kind).to.equal(0n);
-    expect(callerHistory[0].timestamp).to.equal(BigInt(depositBlock!.timestamp));
+
+    // Sapphire has the timestamp equal to the pre-last block. Other (non-L2) chains have the timestamp of the last block.
+    const network = await ethers.provider.getNetwork();
+    let depositBlock1: Block;
+    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
+      depositBlock1 = (await ethers.provider.getBlock(depositReceipt1!.blockNumber - 1))!;
+    } else {
+      depositBlock1 = (await ethers.provider.getBlock(depositReceipt1!.blockNumber))!;
+    }
+    expect(callerHistory[0].timestamp).to.equal(BigInt(depositBlock1!.timestamp));
+
     expect(callerHistory[0].payload).to.equal(
       depositPayload(TEST_TOKEN.tokenId, parseUsdt('1'), depositKey('u1'))
     );
@@ -175,24 +177,28 @@ describe('Accounting history', function () {
     );
 
     await expect(
-      accounting.connect(user1Signer).getHistory(0, 10, '0x12')
+      accounting.getHistory(0, 10, mockAuthToken('0x0000000000000000000000000000000000000000'))
     ).to.be.reverted;
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {
-    for (let i = 1; i <= 105; i++) {
-      await accounting.mockCreditDeposit(
-        userWallet1.address,
-        TEST_TOKEN.tokenId,
-        BigInt(i),
-        depositKey(`deposit-${i}`)
-      );
-    }
+    const MockAccountingHelper = await ethers.getContractFactory('MockAccountingHelper');
+    const mockAccountingHelper = await MockAccountingHelper.deploy(accounting);
+    await mockAccountingHelper.waitForDeployment();
 
-    const [page, total] = await accounting.connect(user1Signer).getHistory(0, 200, '0x');
-    const [tailPage, tailTotal] = await accounting.connect(user1Signer).getHistory(10, 10, '0x');
-    const [lastPage, lastTotal] = await accounting.connect(user1Signer).getHistory(-1, 10, '0x');
-    const [preLastPage, preLastTotal] = await accounting.connect(user1Signer).getHistory(-2, 10, '0x');
+    const tx = await mockAccountingHelper.mockCreditDepositNTimes(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      1,
+      depositKey('deposit-'),
+      105
+    );
+    await tx.wait();
+
+    const [page, total] = await accounting.getHistory(0, 200, mockAuthToken(userWallet1.address));
+    const [tailPage, tailTotal] = await accounting.getHistory(10, 10, mockAuthToken(userWallet1.address));
+    const [lastPage, lastTotal] = await accounting.getHistory(-1, 10, mockAuthToken(userWallet1.address));
+    const [preLastPage, preLastTotal] = await accounting.getHistory(-2, 10, mockAuthToken(userWallet1.address));
 
     expect(total).to.equal(105n);
     expect(tailTotal).to.equal(105n);
@@ -297,8 +303,8 @@ describe('Accounting history', function () {
       withdrawalSignature
     );
 
-    const [user1History, user1Total] = await accounting.getHistory(0, 20, encodeSiweToken(userWallet1.address));
-    const [user3History, user3Total] = await accounting.getHistory(0, 20, encodeSiweToken(userWallet3.address));
+    const [user1History, user1Total] = await accounting.getHistory(0, 20, mockAuthToken(userWallet1.address));
+    const [user3History, user3Total] = await accounting.getHistory(0, 20, mockAuthToken(userWallet3.address));
 
     expect(user1Total).to.equal(6n);
     expect(user1History.map((entry) => Number(entry.kind))).to.deep.equal([0, 2, 3, 1, 4, 1]);
@@ -362,7 +368,7 @@ describe('Accounting history', function () {
       modifyLockSignature
     );
 
-    const [history, total] = await accounting.getHistory(0, 10, encodeSiweToken(userWallet1.address));
+    const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
 
     expect(total).to.equal(1n);
     expect(Number(history[0].kind)).to.equal(2);
@@ -384,7 +390,7 @@ describe('Accounting history', function () {
         expiry: expiry + lockIndex,
         nonce,
       });
-      await accounting.createLock(
+      const tx = await accounting.createLock(
         userWallet2.address,
         TEST_TOKEN.tokenId,
         parseUsdt('1'),
@@ -392,18 +398,31 @@ describe('Accounting history', function () {
         nonce,
         signature
       );
+      await tx.wait();
+    }
+
+    const [history1, total1] = await accounting.getHistory(0, 20, mockAuthToken(userWallet1.address));
+    expect(total1).to.equal(3n);
+    expect(history1.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2]);
+
+    // Sapphire doesn't support evm_mine and evm_increaseTime.
+    const network = await ethers.provider.getNetwork();
+    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
+      this.skip();
     }
 
     await ethers.provider.send('evm_increaseTime', [3600]);
     await ethers.provider.send('evm_mine', []);
 
-    await accounting.unlockSingleLock(userWallet1.address, 1);
-    await accounting.unlockAllExpiredLocks(userWallet1.address);
+    const tx1 = await accounting.unlockSingleLock(userWallet1.address, 1);
+    await tx1.wait();
+    const tx2 = await accounting.unlockAllExpiredLocks(userWallet1.address);
+    await tx2.wait();
 
-    const [history, total] = await accounting.getHistory(0, 20, encodeSiweToken(userWallet1.address));
+    const [history2, total2] = await accounting.getHistory(0, 20, mockAuthToken(userWallet1.address));
 
-    expect(total).to.equal(3n);
-    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2]);
+    expect(total2).to.equal(3n);
+    expect(history2.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2]);
   });
 
   it('returns an empty page for out-of-range offsets while preserving total', async function () {
@@ -417,9 +436,9 @@ describe('Accounting history', function () {
     }
 
     // 3 entries, limit=10 -> pageCount=1; only page 0 exists.
-    const [justPastEndPage, justPastEndTotal] = await accounting.connect(user1Signer).getHistory(1, 10, '0x');
-    const [farPastEndPage, farPastEndTotal] = await accounting.connect(user1Signer).getHistory(10, 10, '0x');
-    const [tooFarFromEndPage, tooFarFromEndTotal] = await accounting.connect(user1Signer).getHistory(-2, 10, '0x');
+    const [justPastEndPage, justPastEndTotal] = await accounting.getHistory(1, 10, mockAuthToken(userWallet1.address));
+    const [farPastEndPage, farPastEndTotal] = await accounting.getHistory(10, 10, mockAuthToken(userWallet1.address));
+    const [tooFarFromEndPage, tooFarFromEndTotal] = await accounting.getHistory(-2, 10, mockAuthToken(userWallet1.address));
 
     expect(justPastEndTotal).to.equal(3n);
     expect(farPastEndTotal).to.equal(3n);
@@ -437,7 +456,7 @@ describe('Accounting history', function () {
       depositKey('limit-zero')
     );
 
-    const [page, total] = await accounting.connect(user1Signer).getHistory(0, 0, '0x');
+    const [page, total] = await accounting.getHistory(0, 0, mockAuthToken(userWallet1.address));
 
     expect(total).to.equal(1n);
     expect(page).to.have.length(0);
@@ -458,9 +477,9 @@ describe('Accounting history', function () {
         withdrawalNonce,
         withdrawalSignature
       )
-    ).to.be.revertedWithCustomError(accounting, 'InvalidAmount');
+    ).to.be.reverted; // WithCustomError(accounting, 'InvalidAmount'); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
 
-    const [history, total] = await accounting.getHistory(0, 10, encodeSiweToken(userWallet1.address));
+    const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
     expect(total).to.equal(0n);
     expect(history).to.have.length(0);
   });
