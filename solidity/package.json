@@ -1,5 +1,5 @@
 {
-  "name": "onchain-signer",
+  "name": "@oasisprotocol/privana-contracts",
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
