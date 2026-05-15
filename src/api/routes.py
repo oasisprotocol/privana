@@ -13,7 +13,11 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError
 
 from src.auth.auth_token_service import get_auth_token_service
-from src.auth.dependencies import get_current_user, get_current_user_optional
+from src.auth.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    get_current_user_without_siwe_token,
+)
 from src.auth.http import auth_exception, enforce_expected_origin, no_store_headers
 from src.auth.jwt_service import get_jwt_service
 from src.auth.rate_limiter import get_auth_rate_limiter, request_identity
@@ -33,6 +37,7 @@ from src.models.accounting import (
     DepositCheckResponse,
     ExpiredLocksResponse,
     HistoryResponse,
+    JwtSiweTokenResponse,
     LockedFundsResponse,
     LockFundsRequest,
     LockNonceResponse,
@@ -823,6 +828,22 @@ class MeResponse(BaseModel):
     """Response from /me endpoint."""
 
     address: str = Field(..., description="Authenticated Ethereum address")
+
+
+@router.post("/auth/jwt/siwe-token", response_model=JwtSiweTokenResponse)
+async def exchange_jwt_for_siwe_token(
+    response: Response,
+    current_user: str = Depends(get_current_user_without_siwe_token),
+) -> JwtSiweTokenResponse:
+    """Mint a private-read SIWE token for the authenticated JWT subject."""
+    settings = load_settings()
+    siwe_token = _mint_private_read_token(current_user)
+    response.headers.update(no_store_headers())
+    return JwtSiweTokenResponse(
+        siwe_token="0x" + siwe_token.hex(),
+        address=current_user,
+        expires_in=settings.auth_token_validity_seconds,
+    )
 
 
 @router.post("/auth/jwt/refresh", response_model=RefreshResponse)

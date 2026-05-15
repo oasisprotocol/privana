@@ -435,6 +435,14 @@ class SiweLoginResponse(BaseModel):
     jwt_refresh_expires_in: int = Field(..., description="Refresh token expiry in seconds")
 
 
+class JwtSiweTokenResponse(BaseModel):
+    """Response from exchanging a JWT access token for a private-read SIWE token."""
+
+    siwe_token: str = Field(..., description="Encrypted SIWE token for on-chain private reads")
+    address: str = Field(..., description="Authenticated Ethereum address")
+    expires_in: int = Field(..., description="SIWE token expiry in seconds")
+
+
 class SiweDomainResponse(BaseModel):
     """Response containing the SIWE domain configured in the contract."""
 

@@ -461,6 +461,33 @@
         "title": "JWKSResponse",
         "type": "object"
       },
+      "JwtSiweTokenResponse": {
+        "description": "Response from exchanging a JWT access token for a private-read SIWE token.",
+        "properties": {
+          "address": {
+            "description": "Authenticated Ethereum address",
+            "title": "Address",
+            "type": "string"
+          },
+          "expires_in": {
+            "description": "SIWE token expiry in seconds",
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "siwe_token": {
+            "description": "Encrypted SIWE token for on-chain private reads",
+            "title": "Siwe Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "siwe_token",
+          "address",
+          "expires_in"
+        ],
+        "title": "JwtSiweTokenResponse",
+        "type": "object"
+      },
       "LockFundsRequest": {
         "description": "Payload for locking user funds for a service.",
         "properties": {
@@ -1901,6 +1928,33 @@
           }
         },
         "summary": "Refresh",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/auth/jwt/siwe-token": {
+      "post": {
+        "description": "Mint a private-read SIWE token for the authenticated JWT subject.",
+        "operationId": "exchange_jwt_for_siwe_token_v1_accounting_auth_jwt_siwe_token_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JwtSiweTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Exchange Jwt For Siwe Token",
         "tags": [
           "Accounting"
         ]

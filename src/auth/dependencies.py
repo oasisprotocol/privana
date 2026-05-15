@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.auth.jwt_service import get_jwt_service
@@ -60,6 +60,18 @@ def get_current_user(
             detail=str(e),
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def get_current_user_without_siwe_token(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> str:
+    if request.headers.get("Authorization") and request.headers.get("X-SIWE-Token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide Authorization bearer token only; do not send X-SIWE-Token",
+        )
+    return get_current_user(credentials)
 
 
 def get_current_user_optional(
