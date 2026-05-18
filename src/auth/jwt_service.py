@@ -175,14 +175,14 @@ class JWTService:
             logger.warning(f"JWT verification failed: {e}")
             raise
 
-    def get_address_from_token(self, token: str) -> str:
-        """Extract the Ethereum address from a verified access JWT.
+    def get_access_token_payload(self, token: str) -> dict:
+        """Verify an access JWT and return its claims.
 
         Args:
             token: JWT string to verify and extract address from.
 
         Returns:
-            Checksummed Ethereum address.
+            Decoded claims with ``sub`` normalized to a checksummed Ethereum address.
 
         Raises:
             jwt.InvalidTokenError: If verification fails.
@@ -196,7 +196,12 @@ class JWTService:
         address = payload.get("sub")
         if not address:
             raise ValueError("Token missing 'sub' claim")
-        return Web3.to_checksum_address(address)
+        payload["sub"] = Web3.to_checksum_address(address)
+        return payload
+
+    def get_address_from_token(self, token: str) -> str:
+        """Extract the Ethereum address from a verified access JWT."""
+        return self.get_access_token_payload(token)["sub"]
 
     def verify_id_token(self, token: str, audience: str) -> str:
         """Verify an identity token for a specific audience and return the subject address."""

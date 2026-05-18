@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -396,6 +397,8 @@ def test_login_returns_siwe_token_and_jwts(client, monkeypatch):
 
 
 def test_jwt_siwe_token_exchange_mints_private_read_token(client, monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr(routes.time, "time", lambda: now)
     minted_token = b"\xde\xad"
     mint_private_read_token = MagicMock(return_value=minted_token)
     monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
@@ -413,7 +416,40 @@ def test_jwt_siwe_token_exchange_mints_private_read_token(client, monkeypatch):
         "address": TEST_ADDRESS,
         "expires_in": 600,
     }
-    mint_private_read_token.assert_called_once_with(TEST_ADDRESS)
+    mint_private_read_token.assert_called_once_with(TEST_ADDRESS, valid_until=now + 600)
+
+
+def test_jwt_siwe_token_exchange_caps_private_read_token_to_jwt_expiry(client, monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr(routes.time, "time", lambda: now)
+    minted_token = b"\xca\xfe"
+    mint_private_read_token = MagicMock(return_value=minted_token)
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    jwt_api = jwt_service.get_jwt_service()
+    access_token = jwt_api._encode_token(
+        {
+            "sub": TEST_ADDRESS,
+            "iss": "flexvaults-test",
+            "aud": "flexvaults-test",
+            "iat": now,
+            "nbf": now,
+            "exp": now + 120,
+            "type": "access",
+        }
+    )
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "siwe_token": "0xcafe",
+        "address": TEST_ADDRESS,
+        "expires_in": 120,
+    }
+    mint_private_read_token.assert_called_once_with(TEST_ADDRESS, valid_until=now + 120)
 
 
 def test_jwt_siwe_token_exchange_requires_bearer_jwt(client):

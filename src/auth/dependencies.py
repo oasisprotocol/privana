@@ -1,6 +1,7 @@
 """FastAPI dependencies for JWT-based authentication."""
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import jwt
@@ -16,19 +17,15 @@ logger = logging.getLogger(__name__)
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
+@dataclass(frozen=True)
+class CurrentAccessToken:
+    address: str
+    expires_at: int
+
+
+def _get_access_token_payload(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> str:
-    """FastAPI dependency to get the current authenticated user.
-
-    Extracts and verifies the JWT from the Authorization header.
-
-    Returns:
-        Checksummed Ethereum address of the authenticated user.
-
-    Raises:
-        HTTPException: 401 if not authenticated or token invalid.
-    """
+) -> dict:
     if not credentials:
         raise HTTPException(
             status_code=401,
@@ -39,8 +36,7 @@ def get_current_user(
     jwt_service = get_jwt_service()
 
     try:
-        address = jwt_service.get_address_from_token(credentials.credentials)
-        return address
+        return jwt_service.get_access_token_payload(credentials.credentials)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=401,
@@ -62,16 +58,41 @@ def get_current_user(
         )
 
 
-def get_current_user_without_siwe_token(
-    request: Request,
+def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ) -> str:
+    """FastAPI dependency to get the current authenticated user.
+
+    Extracts and verifies the JWT from the Authorization header.
+
+    Returns:
+        Checksummed Ethereum address of the authenticated user.
+
+    Raises:
+        HTTPException: 401 if not authenticated or token invalid.
+    """
+    return str(_get_access_token_payload(credentials)["sub"])
+
+
+def get_current_access_token_without_siwe_token(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> CurrentAccessToken:
     if request.headers.get("Authorization") and request.headers.get("X-SIWE-Token"):
         raise HTTPException(
             status_code=400,
             detail="Provide Authorization bearer token only; do not send X-SIWE-Token",
         )
-    return get_current_user(credentials)
+    payload = _get_access_token_payload(credentials)
+    try:
+        expires_at = int(payload["exp"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Token missing 'exp' claim",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+    return CurrentAccessToken(address=str(payload["sub"]), expires_at=expires_at)
 
 
 def get_current_user_optional(
