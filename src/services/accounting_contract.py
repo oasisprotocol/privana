@@ -1167,7 +1167,7 @@ class AccountingContractService:
             "gas": self.gas_limit,
             "data": Web3.to_hex(data),
         }
-        await self.rofl_client.submit_tx(tx)
+        await self.rofl_client.submit_tx(tx, encrypt=True)
 
     async def get_siwe_domain(self) -> Dict[str, Any]:
         if self._siwe_domain is None:

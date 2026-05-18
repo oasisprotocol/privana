@@ -494,6 +494,41 @@ async def test_set_rofl_signer_address_rejects_invalid_address() -> None:
         await service.set_rofl_signer_address("not-an-address")
 
 
+@pytest.mark.asyncio
+async def test_set_auth_token_enc_key_submits_encrypted_tx() -> None:
+    auth_address = "0x2222222222222222222222222222222222222222"
+    enc_key = bytes.fromhex("11" * 32)
+
+    rofl_client = MagicMock()
+    rofl_client.submit_tx = AsyncMock(
+        return_value=RoflSubmissionResult(submission_id="sub-1", ok_payload=None)
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.gas_limit = 500_000
+    service.rofl_client = rofl_client
+    service._get_siwe_auth_address = AsyncMock(return_value=auth_address)
+
+    await service.set_auth_token_enc_key(enc_key)
+
+    selector = Web3.keccak(text="setAuthTokenEncKey(bytes32)")[:4]
+    expected_tx = {
+        "to": auth_address,
+        "value": 0,
+        "gas": 500_000,
+        "data": Web3.to_hex(selector + enc_key),
+    }
+    rofl_client.submit_tx.assert_awaited_once_with(expected_tx, encrypt=True)
+
+
+@pytest.mark.asyncio
+async def test_set_auth_token_enc_key_rejects_wrong_key_length() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+
+    with pytest.raises(ValueError, match="Encryption key must be 32 bytes"):
+        await service.set_auth_token_enc_key(b"\x11" * 31)
+
+
 def _make_service_with_confidential_reader(contract: MagicMock) -> AccountingContractService:
     service = AccountingContractService.__new__(AccountingContractService)
     service._get_confidential_reader_contract = AsyncMock(return_value=contract)

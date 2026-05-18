@@ -32,6 +32,7 @@ _LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read
 settings = load_settings()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# WARNING: oasis-rofl-client DEBUG logs include full tx payloads before appd encryption!
 logging.getLogger().setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
 
 
@@ -88,13 +89,10 @@ async def lifespan(_app: FastAPI):
     if not os.getenv("DISABLE_ROFL_KEYS"):
         try:
             await auth_token_key_manager.sync_key_to_contract()
-            logger.info("AuthToken encryption key synced to contract")
-        except Exception as e:
-            logger.warning(
-                f"Failed to sync AuthToken encryption key to contract: {e}. "
-                "Continuing startup - on fresh deployments the key will be set later, "
-                "on restarts the key may already be set."
-            )
+        except Exception:
+            logger.exception("Failed to sync AuthToken encryption key to contract")
+            raise
+        logger.info("AuthToken encryption key synced to contract")
 
         await bootstrap_rofl_signer_address(get_accounting_contract_service())
 
