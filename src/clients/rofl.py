@@ -3,15 +3,22 @@
 import base64
 import logging
 from dataclasses import dataclass
+from typing import Final
 
 import cbor2
 from eth_account import Account
+from hexbytes import HexBytes
 from oasis_rofl_client import AsyncRoflClient
 from web3.types import TxParams
 
 from src.abi.accounting import get_error_name
 
 logger = logging.getLogger(__name__)
+
+# Plaintext ROFL submissions expose calldata before Sapphire execution. Keep this
+# empty unless a reviewed transaction selector has a concrete need to be public.
+# Entries are lowercase initial 4-byte function selectors without the 0x prefix.
+_PLAINTEXT_TX_SELECTOR_ALLOWLIST: Final[frozenset[str]] = frozenset()
 
 
 @dataclass
@@ -65,6 +72,32 @@ def _decode_revert_reason(raw_message: str | None) -> str:
         return "unknown (no selector)"
     except Exception:
         return raw_message
+
+
+def _tx_selector_hex(tx: TxParams) -> str:
+    data = tx.get("data")
+    if data is None:
+        raise ValueError("Transaction must include 'data' field")
+
+    try:
+        data_bytes = HexBytes(data)
+    except Exception as exc:
+        raise ValueError("Transaction data must be valid hex") from exc
+
+    if len(data_bytes) < 4:
+        raise ValueError("Plaintext transaction data must include a 4-byte selector")
+    return bytes(data_bytes[:4]).hex()
+
+
+def _require_plaintext_allowlisted(tx: TxParams) -> str:
+    selector = _tx_selector_hex(tx)
+    if selector not in _PLAINTEXT_TX_SELECTOR_ALLOWLIST:
+        raise ValueError(
+            "Plaintext ROFL transaction submission is not allowed for selector "
+            f"{selector}. Add a reviewed selector allow-list entry before calling "
+            "submit_tx(..., encrypt=False)."
+        )
+    return selector
 
 
 # Dedicated key for authenticating signed view queries on Sapphire (onlyROFLQuery modifier).
@@ -129,12 +162,12 @@ class RoflAppdClient:
             logger.error(f"Error generating keypair: {e}")
             raise
 
-    async def submit_tx(self, tx: TxParams, encrypt: bool = False) -> RoflSubmissionResult:
+    async def submit_tx(self, tx: TxParams, encrypt: bool = True) -> RoflSubmissionResult:
         """Submit a transaction to the ROFL daemon for signing and relay.
 
         Args:
             tx: Transaction parameters (must include 'to', 'data', 'gas', 'value')
-            encrypt: Whether to encrypt the transaction (default: False)
+            encrypt: Whether to encrypt the transaction (default: True)
 
         Returns:
             RoflSubmissionResult: Submission ID and optional ok payload (ABI-encoded return value)
@@ -147,11 +180,20 @@ class RoflAppdClient:
         if "to" not in tx or "data" not in tx:
             raise ValueError("Transaction must include 'to' and 'data' fields")
 
+        plaintext_selector = None
+        if not encrypt:
+            plaintext_selector = _require_plaintext_allowlisted(tx)
+
         logger.info(
             "Submitting transaction via ROFL to %s with gas %s",
             tx["to"],
             tx.get("gas"),
         )
+        if plaintext_selector is not None:
+            logger.warning(
+                "Submitting allow-listed plaintext ROFL transaction selector %s",
+                plaintext_selector,
+            )
 
         try:
             # AsyncRoflClient.sign_submit returns decoded CBOR directly

@@ -74,10 +74,7 @@ class AuthTokenService:
         # key_manager should already be initialized by main.py lifespan
         enc_key = key_manager.enc_key
         self._aead = AEAD(enc_key)
-        logger.info(
-            "AuthTokenService initialized with key prefix: %s...",
-            enc_key[:4].hex(),
-        )
+        logger.info("AuthTokenService initialized")
 
     @property
     def aead(self) -> AEAD:

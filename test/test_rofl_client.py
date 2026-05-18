@@ -101,12 +101,34 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
             "gas": 100000,
             "value": 0,
         }
-        result = await client.submit_tx(tx, encrypt=False)
+        result = await client.submit_tx(tx)
 
         # Verify - returns RoflSubmissionResult with hex-encoded CBOR as submission_id
         expected = cbor2.dumps({"ok": b""}).hex()
         self.assertEqual(result.submission_id, expected)
         self.assertEqual(result.ok_payload, b"")
+        mock_client.sign_submit.assert_awaited_once_with(tx, True)
+
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_encrypts_by_default(self, mock_async_client_class):
+        """Test that submit_tx encrypts transactions unless explicitly disabled."""
+        from src.clients.rofl import RoflAppdClient
+
+        mock_client = MagicMock()
+        mock_client.sign_submit = AsyncMock(return_value={"ok": b""})
+        mock_async_client_class.return_value = mock_client
+
+        client = RoflAppdClient()
+        tx: TxParams = {
+            "to": "0x0987654321098765432109876543210987654321",
+            "data": "0xabcdef",
+            "gas": 100000,
+            "value": 0,
+        }
+
+        await client.submit_tx(tx)
+
+        mock_client.sign_submit.assert_awaited_once_with(tx, True)
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_reverted_raises_error(self, mock_async_client_class):
@@ -135,12 +157,57 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
 
         # Should raise TransactionRevertedError
         with self.assertRaises(TransactionRevertedError) as ctx:
-            await client.submit_tx(tx, encrypt=False)
+            await client.submit_tx(tx)
 
         error = ctx.exception
         self.assertEqual(error.code, 8)
         self.assertEqual(error.module, "evm")
         self.assertIn("InvalidSignature", str(error))
+
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_rejects_unallowlisted_plaintext(self, mock_async_client_class):
+        """Test that plaintext submission is blocked unless allow-listed."""
+        from src.clients.rofl import RoflAppdClient
+
+        mock_client = MagicMock()
+        mock_client.sign_submit = AsyncMock(return_value={"ok": b""})
+        mock_async_client_class.return_value = mock_client
+
+        client = RoflAppdClient()
+        tx: TxParams = {
+            "to": "0x0987654321098765432109876543210987654321",
+            "data": "0xabcdef01",
+            "gas": 100000,
+            "value": 0,
+        }
+
+        with self.assertRaises(ValueError) as ctx:
+            await client.submit_tx(tx, encrypt=False)
+
+        self.assertIn("Plaintext ROFL transaction submission is not allowed", str(ctx.exception))
+        mock_client.sign_submit.assert_not_awaited()
+
+    @patch("src.clients.rofl._PLAINTEXT_TX_SELECTOR_ALLOWLIST", frozenset({"abcdef01"}))
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_allows_allowlisted_plaintext_selector(self, mock_async_client_class):
+        """Test that plaintext submission requires a reviewed selector allow-list entry."""
+        from src.clients.rofl import RoflAppdClient
+
+        mock_client = MagicMock()
+        mock_client.sign_submit = AsyncMock(return_value={"ok": b""})
+        mock_async_client_class.return_value = mock_client
+
+        client = RoflAppdClient()
+        tx: TxParams = {
+            "to": "0x0987654321098765432109876543210987654321",
+            "data": "0xabcdef0100000000",
+            "gas": 100000,
+            "value": 0,
+        }
+
+        await client.submit_tx(tx, encrypt=False)
+
+        mock_client.sign_submit.assert_awaited_once_with(tx, False)
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_requires_to_and_data(self, mock_async_client_class):
