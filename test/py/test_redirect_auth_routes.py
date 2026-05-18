@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -393,6 +394,137 @@ def test_login_returns_siwe_token_and_jwts(client, monkeypatch):
     jwt_api = jwt_service.get_jwt_service()
     assert jwt_api.get_address_from_token(body["jwt_access_token"]) == TEST_ADDRESS
     assert jwt_api.verify_refresh_token(body["jwt_refresh_token"]) == TEST_ADDRESS
+
+
+def test_jwt_siwe_token_exchange_mints_private_read_token(client, monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr(routes.time, "time", lambda: now)
+    minted_token = b"\xde\xad"
+    mint_private_read_token = MagicMock(return_value=minted_token)
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    access_token = jwt_service.get_jwt_service().create_token(TEST_ADDRESS)
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "siwe_token": "0xdead",
+        "address": TEST_ADDRESS,
+        "expires_in": 600,
+    }
+    mint_private_read_token.assert_called_once_with(TEST_ADDRESS, valid_until=now + 600)
+
+
+def test_jwt_siwe_token_exchange_caps_private_read_token_to_jwt_expiry(client, monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr(routes.time, "time", lambda: now)
+    minted_token = b"\xca\xfe"
+    mint_private_read_token = MagicMock(return_value=minted_token)
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    jwt_api = jwt_service.get_jwt_service()
+    access_token = jwt_api._encode_token(
+        {
+            "sub": TEST_ADDRESS,
+            "iss": "flexvaults-test",
+            "aud": "flexvaults-test",
+            "iat": now,
+            "nbf": now,
+            "exp": now + 120,
+            "type": "access",
+        }
+    )
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "siwe_token": "0xcafe",
+        "address": TEST_ADDRESS,
+        "expires_in": 120,
+    }
+    mint_private_read_token.assert_called_once_with(TEST_ADDRESS, valid_until=now + 120)
+
+
+def test_jwt_siwe_token_exchange_requires_bearer_jwt(client):
+    response = client.post("/v1/accounting/auth/jwt/siwe-token")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing or invalid Authorization header"
+
+
+def test_jwt_siwe_token_exchange_rejects_refresh_token(client, monkeypatch):
+    mint_private_read_token = MagicMock()
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    refresh_token = jwt_service.get_jwt_service().create_refresh_token(TEST_ADDRESS)
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={"Authorization": f"Bearer {refresh_token}"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Expected access token"
+    mint_private_read_token.assert_not_called()
+
+
+def test_jwt_siwe_token_exchange_rejects_mixed_auth_headers(client, monkeypatch):
+    mint_private_read_token = MagicMock()
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    access_token = jwt_service.get_jwt_service().create_token(TEST_ADDRESS)
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "X-SIWE-Token": "0x1234",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Provide Authorization bearer token only; do not send X-SIWE-Token"
+    )
+    mint_private_read_token.assert_not_called()
+
+
+def test_jwt_siwe_token_exchange_rejects_mixed_auth_before_jwt_validation(client, monkeypatch):
+    mint_private_read_token = MagicMock()
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={
+            "Authorization": "Bearer not-a-jwt",
+            "X-SIWE-Token": "0x1234",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Provide Authorization bearer token only; do not send X-SIWE-Token"
+    )
+    mint_private_read_token.assert_not_called()
+
+
+def test_jwt_siwe_token_exchange_rejects_siwe_token_without_bearer(client, monkeypatch):
+    mint_private_read_token = MagicMock()
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+
+    response = client.post(
+        "/v1/accounting/auth/jwt/siwe-token",
+        headers={"X-SIWE-Token": "0x1234"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing or invalid Authorization header"
+    mint_private_read_token.assert_not_called()
 
 
 def test_token_exchange_issues_id_token_with_explicit_client_audience(client, monkeypatch):

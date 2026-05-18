@@ -1515,7 +1515,7 @@ class TestAuthDependencies:
         """Test that get_current_user returns a generic error message."""
 
         class _JWTService:
-            def get_address_from_token(self, token):
+            def get_access_token_payload(self, token):
                 raise jwt.InvalidTokenError("too many segments")
 
         monkeypatch.setattr(auth_dependencies, "get_jwt_service", lambda: _JWTService())

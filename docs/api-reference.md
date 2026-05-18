@@ -53,6 +53,7 @@ The login response returns:
 - `jwt_access_token` / `jwt_refresh_token` — pass `Authorization: Bearer <jwt_access_token>` for normal API auth.
 
 Browser requests to `/auth/nonce` and `/auth/login` are **origin-checked** — they must come from a configured Flexvaults SIWE origin. Non-browser clients (no `Origin` header) are accepted.
+Backends that only receive a JWT from hosted auth can exchange that JWT for a private-read token with `POST /auth/jwt/siwe-token`.
 
 ### 2. OAuth-style cross-domain (third-party apps)
 
@@ -84,6 +85,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /funds/locked/total/{token_id}` | required | same |
 | `GET /funds/expired` | required | same |
 | `GET /history` | required | same |
+| `POST /auth/jwt/siwe-token` | required | `Authorization: Bearer …` |
 | `POST /auth/jwt/logout`, `GET /auth/jwt/me` | required | `Authorization: Bearer …` |
 | Everything else | none (signature-gated where applicable) | — |
 
@@ -206,6 +208,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `GET /auth/nonce?address=…` | Single-use SIWE nonce. Browser-origin-checked. Rate-limited. |
 | `POST /auth/login` | SIWE login → `siwe_token` + JWT pair. Browser-origin-checked. Rate-limited. |
 | `POST /auth/jwt/refresh` | Rotate the refresh token; returns a fresh access/refresh pair. |
+| `POST /auth/jwt/siwe-token` (Bearer) | Exchange a JWT access token for an encrypted SIWE token for on-chain private reads. |
 | `POST /auth/jwt/logout` (Bearer) | Revoke one or all refresh tokens for the current user. |
 | `GET /auth/jwt/jwks.json` | JWKS document for verifying issued JWTs. |
 | `GET /auth/jwt/me` (Bearer) | Returns the authenticated address. Useful for client-side identity checks. |
