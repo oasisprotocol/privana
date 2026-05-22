@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
 import { keccak256, Wallet } from 'ethers';
-import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
+import { AccountingHistory, MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
@@ -77,6 +77,17 @@ function parseUsdt(amount: string): bigint {
 async function getBlockTimestamp(): Promise<number> {
   const block = await ethers.provider.getBlock('latest');
   return block!.timestamp;
+}
+
+async function waitForUpgradeTx(contract: any): Promise<void> {
+  const deploymentTx =
+    typeof contract.deploymentTransaction === 'function'
+      ? contract.deploymentTransaction()
+      : undefined;
+  const tx = deploymentTx ?? contract.deployTransaction;
+  if (tx) {
+    await tx.wait();
+  }
 }
 
 describe('Accounting', function () {
@@ -1464,6 +1475,7 @@ describe('Upgradability', function () {
       kind: 'uups',
       constructorArgs: [await mockSiweAuth.getAddress()]
     }) as unknown as MockAccounting;
+    await waitForUpgradeTx(upgraded);
 
     // Verify state is preserved after upgrade
     const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
@@ -1491,6 +1503,52 @@ describe('Upgradability', function () {
 
     // Verify the proxy address is the same
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
+  });
+
+  it("Should atomically link AccountingHistory when upgrading from previous layout", async function () {
+    const deployer = getDeployer();
+    const siweAuthAddress = await mockSiweAuth.getAddress();
+    const PreviousFactory = await ethers.getContractFactory('MockAccountingPrevious', deployer);
+    const previous = await upgrades.deployProxy(
+      PreviousFactory,
+      [MOCK_ROFL_APP_ID, deployer.address],
+      {
+        kind: 'uups',
+        initializer: 'initialize',
+        constructorArgs: [siweAuthAddress],
+      }
+    );
+    await previous.waitForDeployment();
+    const previousProxyAddress = await previous.getAddress();
+
+    const AccountingHistoryFactory = await ethers.getContractFactory('AccountingHistory', deployer);
+    const history = await upgrades.deployProxy(
+      AccountingHistoryFactory,
+      [previousProxyAddress, deployer.address],
+      {
+        kind: 'uups',
+        initializer: 'initialize',
+        constructorArgs: [siweAuthAddress],
+        unsafeAllow: ['constructor', 'state-variable-immutable'],
+      }
+    ) as unknown as AccountingHistory;
+    await history.waitForDeployment();
+    const historyAddress = await history.getAddress();
+
+    const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+    const upgraded = await upgrades.upgradeProxy(
+      previousProxyAddress,
+      AccountingFactory,
+      {
+        kind: 'uups',
+        constructorArgs: [siweAuthAddress],
+        call: { fn: 'setAccountingHistory', args: [historyAddress] },
+      }
+    ) as unknown as MockAccounting;
+    await waitForUpgradeTx(upgraded);
+
+    expect(await upgraded.accountingHistory()).to.equal(historyAddress);
+    expect(await upgraded.owner()).to.equal(deployer.address);
   });
 
   it("Should only allow owner to upgrade", async function () {
@@ -1578,15 +1636,17 @@ describe('Upgradability', function () {
       unsafeAllow: ['missing-initializer'],
       constructorArgs: [await mockSiweAuth.getAddress()],
     }) as unknown as MockAccountingV2;
+    await waitForUpgradeTx(upgraded);
 
     // Call reinitializer
-    await upgraded.initializeV2(42);
+    const initializeV2Tx = await upgraded.initializeV2(42);
+    await initializeV2Tx.wait();
 
     // Verify new state is set
     expect(await upgraded.newStateVar()).to.equal(42);
 
     // Verify existing state is preserved
-    const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
+    const balanceAfter = await upgraded.connect(user).balanceOf(TEST_TOKEN.tokenId, '0x');
     expect(balanceAfter).to.equal(initialBalance, "Balance should survive V2 upgrade");
 
     // Reinitializer should not be callable again

@@ -191,6 +191,9 @@ Environment variables: see `.env.example`. Notable ones:
 
 - `SAPPHIRE_RPC_URL`, `ALCHEMY_API_KEY` — chain RPC access
 - `ACCOUNTING_CONTRACT_ADDRESS` — the deployed proxy
+- `ACCOUNTING_HISTORY_CONTRACT_ADDRESS` — history proxy override. Zero or unset resolves from
+  `Accounting.accountingHistory()`. The resolved history proxy must be bound to the configured
+  Accounting proxy and SIWE auth contract.
 - `SIWE_DOMAINS` — comma-separated allowed SIWE domains
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
 - `DISABLE_ROFL_KEYS` (local dev only) — skip AuthToken/JWT key sync at startup

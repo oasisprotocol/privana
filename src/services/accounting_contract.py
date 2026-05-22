@@ -21,6 +21,7 @@ from web3.middleware import SignAndSendRawMiddlewareBuilder
 from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ACCOUNTING_ABI
+from src.abi.accounting_history import ACCOUNTING_HISTORY_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient
 from src.config import (
@@ -45,6 +46,7 @@ _HISTORY_DEPOSIT_PAYLOAD_LEN = _HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN + _HI
 _HISTORY_COUNTERPARTY_PAYLOAD_LEN = (
     _HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN + _HISTORY_ADDRESS_LEN
 )
+_HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN = _HISTORY_COUNTERPARTY_PAYLOAD_LEN + _HISTORY_ADDRESS_LEN
 _INT256_MIN = -(2**255)
 _INT256_MAX = 2**255 - 1
 
@@ -104,7 +106,16 @@ class AccountingContractService:
         self.chain_id = self.settings.sapphire_chain_id
         self.gas_limit = self.settings.accounting_gas_limit
         self.contract_address = _to_checksum(self.settings.accounting_contract_address)
+        history_contract_address = getattr(
+            self.settings, "accounting_history_contract_address", ADDRESS_ZERO
+        )
+        if not isinstance(history_contract_address, str) or not history_contract_address:
+            history_contract_address = ADDRESS_ZERO
+        self.history_contract_address = _to_checksum(history_contract_address)
         self.contract = self.w3.eth.contract(address=self.contract_address, abi=ACCOUNTING_ABI)
+        self.history_contract = self.w3.eth.contract(
+            address=self.history_contract_address, abi=ACCOUNTING_HISTORY_ABI
+        )
         self.sapphire_rpc_url = self.settings.sapphire_rpc_url
 
         self.reader_w3: Optional[AsyncWeb3] = (
@@ -115,9 +126,18 @@ class AccountingContractService:
             if self.reader_w3
             else None
         )
+        self.history_contract_reader: Optional[AsyncContract] = (
+            self.reader_w3.eth.contract(
+                address=self.history_contract_address, abi=ACCOUNTING_HISTORY_ABI
+            )
+            if self.reader_w3
+            else None
+        )
 
         self._confidential_reader_w3: Optional[AsyncWeb3] = None
         self._confidential_contract_reader: Optional[AsyncContract] = None
+        self._confidential_history_contract_reader: Optional[AsyncContract] = None
+        self._history_contract_validated = False
         self._deposit_address: Optional[str] = None
         self._siwe_domain: Optional[str] = None
         self._siwe_auth_address: Optional[ChecksumAddress] = None
@@ -293,6 +313,48 @@ class AccountingContractService:
         )
         return self._siwe_auth_reader
 
+    def _set_history_contract_address(self, history_address: ChecksumAddress) -> None:
+        self.history_contract_address = history_address
+        self.history_contract = self.w3.eth.contract(
+            address=history_address,
+            abi=ACCOUNTING_HISTORY_ABI,
+        )
+        self.history_contract_reader = (
+            self.reader_w3.eth.contract(address=history_address, abi=ACCOUNTING_HISTORY_ABI)
+            if self.reader_w3
+            else None
+        )
+        self._confidential_history_contract_reader = None
+
+    async def _validate_history_contract_address(self, history_address: ChecksumAddress) -> None:
+        if history_address == _to_checksum(ADDRESS_ZERO):
+            raise ValueError("AccountingHistory contract is not configured")
+        if self.reader_w3 is None:
+            raise ValueError(
+                "SAPPHIRE_RPC_URL must be configured to read AccountingHistory settings"
+            )
+
+        code = await self.reader_w3.eth.get_code(history_address)
+        if len(code) == 0:
+            raise ValueError("AccountingHistory contract address has no contract code")
+
+        history_reader = self.reader_w3.eth.contract(
+            address=history_address,
+            abi=ACCOUNTING_HISTORY_ABI,
+        )
+        bound_accounting = _to_checksum(await history_reader.functions.accounting().call())
+        if bound_accounting != self.contract_address:
+            raise ValueError(
+                "AccountingHistory contract is not bound to the configured Accounting contract"
+            )
+
+        bound_siwe_auth = _to_checksum(await history_reader.functions.siweAuth().call())
+        expected_siwe_auth = await self._get_siwe_auth_address()
+        if bound_siwe_auth != expected_siwe_auth:
+            raise ValueError(
+                "AccountingHistory contract does not use the configured Accounting SIWE auth"
+            )
+
     async def _get_confidential_reader_contract(self) -> AsyncContract:
         if self._confidential_contract_reader is not None:
             return self._confidential_contract_reader
@@ -326,6 +388,35 @@ class AccountingContractService:
             address=self.contract_address, abi=ACCOUNTING_ABI
         )
         return self._confidential_contract_reader
+
+    async def _resolve_history_contract_address(self) -> ChecksumAddress:
+        if self.history_contract_address != _to_checksum(ADDRESS_ZERO):
+            if not getattr(self, "_history_contract_validated", False):
+                await self._validate_history_contract_address(self.history_contract_address)
+                self._history_contract_validated = True
+            return self.history_contract_address
+
+        contract_reader = self._get_reader_contract()
+        history_address = _to_checksum(await contract_reader.functions.accountingHistory().call())
+        await self._validate_history_contract_address(history_address)
+        self._set_history_contract_address(history_address)
+        self._history_contract_validated = True
+        return history_address
+
+    async def _get_confidential_history_reader_contract(self) -> AsyncContract:
+        if self._confidential_history_contract_reader is not None:
+            return self._confidential_history_contract_reader
+
+        history_address = await self._resolve_history_contract_address()
+        await self._get_confidential_reader_contract()
+        if self._confidential_reader_w3 is None:
+            raise ValueError("Confidential reader is not initialized")
+
+        self._confidential_history_contract_reader = self._confidential_reader_w3.eth.contract(
+            address=history_address,
+            abi=ACCOUNTING_HISTORY_ABI,
+        )
+        return self._confidential_history_contract_reader
 
     async def _get_confidential_siwe_auth_reader_contract(self) -> AsyncContract:
         if self._confidential_siwe_auth_reader is not None:
@@ -1211,7 +1302,9 @@ class AccountingContractService:
         }
 
     @staticmethod
-    def _decode_history_payload(kind: HistoryKind, payload: Any) -> Dict[str, Any]:
+    def _decode_history_payload(
+        kind: HistoryKind, payload: Any, owner_address: Optional[str] = None
+    ) -> Dict[str, Any]:
         payload_bytes = bytes(HexBytes(payload))
         match kind:
             case HistoryKind.Deposit:
@@ -1220,18 +1313,30 @@ class AccountingContractService:
             case (
                 HistoryKind.Withdraw
                 | HistoryKind.CreateLock
-                | HistoryKind.TransferFromLock
-                | HistoryKind.TransferBalance
+                | HistoryKind.ModifyLock
+                | HistoryKind.UnlockLock
             ):
                 expected_len = _HISTORY_COUNTERPARTY_PAYLOAD_LEN
                 tail_field = "counterparty"
+            case HistoryKind.TransferFromLock | HistoryKind.TransferBalance:
+                expected_len = None
+                tail_field = "transfer_pair"
             case _:
                 raise ValueError(f"Unsupported history kind {kind.name}")
 
-        if len(payload_bytes) != expected_len:
+        if expected_len is not None and len(payload_bytes) != expected_len:
             raise ValueError(
                 f"History payload for {kind.name} must be "
                 f"{expected_len} bytes, got {len(payload_bytes)} bytes"
+            )
+        if expected_len is None and len(payload_bytes) not in (
+            _HISTORY_COUNTERPARTY_PAYLOAD_LEN,
+            _HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN,
+        ):
+            raise ValueError(
+                f"History payload for {kind.name} must be "
+                f"{_HISTORY_COUNTERPARTY_PAYLOAD_LEN} or "
+                f"{_HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN} bytes, got {len(payload_bytes)} bytes"
             )
 
         decoded: Dict[str, Any] = {
@@ -1245,11 +1350,23 @@ class AccountingContractService:
                 )
             ),
             "counterparty": None,
+            "from_address": None,
+            "to_address": None,
             "deposit_id": None,
         }
         tail = payload_bytes[_HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN :]
         if tail_field == "deposit_id":
             decoded["deposit_id"] = _to_prefixed_hex(tail)
+        elif tail_field == "transfer_pair" and len(tail) == 2 * _HISTORY_ADDRESS_LEN:
+            from_address = Web3.to_checksum_address(tail[:_HISTORY_ADDRESS_LEN])
+            to_address = Web3.to_checksum_address(tail[_HISTORY_ADDRESS_LEN:])
+            owner = Web3.to_checksum_address(owner_address) if owner_address else None
+            decoded["from_address"] = from_address
+            decoded["to_address"] = to_address
+            if owner == to_address:
+                decoded["counterparty"] = from_address
+            elif owner == from_address:
+                decoded["counterparty"] = to_address
         else:
             decoded["counterparty"] = Web3.to_checksum_address(tail)
         return decoded
@@ -1262,16 +1379,20 @@ class AccountingContractService:
             "token_id": None,
             "amount": None,
             "counterparty": None,
+            "from_address": None,
+            "to_address": None,
             "deposit_id": None,
             "chain_id": None,
         }
 
-    async def _history_entry_to_dict(self, entry: Any) -> Dict[str, Any]:
+    async def _history_entry_to_dict(
+        self, entry: Any, owner_address: Optional[str] = None
+    ) -> Dict[str, Any]:
         kind, timestamp, payload = entry
         timestamp_int = int(timestamp)
         try:
             kind_enum = HistoryKind(int(kind))
-            decoded = self._decode_history_payload(kind_enum, payload)
+            decoded = self._decode_history_payload(kind_enum, payload, owner_address)
         except ValueError as exc:
             logger.warning("History entry decode failed (timestamp=%d): %s", timestamp_int, exc)
             return self._unknown_history_entry(timestamp_int)
@@ -1293,19 +1414,24 @@ class AccountingContractService:
             "chain_id": chain_id,
         }
 
-    async def get_history(self, offset: int, limit: int, siwe_token: bytes) -> Dict[str, Any]:
+    async def get_history(
+        self, offset: int, limit: int, siwe_token: bytes, user_address: str
+    ) -> Dict[str, Any]:
         """Fetch one page of history. Page 0 is the oldest; pass ``offset=-1`` for the newest page."""
         if offset < _INT256_MIN or offset > _INT256_MAX:
             raise ValueError("offset must fit int256")
         if limit < 0:
             raise ValueError("limit must be >= 0")
+        owner_address = self._require_address(user_address, "user_address")
 
-        contract_reader = await self._get_confidential_reader_contract()
+        contract_reader = await self._get_confidential_history_reader_contract()
         entries, total = await contract_reader.functions.getHistory(
             offset, limit, siwe_token
         ).call()
 
-        history = await asyncio.gather(*(self._history_entry_to_dict(entry) for entry in entries))
+        history = await asyncio.gather(
+            *(self._history_entry_to_dict(entry, owner_address) for entry in entries)
+        )
         return {
             "history": list(history),
             "total": int(total),

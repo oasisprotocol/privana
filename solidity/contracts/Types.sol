@@ -29,7 +29,9 @@ enum HistoryKind {
     Withdraw,
     CreateLock,
     TransferFromLock,
-    TransferBalance
+    TransferBalance,
+    ModifyLock,
+    UnlockLock
 }
 
 struct TokenInfo {

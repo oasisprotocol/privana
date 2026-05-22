@@ -118,6 +118,11 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_contract_address=os.getenv(
                 "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
             ),
+            accounting_history_contract_address=os.getenv(
+                "ACCOUNTING_HISTORY_CONTRACT_ADDRESS",
+                _defaults.accounting_history_contract_address,
+            )
+            or _defaults.accounting_history_contract_address,
             sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
             accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit),

@@ -14,6 +14,7 @@ import {
     UserInfo
 } from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
+import {AccountingHistory} from "./AccountingHistory.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -25,9 +26,6 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * and automated withdrawals via EIP-712 signatures.
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
-    /// @dev Maximum entries returned by `getHistory` in a single call.
-    uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
-
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAccountingSiweAuth public immutable siweAuth;
     /// @dev internal (not private) so MockAccounting test helper can set balances directly.
@@ -48,7 +46,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
     /// Re-requesting overwrites; no explicit cancel needed.
     mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
+    /// @dev DEPRECATED storage slot. Do not remove or reuse; preserves the
+    ///      pre-AccountingHistory UUPS layout. Active history lives in AccountingHistory.
     mapping(address user => HistoryEntry[] entries) private history;
+    AccountingHistory public accountingHistory;
 
     struct EmergencyWithdrawRequest {
         address toAddress;
@@ -60,6 +61,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     event EmergencyWithdrawRequested(bytes32 indexed requestId, bytes32 indexed tokenId);
     event EmergencyWithdrawExecuted(bytes32 indexed requestId);
+    event AccountingHistoryUpdated(address indexed accountingHistory);
 
     event Deposit(
         bytes32 indexed tokenId,
@@ -96,6 +98,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error WithdrawalTooSoon();
     error Unauthorized();
     error DepositAlreadyProcessed();
+    error InvalidAccountingHistory();
+    error AccountingHistoryAlreadySet();
     error InvalidSiweAuth();
 
     struct WithdrawalRequest {
@@ -156,17 +160,83 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return msg.sender;
     }
 
+    function setAccountingHistory(
+        address accountingHistoryAddress
+    ) external onlyOwner {
+        if (address(accountingHistory) != address(0)) {
+            revert AccountingHistoryAlreadySet();
+        }
+        if (accountingHistoryAddress == address(0)) {
+            revert InvalidAccountingHistory();
+        }
+        if (accountingHistoryAddress.code.length == 0) {
+            revert InvalidAccountingHistory();
+        }
+        AccountingHistory candidate = AccountingHistory(
+            accountingHistoryAddress
+        );
+        if (candidate.accounting() != address(this)) {
+            revert InvalidAccountingHistory();
+        }
+        if (address(candidate.siweAuth()) != address(siweAuth)) {
+            revert InvalidSiweAuth();
+        }
+
+        accountingHistory = candidate;
+        emit AccountingHistoryUpdated(accountingHistoryAddress);
+    }
+
+    function _historyContract()
+        internal
+        view
+        returns (AccountingHistory historyContract)
+    {
+        historyContract = accountingHistory;
+        if (address(historyContract) == address(0)) {
+            revert InvalidAccountingHistory();
+        }
+    }
+
     function _appendHistory(
         address user,
         HistoryKind kind,
         bytes memory payload
     ) internal {
-        history[user].push(
-            HistoryEntry({
-                kind: kind,
-                timestamp: uint64(block.timestamp),
-                payload: payload
-            })
+        _historyContract().appendHistory(user, kind, payload);
+    }
+
+    function _appendCounterpartyHistory(
+        address user,
+        HistoryKind kind,
+        bytes32 tokenId,
+        uint256 amount,
+        address counterparty
+    ) internal {
+        _appendHistory(
+            user,
+            kind,
+            abi.encodePacked(tokenId, amount, counterparty)
+        );
+    }
+
+    function _appendPairedHistory(
+        address fromAddress,
+        address toAddress,
+        HistoryKind kind,
+        bytes32 tokenId,
+        uint256 amount
+    ) internal {
+        bytes memory payload = abi.encodePacked(
+            tokenId,
+            amount,
+            fromAddress,
+            toAddress
+        );
+        _historyContract().appendPairedHistory(
+            fromAddress,
+            toAddress,
+            kind,
+            payload
         );
     }
 
@@ -403,10 +473,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             })
         );
 
-        _appendHistory(
+        _appendCounterpartyHistory(
             userAddress,
             HistoryKind.CreateLock,
-            abi.encodePacked(tokenId, amount, serviceAddress)
+            tokenId,
+            amount,
+            serviceAddress
         );
     }
 
@@ -508,6 +580,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         lock.expiry = newExpiry;
+        _appendCounterpartyHistory(
+            userAddress,
+            HistoryKind.ModifyLock,
+            lock.tokenId,
+            amount,
+            lock.serviceId
+        );
     }
 
     /**
@@ -547,6 +626,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (lock.amount != 0) {
             if (block.timestamp < lock.expiry) revert LockNotExpired();
             balances[userAddress][lock.tokenId] += lock.amount;
+            _appendCounterpartyHistory(
+                userAddress,
+                HistoryKind.UnlockLock,
+                lock.tokenId,
+                lock.amount,
+                lock.serviceId
+            );
         }
 
         locks[lockIndex] = locks[locks.length - 1];
@@ -581,6 +667,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
             if (block.timestamp >= lock.expiry && lock.amount > 0) {
                 balances[userAddress][lock.tokenId] += lock.amount;
+                _appendCounterpartyHistory(
+                    userAddress,
+                    HistoryKind.UnlockLock,
+                    lock.tokenId,
+                    lock.amount,
+                    lock.serviceId
+                );
 
                 locks[i] = locks[locks.length - 1];
                 locks.pop();
@@ -655,10 +748,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         lock.amount -= amount;
         balances[toAddress][lock.tokenId] += amount;
 
-        _appendHistory(
+        _appendPairedHistory(
             userAddress,
+            toAddress,
             HistoryKind.TransferFromLock,
-            abi.encodePacked(lock.tokenId, amount, toAddress)
+            lock.tokenId,
+            amount
         );
 
         if (lock.amount == 0) {
@@ -719,10 +814,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         _scheduleWithdrawal(userAddress, toAddress, tokenId, amount);
-        _appendHistory(
+        _appendCounterpartyHistory(
             userAddress,
             HistoryKind.Withdraw,
-            abi.encodePacked(tokenId, amount, toAddress)
+            tokenId,
+            amount,
+            toAddress
         );
     }
 
@@ -775,10 +872,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
 
-        _appendHistory(
+        _appendPairedHistory(
             userAddress,
+            toAddress,
             HistoryKind.TransferBalance,
-            abi.encodePacked(tokenId, amount, toAddress)
+            tokenId,
+            amount
         );
     }
 
@@ -821,10 +920,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
 
         _scheduleWithdrawal(userAddress, userAddress, tokenId, amount);
-        _appendHistory(
+        _appendCounterpartyHistory(
             userAddress,
             HistoryKind.Withdraw,
-            abi.encodePacked(tokenId, amount, userAddress)
+            tokenId,
+            amount,
+            userAddress
         );
     }
 
@@ -1038,57 +1139,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
-     * @notice Returns authenticated user history entries within a single page, oldest first.
-     * @param offset Non-negative number of page starting at 0, or negative number for the page starting from the end (-1 is last page)
-     * @param limit Requested page size, capped at 100 entries
-     * @param token SIWE auth token identifying the caller
-     * @return page Page of history entries (oldest first within the page)
-     * @return total Total history entries for the authenticated user
-     */
-    function getHistory(
-        int256 offset,
-        uint256 limit,
-        bytes calldata token
-    ) external view returns (HistoryEntry[] memory page, uint256 total) {
-        address user = _authSender(token);
-        if (user == address(0)) revert Unauthorized();
-        HistoryEntry[] storage all = history[user];
-        total = all.length;
-
-        uint256 pageSize = limit > MAX_HISTORY_PAGE_SIZE ? MAX_HISTORY_PAGE_SIZE : limit;
-        if (total == 0 || pageSize == 0) {
-            return (new HistoryEntry[](0), total);
-        }
-
-        uint256 pageCount = (total + pageSize - 1) / pageSize;
-        uint256 start;
-        if (offset < 0) {
-            // Avoid negating type(int256).min.
-            uint256 pageFromEnd = uint256(-(offset + 1)) + 1;
-            if (pageFromEnd > pageCount) {
-                return (new HistoryEntry[](0), total);
-            }
-            start = (pageCount - pageFromEnd) * pageSize;
-        } else {
-            if (uint256(offset) >= pageCount) {
-                return (new HistoryEntry[](0), total);
-            }
-            start = uint256(offset) * pageSize;
-        }
-
-        if (total - start < pageSize) {
-            pageSize = total - start;
-        }
-
-        page = new HistoryEntry[](pageSize);
-        for (uint256 i = 0; i < pageSize; i++) {
-            page[i] = all[start + i];
-        }
-    }
-
-    /**
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[40] private __gap;
+    uint256[39] private __gap;
 }

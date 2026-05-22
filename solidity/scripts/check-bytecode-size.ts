@@ -20,6 +20,7 @@ async function checkContractSize(contractName: string, maxBytes: number): Promis
 
 async function main() {
   await checkContractSize('Accounting', EIP170_LIMIT_BYTES);
+  await checkContractSize('AccountingHistory', EIP170_LIMIT_BYTES);
   console.log('Bytecode size checks passed.');
 }
 

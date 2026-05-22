@@ -388,6 +388,17 @@
             ],
             "title": "Deposit Id"
           },
+          "from_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Address"
+          },
           "kind": {
             "enum": [
               "deposit",
@@ -395,6 +406,8 @@
               "createLock",
               "transferFromLock",
               "transferBalance",
+              "modifyLock",
+              "unlockLock",
               "unknown"
             ],
             "title": "Kind",
@@ -403,6 +416,17 @@
           "timestamp": {
             "title": "Timestamp",
             "type": "integer"
+          },
+          "to_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Address"
           },
           "token_id": {
             "anyOf": [

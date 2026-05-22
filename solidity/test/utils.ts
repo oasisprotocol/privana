@@ -3,7 +3,7 @@ import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HttpNetworkConfig } from "hardhat/types/config";
 import { config, ethers, network, upgrades } from 'hardhat';
 import { JsonRpcProvider } from 'ethers';
-import { MockAccounting } from "../typechain-types";
+import { AccountingHistory, MockAccounting } from "../typechain-types";
 
 export const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
 
@@ -42,7 +42,9 @@ export function mockAuthToken(address: string) {
 export async function deployMockAccounting(mockSiweAuthAddress: string) {
 	const deployer = getDeployer();
 	const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+	const AccountingHistoryFactory = await ethers.getContractFactory('AccountingHistory', deployer);
 	let accounting: MockAccounting;
+	let accountingHistory: AccountingHistory;
 
 	let deploymentSucceeded = false;
 	while (!deploymentSucceeded) {
@@ -55,6 +57,19 @@ export async function deployMockAccounting(mockSiweAuthAddress: string) {
 			) as unknown as MockAccounting;
 			await accounting.waitForDeployment();
 			accounting = (await ethers.getContractFactory('MockAccounting')).attach(await accounting.getAddress()) as unknown as MockAccounting;
+			accountingHistory = await upgrades.deployProxy(
+				AccountingHistoryFactory,
+				[await accounting.getAddress(), deployer.address],
+				{
+					kind: 'uups',
+					initializer: 'initialize',
+					constructorArgs: [mockSiweAuthAddress],
+					unsafeAllow: ['constructor', 'state-variable-immutable'],
+				}
+			) as unknown as AccountingHistory;
+			await accountingHistory.waitForDeployment();
+			const linkHistoryTx = await accounting.setAccountingHistory(await accountingHistory.getAddress());
+			await linkHistoryTx.wait();
 			//accounting = accounting.connect((await getSigners())[0]); // Use wrapped signer for sending txes.
 			deploymentSucceeded = true;
 		} catch (error) {
