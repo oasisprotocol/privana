@@ -1646,7 +1646,10 @@ describe('Upgradability', function () {
     expect(await upgraded.newStateVar()).to.equal(42);
 
     // Verify existing state is preserved
-    const balanceAfter = await upgraded.connect(user).balanceOf(TEST_TOKEN.tokenId, '0x');
+    const balanceAfter = await upgraded.balanceOf(
+      TEST_TOKEN.tokenId,
+      mockAuthToken(user.address)
+    );
     expect(balanceAfter).to.equal(initialBalance, "Balance should survive V2 upgrade");
 
     // Reinitializer should not be callable again
