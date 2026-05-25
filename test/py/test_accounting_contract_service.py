@@ -191,7 +191,7 @@ async def test_resolve_history_module_address_revalidates_on_rotation() -> None:
     resolved = await service._resolve_history_module_address()
     assert resolved == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
 
-    cached_reader = object()
+    cached_reader = MagicMock()
     service._confidential_history_contract_reader = cached_reader
     rotated = await service._resolve_history_module_address()
 

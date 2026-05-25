@@ -3,7 +3,16 @@ pragma solidity ^0.8.20;
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
-import {ChainType, FundLock, HistoryEntry, HistoryKind, TokenInfo, TokenType, UnsupportedTokenType, UserInfo} from "./Types.sol";
+import {
+    ChainType,
+    FundLock,
+    HistoryEntry,
+    HistoryKind,
+    TokenInfo,
+    TokenType,
+    UnsupportedTokenType,
+    UserInfo
+} from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
 import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -16,11 +25,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
  * and automated withdrawals via EIP-712 signatures.
  */
-contract Accounting is
-    EIP712SignatureVerifier,
-    EVMSignerAndVerifier,
-    UUPSUpgradeable
-{
+contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
     bytes32 private constant _HISTORY_MODULE_SLOT =
         bytes32(uint256(keccak256("privana.accounting.historyModule")) - 1);
 
@@ -43,8 +48,7 @@ contract Accounting is
     /// @dev requestId = keccak256(abi.encode(beneficiary, tokenId, version)).
     /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
     /// Re-requesting overwrites; no explicit cancel needed.
-    mapping(bytes32 requestId => EmergencyWithdrawRequest)
-        public emergencyWithdrawRequests;
+    mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
     /// @dev Accounting-owned history storage. History read/write code lives in
     ///      AccountingHistoryModule and executes here via delegatecall.
     mapping(address user => HistoryEntry[] entries) private history;
@@ -57,14 +61,15 @@ contract Accounting is
     error EmergencyWithdrawTooSoon();
     error EmergencyWithdrawNotFound();
 
-    event EmergencyWithdrawRequested(
-        bytes32 indexed requestId,
-        bytes32 indexed tokenId
-    );
+    event EmergencyWithdrawRequested(bytes32 indexed requestId, bytes32 indexed tokenId);
     event EmergencyWithdrawExecuted(bytes32 indexed requestId);
     event HistoryModuleSet(address indexed module);
 
-    event Deposit(bytes32 indexed tokenId, uint256 amount, bytes32 depositId);
+    event Deposit(
+        bytes32 indexed tokenId,
+        uint256 amount,
+        bytes32 depositId
+    );
 
     event Withdrawal(
         address indexed userAddress,
@@ -122,10 +127,7 @@ contract Accounting is
      * @param _roflAppID The ROFL app identifier
      * @param _owner Address that will own this contract
      */
-    function __Accounting_init(
-        bytes21 _roflAppID,
-        address _owner
-    ) internal onlyInitializing {
+    function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
         __EVMSignerAndVerifier_init(_roflAppID, _owner);
         nextLockId = 1;
@@ -137,10 +139,7 @@ contract Accounting is
      * @param _roflAppID The ROFL app identifier (stable across redeployments)
      * @param _owner Address that will own this contract
      */
-    function initialize(
-        bytes21 _roflAppID,
-        address _owner
-    ) external virtual initializer {
+    function initialize(bytes21 _roflAppID, address _owner) external virtual initializer {
         __Accounting_init(_roflAppID, _owner);
     }
 
@@ -149,9 +148,7 @@ contract Accounting is
      * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
      * @param newImplementation Address of the new implementation contract
      */
-    function _authorizeUpgrade(
-        address newImplementation
-    ) internal override onlyOwner {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
@@ -282,11 +279,7 @@ contract Accounting is
         bytes calldata siweToken
     ) external view returns (address depositAddr) {
         address beneficiary = _authSender(siweToken);
-        (depositAddr, ) = _deriveDepositKeypair(
-            beneficiary,
-            chainType,
-            version
-        );
+        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
     }
 
     /**
@@ -392,21 +385,16 @@ contract Accounting is
         uint256 gasPrice
     ) public returns (bytes memory signedTx) {
         bytes32 requestId = emergencyWithdrawKey(beneficiary, tokenId, version);
-        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[
-            requestId
-        ];
+        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[requestId];
         if (req.blockNumber == 0) revert EmergencyWithdrawNotFound();
-        if (block.number - req.blockNumber < 1)
-            revert EmergencyWithdrawTooSoon();
+        if (block.number - req.blockNumber < 1) revert EmergencyWithdrawTooSoon();
 
         TokenInfo memory tInfo = tokens[tokenId];
 
         // Dispatch on tokenType; the else-revert is the single exhaustiveness guard.
         // When a non-EVM TokenType is added, add a branch here with its ChainType.
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
-                tInfo.data
-            );
+            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
             signedTx = generateDepositAddressTransfer(
                 beneficiary,
                 ChainType.EVM,

@@ -1,45 +1,39 @@
-import { ethers, upgrades } from "hardhat";
+import { ethers, upgrades } from 'hardhat';
 
 async function main() {
-  const siweAuthAddress = ethers.getAddress(
-    "0x0000000000000000000000000000000000000001",
-  );
+  const siweAuthAddress = ethers.getAddress('0x0000000000000000000000000000000000000001');
 
-  console.log(
-    "Validating Accounting storage layout against previous inline-history layout...",
-  );
+  console.log('Validating Accounting storage layout against previous inline-history layout...');
 
-  const MockAccountingPrevious = await ethers.getContractFactory(
-    "MockAccountingPrevious",
-  );
-  const MockAccounting = await ethers.getContractFactory("MockAccounting");
+  const MockAccountingPrevious = await ethers.getContractFactory('MockAccountingPrevious');
+  const MockAccounting = await ethers.getContractFactory('MockAccounting');
   await upgrades.validateUpgrade(MockAccountingPrevious, MockAccounting, {
-    kind: "uups",
-    unsafeAllow: ["constructor", "state-variable-immutable", "delegatecall"],
+    kind: 'uups',
+    unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
     constructorArgs: [siweAuthAddress],
-  } as any);
+  });
 
-  console.log("Validating upgrade safety for MockAccounting...");
+  console.log('Validating upgrade safety for MockAccounting...');
 
   await upgrades.validateImplementation(MockAccounting, {
-    kind: "uups",
-    unsafeAllow: ["constructor", "state-variable-immutable", "delegatecall"],
+    kind: 'uups',
+    unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
     constructorArgs: [siweAuthAddress],
-  } as any);
+  });
 
-  console.log("Validating upgrade safety for Accounting...");
+  console.log('Validating upgrade safety for Accounting...');
 
-  const Accounting = await ethers.getContractFactory("Accounting");
+  const Accounting = await ethers.getContractFactory('Accounting');
   await upgrades.validateImplementation(Accounting, {
-    kind: "uups",
-    unsafeAllow: ["constructor", "state-variable-immutable", "delegatecall"],
+    kind: 'uups',
+    unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
     constructorArgs: [siweAuthAddress],
-  } as any);
+  });
 
-  console.log("Storage layout validation passed for all contracts");
+  console.log('Storage layout validation passed for all contracts');
 }
 
 main().catch((error) => {
-  console.error("Storage layout validation failed:", error.message);
+  console.error('Storage layout validation failed:', error.message);
   process.exit(1);
 });
