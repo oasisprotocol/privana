@@ -1,4 +1,4 @@
-"""AccountingHistory module ABI."""
+"""Accounting history module ABI."""
 
 import json
 from pathlib import Path
@@ -8,8 +8,8 @@ _abi_path = (
     / "solidity"
     / "artifacts"
     / "contracts"
-    / "AccountingHistory.sol"
-    / "AccountingHistory.json"
+    / "AccountingHistoryModule.sol"
+    / "AccountingHistoryModule.json"
 )
 
 with open(_abi_path) as f:

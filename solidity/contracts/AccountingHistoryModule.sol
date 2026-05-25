@@ -2,71 +2,55 @@
 pragma solidity ^0.8.20;
 
 import {HistoryEntry, HistoryKind} from "./Types.sol";
-import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {IAccountingForHistoryModule} from "./interfaces/IAccountingForHistoryModule.sol";
+import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.sol";
 
 /**
- * @title AccountingHistory
- * @notice Confidential per-user accounting history storage.
- * @dev Accounting is the only writer. Reads are authenticated directly with the
- *      same SIWE token semantics.
+ * @title AccountingHistoryModule
+ * @notice Delegated history code for Accounting-owned history storage.
+ * @dev This contract is never called as storage owner. Accounting delegatecalls
+ *      into it so the history mapping remains in the Accounting proxy layout.
  */
-contract AccountingHistory is
-    Initializable,
-    OwnableUpgradeable,
-    UUPSUpgradeable
-{
+contract AccountingHistoryModule is IAccountingHistoryModule {
+    /// @dev Used by deploy/backend validation to reject linking the wrong code.
+    bytes32 public constant MODULE_ID =
+        keccak256("privana.accounting.historyModule.v1");
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
+    /// @dev Must equal Accounting.history's storage slot. Storage-layout tests
+    ///      pin this slot across the pre-module and current Accounting layouts.
+    uint256 public constant HISTORY_SLOT = 108;
 
-    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
-    IAccountingSiweAuth public immutable siweAuth;
+    address private immutable SELF = address(this);
 
-    address public accounting;
-    mapping(address user => HistoryEntry[] entries) private history;
+    struct HistoryStorage {
+        mapping(address user => HistoryEntry[] entries) history;
+    }
 
-    error InvalidAccounting();
-    error InvalidSiweAuth();
-    error NotAccounting();
+    error NotDelegated();
     error Unauthorized();
-    error OwnershipCannotBeRenounced();
 
-    modifier onlyAccounting() {
-        if (msg.sender != accounting) revert NotAccounting();
+    modifier onlyDelegateCall() {
+        if (address(this) == SELF) revert NotDelegated();
         _;
     }
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
-    constructor(address siweAuthAddress) {
-        _disableInitializers();
-        if (siweAuthAddress == address(0)) revert InvalidSiweAuth();
-        siweAuth = IAccountingSiweAuth(siweAuthAddress);
-    }
-
-    function initialize(
-        address _accounting,
-        address _owner
-    ) external initializer {
-        if (_accounting == address(0) || _owner == address(0)) {
-            revert InvalidAccounting();
+    function _historyStorage()
+        internal
+        pure
+        returns (HistoryStorage storage historyStorage)
+    {
+        uint256 slot = HISTORY_SLOT;
+        assembly {
+            historyStorage.slot := slot
         }
-        __Ownable_init(_owner);
-        accounting = _accounting;
-    }
-
-    function _authorizeUpgrade(
-        address newImplementation
-    ) internal override onlyOwner {}
-
-    function renounceOwnership() public pure override {
-        revert OwnershipCannotBeRenounced();
     }
 
     function _authSender(bytes memory token) internal view returns (address) {
         if (token.length != 0) {
-            return siweAuth.authSender(token);
+            return
+                IAccountingForHistoryModule(address(this))
+                    .siweAuth()
+                    .authSender(token);
         }
         return msg.sender;
     }
@@ -75,7 +59,7 @@ contract AccountingHistory is
         address user,
         HistoryKind kind,
         bytes calldata payload
-    ) external onlyAccounting {
+    ) external onlyDelegateCall {
         _append(user, kind, payload);
     }
 
@@ -84,7 +68,7 @@ contract AccountingHistory is
         HistoryKind kind,
         bytes calldata payload
     ) internal {
-        history[user].push(
+        _historyStorage().history[user].push(
             HistoryEntry({
                 kind: kind,
                 timestamp: uint64(block.timestamp),
@@ -93,12 +77,12 @@ contract AccountingHistory is
         );
     }
 
-    function appendPairedHistory(
+    function appendTransferHistory(
         address fromAddress,
         address toAddress,
         HistoryKind kind,
         bytes calldata payload
-    ) external onlyAccounting {
+    ) external onlyDelegateCall {
         _append(fromAddress, kind, payload);
         if (toAddress != address(0) && toAddress != fromAddress) {
             _append(toAddress, kind, payload);
@@ -109,7 +93,12 @@ contract AccountingHistory is
         int256 offset,
         uint256 limit,
         bytes calldata token
-    ) external view returns (HistoryEntry[] memory page, uint256 total) {
+    )
+        external
+        view
+        onlyDelegateCall
+        returns (HistoryEntry[] memory page, uint256 total)
+    {
         address user = _authSender(token);
         if (user == address(0)) revert Unauthorized();
         return _getHistory(user, offset, limit);
@@ -120,7 +109,7 @@ contract AccountingHistory is
         int256 offset,
         uint256 limit
     ) internal view returns (HistoryEntry[] memory page, uint256 total) {
-        HistoryEntry[] storage all = history[user];
+        HistoryEntry[] storage all = _historyStorage().history[user];
         total = all.length;
 
         uint256 pageSize = limit > MAX_HISTORY_PAGE_SIZE
@@ -158,6 +147,4 @@ contract AccountingHistory is
             }
         }
     }
-
-    uint256[49] private __gap;
 }

@@ -3,18 +3,9 @@ pragma solidity ^0.8.20;
 
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
-import {
-    ChainType,
-    FundLock,
-    HistoryEntry,
-    HistoryKind,
-    TokenInfo,
-    TokenType,
-    UnsupportedTokenType,
-    UserInfo
-} from "./Types.sol";
+import {ChainType, FundLock, HistoryEntry, HistoryKind, TokenInfo, TokenType, UnsupportedTokenType, UserInfo} from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
-import {AccountingHistory} from "./AccountingHistory.sol";
+import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -25,7 +16,14 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
  * and automated withdrawals via EIP-712 signatures.
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
+contract Accounting is
+    EIP712SignatureVerifier,
+    EVMSignerAndVerifier,
+    UUPSUpgradeable
+{
+    bytes32 private constant _HISTORY_MODULE_SLOT =
+        bytes32(uint256(keccak256("privana.accounting.historyModule")) - 1);
+
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAccountingSiweAuth public immutable siweAuth;
     /// @dev internal (not private) so MockAccounting test helper can set balances directly.
@@ -45,11 +43,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     /// @dev requestId = keccak256(abi.encode(beneficiary, tokenId, version)).
     /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
     /// Re-requesting overwrites; no explicit cancel needed.
-    mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
-    /// @dev DEPRECATED storage slot. Do not remove or reuse; preserves the
-    ///      pre-AccountingHistory UUPS layout. Active history lives in AccountingHistory.
+    mapping(bytes32 requestId => EmergencyWithdrawRequest)
+        public emergencyWithdrawRequests;
+    /// @dev Accounting-owned history storage. History read/write code lives in
+    ///      AccountingHistoryModule and executes here via delegatecall.
     mapping(address user => HistoryEntry[] entries) private history;
-    AccountingHistory public accountingHistory;
 
     struct EmergencyWithdrawRequest {
         address toAddress;
@@ -59,15 +57,14 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error EmergencyWithdrawTooSoon();
     error EmergencyWithdrawNotFound();
 
-    event EmergencyWithdrawRequested(bytes32 indexed requestId, bytes32 indexed tokenId);
-    event EmergencyWithdrawExecuted(bytes32 indexed requestId);
-    event AccountingHistoryUpdated(address indexed accountingHistory);
-
-    event Deposit(
-        bytes32 indexed tokenId,
-        uint256 amount,
-        bytes32 depositId
+    event EmergencyWithdrawRequested(
+        bytes32 indexed requestId,
+        bytes32 indexed tokenId
     );
+    event EmergencyWithdrawExecuted(bytes32 indexed requestId);
+    event HistoryModuleSet(address indexed module);
+
+    event Deposit(bytes32 indexed tokenId, uint256 amount, bytes32 depositId);
 
     event Withdrawal(
         address indexed userAddress,
@@ -98,9 +95,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error WithdrawalTooSoon();
     error Unauthorized();
     error DepositAlreadyProcessed();
-    error InvalidAccountingHistory();
-    error AccountingHistoryAlreadySet();
+    error InvalidHistoryModule();
     error InvalidSiweAuth();
+    error UnknownSelector(bytes4 sig);
 
     struct WithdrawalRequest {
         address userAddress;
@@ -125,7 +122,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param _roflAppID The ROFL app identifier
      * @param _owner Address that will own this contract
      */
-    function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
+    function __Accounting_init(
+        bytes21 _roflAppID,
+        address _owner
+    ) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
         __EVMSignerAndVerifier_init(_roflAppID, _owner);
         nextLockId = 1;
@@ -137,7 +137,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param _roflAppID The ROFL app identifier (stable across redeployments)
      * @param _owner Address that will own this contract
      */
-    function initialize(bytes21 _roflAppID, address _owner) external virtual initializer {
+    function initialize(
+        bytes21 _roflAppID,
+        address _owner
+    ) external virtual initializer {
         __Accounting_init(_roflAppID, _owner);
     }
 
@@ -146,7 +149,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
      * @param newImplementation Address of the new implementation contract
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyOwner {}
 
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
@@ -160,41 +165,60 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return msg.sender;
     }
 
-    function setAccountingHistory(
-        address accountingHistoryAddress
-    ) external onlyOwner {
-        if (address(accountingHistory) != address(0)) {
-            revert AccountingHistoryAlreadySet();
+    function setHistoryModule(address module) external onlyOwner {
+        if (module == address(0)) {
+            revert InvalidHistoryModule();
         }
-        if (accountingHistoryAddress == address(0)) {
-            revert InvalidAccountingHistory();
-        }
-        if (accountingHistoryAddress.code.length == 0) {
-            revert InvalidAccountingHistory();
-        }
-        AccountingHistory candidate = AccountingHistory(
-            accountingHistoryAddress
-        );
-        if (candidate.accounting() != address(this)) {
-            revert InvalidAccountingHistory();
-        }
-        if (address(candidate.siweAuth()) != address(siweAuth)) {
-            revert InvalidSiweAuth();
+        if (module.code.length == 0) {
+            revert InvalidHistoryModule();
         }
 
-        accountingHistory = candidate;
-        emit AccountingHistoryUpdated(accountingHistoryAddress);
+        bytes32 slot = _HISTORY_MODULE_SLOT;
+        assembly {
+            sstore(slot, module)
+        }
+
+        emit HistoryModuleSet(module);
     }
 
-    function _historyContract()
+    function historyModule()
+        public
+        view
+        returns (address historyModuleAddress)
+    {
+        bytes32 slot = _HISTORY_MODULE_SLOT;
+        assembly {
+            historyModuleAddress := sload(slot)
+        }
+    }
+
+    function _historyModule()
         internal
         view
-        returns (AccountingHistory historyContract)
+        returns (address historyModuleAddress)
     {
-        historyContract = accountingHistory;
-        if (address(historyContract) == address(0)) {
-            revert InvalidAccountingHistory();
+        historyModuleAddress = historyModule();
+        if (historyModuleAddress == address(0)) {
+            revert InvalidHistoryModule();
         }
+    }
+
+    function _delegateHistory(
+        bytes memory data
+    ) internal returns (bytes memory result) {
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool ok, bytes memory delegateResult) = _historyModule().delegatecall(
+            data
+        );
+        if (!ok) {
+            if (delegateResult.length == 0) {
+                revert InvalidHistoryModule();
+            }
+            assembly {
+                revert(add(delegateResult, 0x20), mload(delegateResult))
+            }
+        }
+        return delegateResult;
     }
 
     function _appendHistory(
@@ -202,10 +226,15 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         HistoryKind kind,
         bytes memory payload
     ) internal {
-        _historyContract().appendHistory(user, kind, payload);
+        _delegateHistory(
+            abi.encodeCall(
+                IAccountingHistoryModule.appendHistory,
+                (user, kind, payload)
+            )
+        );
     }
 
-    function _appendCounterpartyHistory(
+    function _appendUserCounterpartyHistory(
         address user,
         HistoryKind kind,
         bytes32 tokenId,
@@ -219,7 +248,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         );
     }
 
-    function _appendPairedHistory(
+    function _appendTransferHistoryForParticipants(
         address fromAddress,
         address toAddress,
         HistoryKind kind,
@@ -232,11 +261,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             fromAddress,
             toAddress
         );
-        _historyContract().appendPairedHistory(
-            fromAddress,
-            toAddress,
-            kind,
-            payload
+        _delegateHistory(
+            abi.encodeCall(
+                IAccountingHistoryModule.appendTransferHistory,
+                (fromAddress, toAddress, kind, payload)
+            )
         );
     }
 
@@ -253,7 +282,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         bytes calldata siweToken
     ) external view returns (address depositAddr) {
         address beneficiary = _authSender(siweToken);
-        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
+        (depositAddr, ) = _deriveDepositKeypair(
+            beneficiary,
+            chainType,
+            version
+        );
     }
 
     /**
@@ -359,16 +392,21 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 gasPrice
     ) public returns (bytes memory signedTx) {
         bytes32 requestId = emergencyWithdrawKey(beneficiary, tokenId, version);
-        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[requestId];
+        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[
+            requestId
+        ];
         if (req.blockNumber == 0) revert EmergencyWithdrawNotFound();
-        if (block.number - req.blockNumber < 1) revert EmergencyWithdrawTooSoon();
+        if (block.number - req.blockNumber < 1)
+            revert EmergencyWithdrawTooSoon();
 
         TokenInfo memory tInfo = tokens[tokenId];
 
         // Dispatch on tokenType; the else-revert is the single exhaustiveness guard.
         // When a non-EVM TokenType is added, add a branch here with its ChainType.
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(
+                tInfo.data
+            );
             signedTx = generateDepositAddressTransfer(
                 beneficiary,
                 ChainType.EVM,
@@ -473,7 +511,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             })
         );
 
-        _appendCounterpartyHistory(
+        _appendUserCounterpartyHistory(
             userAddress,
             HistoryKind.CreateLock,
             tokenId,
@@ -580,7 +618,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         lock.expiry = newExpiry;
-        _appendCounterpartyHistory(
+        _appendUserCounterpartyHistory(
             userAddress,
             HistoryKind.ModifyLock,
             lock.tokenId,
@@ -626,7 +664,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (lock.amount != 0) {
             if (block.timestamp < lock.expiry) revert LockNotExpired();
             balances[userAddress][lock.tokenId] += lock.amount;
-            _appendCounterpartyHistory(
+            _appendUserCounterpartyHistory(
                 userAddress,
                 HistoryKind.UnlockLock,
                 lock.tokenId,
@@ -667,7 +705,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
             if (block.timestamp >= lock.expiry && lock.amount > 0) {
                 balances[userAddress][lock.tokenId] += lock.amount;
-                _appendCounterpartyHistory(
+                _appendUserCounterpartyHistory(
                     userAddress,
                     HistoryKind.UnlockLock,
                     lock.tokenId,
@@ -748,7 +786,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         lock.amount -= amount;
         balances[toAddress][lock.tokenId] += amount;
 
-        _appendPairedHistory(
+        _appendTransferHistoryForParticipants(
             userAddress,
             toAddress,
             HistoryKind.TransferFromLock,
@@ -814,7 +852,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
 
         _scheduleWithdrawal(userAddress, toAddress, tokenId, amount);
-        _appendCounterpartyHistory(
+        _appendUserCounterpartyHistory(
             userAddress,
             HistoryKind.Withdraw,
             tokenId,
@@ -872,7 +910,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
 
-        _appendPairedHistory(
+        _appendTransferHistoryForParticipants(
             userAddress,
             toAddress,
             HistoryKind.TransferBalance,
@@ -920,7 +958,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
 
         _scheduleWithdrawal(userAddress, userAddress, tokenId, amount);
-        _appendCounterpartyHistory(
+        _appendUserCounterpartyHistory(
             userAddress,
             HistoryKind.Withdraw,
             tokenId,
@@ -1026,6 +1064,20 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      */
     function getTokenId(TokenInfo calldata info) public pure returns (bytes32) {
         return keccak256(abi.encode(info.tokenType, info.data));
+    }
+
+    /// @dev Only history reads are routed through fallback. History writes use
+    ///      explicit internal delegatecalls from Accounting state transitions.
+    // solhint-disable-next-line payable-fallback,no-complex-fallback
+    fallback() external {
+        bytes4 sig = msg.sig;
+        if (sig == IAccountingHistoryModule.getHistory.selector) {
+            bytes memory result = _delegateHistory(msg.data);
+            assembly {
+                return(add(result, 0x20), mload(result))
+            }
+        }
+        revert UnknownSelector(sig);
     }
 
     /**
@@ -1142,5 +1194,5 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[39] private __gap;
+    uint256[40] private __gap;
 }

@@ -3,13 +3,13 @@ pragma solidity ^0.8.20;
 
 import {EVMSignerAndVerifier} from "../EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "../EIP712SignatureVerifier.sol";
-import {HistoryEntry, TokenInfo, UserInfo} from "../Types.sol";
+import {HistoryEntry, HistoryKind, TokenInfo, UserInfo} from "../Types.sol";
 import {IAccountingSiweAuth} from "../interfaces/IAccountingSiweAuth.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
  * @title MockAccountingPrevious
- * @notice Storage-layout reference for the pre-AccountingHistory Accounting proxy.
+ * @notice Storage-layout reference for the pre-AccountingHistoryModule Accounting proxy.
  */
 contract MockAccountingPrevious is
     EIP712SignatureVerifier,
@@ -85,6 +85,20 @@ contract MockAccountingPrevious is
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyOwner {}
+
+    function mockAppendHistory(
+        address user,
+        HistoryKind kind,
+        bytes calldata payload
+    ) external {
+        history[user].push(
+            HistoryEntry({
+                kind: kind,
+                timestamp: uint64(block.timestamp),
+                payload: payload
+            })
+        );
+    }
 
     uint256[40] private __gap;
 }

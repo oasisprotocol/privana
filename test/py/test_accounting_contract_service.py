@@ -1,12 +1,14 @@
 """Tests for AccountingContractService parsing and request validation."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from hexbytes import HexBytes
 from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput
 
+from src.abi.accounting_history import ACCOUNTING_HISTORY_ABI
 from src.clients.rofl import RoflSubmissionResult
 from src.models.accounting import HistoryKind
 from src.services.accounting_contract import AccountingContractService
@@ -97,27 +99,24 @@ USER_B = "0x9876543210987654321098765432109876543210"
 USER_C = "0x5555555555555555555555555555555555555555"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ACCOUNTING_ADDRESS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-HISTORY_ADDRESS = "0x1111111111111111111111111111111111111111"
-SIWE_AUTH_ADDRESS = "0x2222222222222222222222222222222222222222"
+HISTORY_MODULE_ADDRESS = "0x1111111111111111111111111111111111111111"
+HISTORY_MODULE_ADDRESS_2 = "0x3333333333333333333333333333333333333333"
+HISTORY_MODULE_ID = Web3.keccak(text="privana.accounting.historyModule.v1")
 
 
-def _history_reader(
-    accounting_address: str = ACCOUNTING_ADDRESS,
-    siwe_auth_address: str = SIWE_AUTH_ADDRESS,
-) -> MagicMock:
+def _history_reader(module_id: bytes = HISTORY_MODULE_ID) -> MagicMock:
     reader = MagicMock()
-    reader.functions.accounting.return_value.call = AsyncMock(return_value=accounting_address)
-    reader.functions.siweAuth.return_value.call = AsyncMock(return_value=siwe_auth_address)
+    reader.functions.MODULE_ID.return_value.call = AsyncMock(return_value=module_id)
     return reader
 
 
 def _history_resolution_service(
     accounting_reader: MagicMock,
     history_reader: MagicMock,
-    history_address: str = ZERO_ADDRESS,
+    module_address: str = ZERO_ADDRESS,
 ) -> AccountingContractService:
     service = AccountingContractService.__new__(AccountingContractService)
-    service.history_contract_address = Web3.to_checksum_address(history_address)
+    service.history_module_address = Web3.to_checksum_address(module_address)
     service.contract_address = Web3.to_checksum_address(ACCOUNTING_ADDRESS)
     service.contract_reader = accounting_reader
     service.w3 = Web3()
@@ -125,83 +124,202 @@ def _history_resolution_service(
     service.reader_w3.eth.get_code = AsyncMock(return_value=b"\x01")
     service.reader_w3.eth.contract.return_value = history_reader
     service._confidential_history_contract_reader = None
-    service._history_contract_validated = False
+    service._history_module_validated = False
     service._siwe_auth_address = None
     return service
 
 
 @pytest.mark.asyncio
-async def test_resolve_history_contract_address_reads_accounting_proxy() -> None:
+async def test_resolve_history_module_address_reads_accounting_proxy() -> None:
     reader = MagicMock()
-    reader.functions.accountingHistory.return_value.call = AsyncMock(return_value=HISTORY_ADDRESS)
-    reader.functions.siweAuth.return_value.call = AsyncMock(return_value=SIWE_AUTH_ADDRESS)
+    reader.functions.historyModule.return_value.call = AsyncMock(
+        return_value=HISTORY_MODULE_ADDRESS
+    )
     history_reader = _history_reader()
 
     service = _history_resolution_service(reader, history_reader)
 
-    resolved = await service._resolve_history_contract_address()
+    resolved = await service._resolve_history_module_address()
 
-    assert resolved == Web3.to_checksum_address(HISTORY_ADDRESS)
-    assert service.history_contract_address == Web3.to_checksum_address(HISTORY_ADDRESS)
+    assert resolved == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
+    assert service.history_module_address == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
     service.reader_w3.eth.get_code.assert_awaited_once_with(
-        Web3.to_checksum_address(HISTORY_ADDRESS)
+        Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
+    )
+    history_reader.functions.MODULE_ID.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_resolve_history_module_address_rejects_missing_module() -> None:
+    reader = MagicMock()
+    reader.functions.historyModule.return_value.call = AsyncMock(return_value=ZERO_ADDRESS)
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.history_module_address = Web3.to_checksum_address(ZERO_ADDRESS)
+    service.contract_reader = reader
+    service._history_module_validated = False
+
+    with pytest.raises(ValueError, match="AccountingHistoryModule is not configured"):
+        await service._resolve_history_module_address()
+
+
+@pytest.mark.asyncio
+async def test_resolve_history_module_address_revalidates_cached_module() -> None:
+    reader = MagicMock()
+    reader.functions.historyModule.return_value.call = AsyncMock(
+        return_value=HISTORY_MODULE_ADDRESS
+    )
+    history_reader = _history_reader()
+    service = _history_resolution_service(reader, history_reader, HISTORY_MODULE_ADDRESS)
+
+    resolved = await service._resolve_history_module_address()
+
+    assert resolved == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
+    reader.functions.historyModule.assert_called_once_with()
+    assert service._history_module_validated is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_history_module_address_revalidates_on_rotation() -> None:
+    reader = MagicMock()
+    reader.functions.historyModule.return_value.call = AsyncMock(
+        side_effect=[HISTORY_MODULE_ADDRESS, HISTORY_MODULE_ADDRESS_2]
+    )
+    history_reader = _history_reader()
+    service = _history_resolution_service(reader, history_reader)
+
+    resolved = await service._resolve_history_module_address()
+    assert resolved == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
+
+    cached_reader = object()
+    service._confidential_history_contract_reader = cached_reader
+    rotated = await service._resolve_history_module_address()
+
+    assert rotated == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS_2)
+    assert service.history_module_address == Web3.to_checksum_address(HISTORY_MODULE_ADDRESS_2)
+    assert service._confidential_history_contract_reader is None
+    assert history_reader.functions.MODULE_ID.call_count == 2
+    assert service.reader_w3.eth.get_code.await_args_list == [
+        call(Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)),
+        call(Web3.to_checksum_address(HISTORY_MODULE_ADDRESS_2)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_history_module_address_rejects_wrong_module_id() -> None:
+    reader = MagicMock()
+    reader.functions.historyModule.return_value.call = AsyncMock(
+        return_value=HISTORY_MODULE_ADDRESS
+    )
+    history_reader = _history_reader(module_id=bytes.fromhex("00" * 32))
+    service = _history_resolution_service(reader, history_reader, HISTORY_MODULE_ADDRESS)
+
+    with pytest.raises(
+        ValueError,
+        match="AccountingHistoryModule has unexpected module id",
+    ):
+        await service._resolve_history_module_address()
+
+
+@pytest.mark.asyncio
+async def test_resolve_history_module_address_rejects_unreadable_module_id() -> None:
+    reader = MagicMock()
+    reader.functions.historyModule.return_value.call = AsyncMock(
+        return_value=HISTORY_MODULE_ADDRESS
+    )
+    history_reader = MagicMock()
+    history_reader.functions.MODULE_ID.return_value.call = AsyncMock(
+        side_effect=BadFunctionCallOutput("missing MODULE_ID")
+    )
+    service = _history_resolution_service(reader, history_reader, HISTORY_MODULE_ADDRESS)
+
+    with pytest.raises(
+        ValueError,
+        match="Could not read AccountingHistoryModule MODULE_ID",
+    ):
+        await service._resolve_history_module_address()
+
+
+@pytest.mark.asyncio
+async def test_resolve_history_module_address_rejects_address_without_code() -> None:
+    reader = MagicMock()
+    reader.functions.historyModule.return_value.call = AsyncMock(
+        return_value=HISTORY_MODULE_ADDRESS
+    )
+    history_reader = _history_reader()
+    service = _history_resolution_service(reader, history_reader, HISTORY_MODULE_ADDRESS)
+    service.reader_w3.eth.get_code = AsyncMock(return_value=b"")
+
+    with pytest.raises(
+        ValueError,
+        match="AccountingHistoryModule address has no contract code",
+    ):
+        await service._resolve_history_module_address()
+
+
+@pytest.mark.asyncio
+async def test_confidential_history_reader_calls_accounting_proxy_with_module_abi() -> None:
+    history_reader = MagicMock()
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract_address = Web3.to_checksum_address(ACCOUNTING_ADDRESS)
+    service._confidential_history_contract_reader = None
+    service._resolve_history_module_address = AsyncMock(
+        return_value=Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
+    )
+    service._get_confidential_reader_contract = AsyncMock()
+    service._confidential_reader_w3 = MagicMock()
+    service._confidential_reader_w3.eth.contract.return_value = history_reader
+
+    resolved = await service._get_confidential_history_reader_contract()
+
+    assert resolved is history_reader
+    service._confidential_reader_w3.eth.contract.assert_called_once_with(
+        address=Web3.to_checksum_address(ACCOUNTING_ADDRESS),
+        abi=ACCOUNTING_HISTORY_ABI,
     )
 
 
 @pytest.mark.asyncio
-async def test_resolve_history_contract_address_rejects_unlinked_accounting() -> None:
-    reader = MagicMock()
-    reader.functions.accountingHistory.return_value.call = AsyncMock(return_value=ZERO_ADDRESS)
-
+async def test_confidential_history_reader_revalidates_before_returning_cached_reader() -> None:
+    cached_reader = MagicMock()
     service = AccountingContractService.__new__(AccountingContractService)
-    service.history_contract_address = Web3.to_checksum_address(ZERO_ADDRESS)
-    service.contract_reader = reader
-    service._history_contract_validated = False
+    service._confidential_history_contract_reader = cached_reader
+    service._resolve_history_module_address = AsyncMock(
+        return_value=Web3.to_checksum_address(HISTORY_MODULE_ADDRESS)
+    )
 
-    with pytest.raises(ValueError, match="AccountingHistory contract is not configured"):
-        await service._resolve_history_contract_address()
+    resolved = await service._get_confidential_history_reader_contract()
 
-
-@pytest.mark.asyncio
-async def test_resolve_history_contract_address_validates_explicit_override() -> None:
-    reader = MagicMock()
-    reader.functions.siweAuth.return_value.call = AsyncMock(return_value=SIWE_AUTH_ADDRESS)
-    history_reader = _history_reader()
-    service = _history_resolution_service(reader, history_reader, HISTORY_ADDRESS)
-
-    resolved = await service._resolve_history_contract_address()
-
-    assert resolved == Web3.to_checksum_address(HISTORY_ADDRESS)
-    reader.functions.accountingHistory.assert_not_called()
-    assert service._history_contract_validated is True
+    assert resolved is cached_reader
+    service._resolve_history_module_address.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
-async def test_resolve_history_contract_address_rejects_unbound_override() -> None:
-    reader = MagicMock()
-    reader.functions.siweAuth.return_value.call = AsyncMock(return_value=SIWE_AUTH_ADDRESS)
-    history_reader = _history_reader(accounting_address=USER_A)
-    service = _history_resolution_service(reader, history_reader, HISTORY_ADDRESS)
+async def test_confidential_history_reader_rebuilds_after_module_rotation() -> None:
+    old_reader = MagicMock()
+    new_reader = MagicMock()
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract_address = Web3.to_checksum_address(ACCOUNTING_ADDRESS)
+    service._confidential_history_contract_reader = old_reader
+    service._get_confidential_reader_contract = AsyncMock()
+    service._confidential_reader_w3 = MagicMock()
+    service._confidential_reader_w3.eth.contract.return_value = new_reader
 
-    with pytest.raises(
-        ValueError,
-        match="AccountingHistory contract is not bound to the configured Accounting contract",
-    ):
-        await service._resolve_history_contract_address()
+    async def _clear_cached_reader() -> str:
+        service._confidential_history_contract_reader = None
+        return Web3.to_checksum_address(HISTORY_MODULE_ADDRESS_2)
 
+    service._resolve_history_module_address = AsyncMock(side_effect=_clear_cached_reader)
 
-@pytest.mark.asyncio
-async def test_resolve_history_contract_address_rejects_wrong_siwe_auth() -> None:
-    reader = MagicMock()
-    reader.functions.siweAuth.return_value.call = AsyncMock(return_value=SIWE_AUTH_ADDRESS)
-    history_reader = _history_reader(siwe_auth_address=USER_B)
-    service = _history_resolution_service(reader, history_reader, HISTORY_ADDRESS)
+    resolved = await service._get_confidential_history_reader_contract()
 
-    with pytest.raises(
-        ValueError,
-        match="AccountingHistory contract does not use the configured Accounting SIWE auth",
-    ):
-        await service._resolve_history_contract_address()
+    assert resolved is new_reader
+    service._resolve_history_module_address.assert_awaited_once_with()
+    service._get_confidential_reader_contract.assert_awaited_once_with()
+    service._confidential_reader_w3.eth.contract.assert_called_once_with(
+        address=Web3.to_checksum_address(ACCOUNTING_ADDRESS),
+        abi=ACCOUNTING_HISTORY_ABI,
+    )
 
 
 def _history_amount(value: int) -> bytes:

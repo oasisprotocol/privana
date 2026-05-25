@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from eth_abi.exceptions import DecodingError
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from eth_account.signers.local import LocalAccount
@@ -17,6 +18,7 @@ from sapphirepy import sapphire
 from web3 import AsyncWeb3, Web3
 from web3.constants import ADDRESS_ZERO
 from web3.contract import AsyncContract
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 from web3.providers import AsyncHTTPProvider
 
@@ -49,6 +51,7 @@ _HISTORY_COUNTERPARTY_PAYLOAD_LEN = (
 _HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN = _HISTORY_COUNTERPARTY_PAYLOAD_LEN + _HISTORY_ADDRESS_LEN
 _INT256_MIN = -(2**255)
 _INT256_MAX = 2**255 - 1
+_HISTORY_MODULE_ID = HexBytes(Web3.keccak(text="privana.accounting.historyModule.v1")).to_0x_hex()
 
 # Cache TTL settings (in seconds)
 _TOKEN_CONTEXT_CACHE_TTL = 3600  # 1 hour - token metadata rarely changes
@@ -106,16 +109,8 @@ class AccountingContractService:
         self.chain_id = self.settings.sapphire_chain_id
         self.gas_limit = self.settings.accounting_gas_limit
         self.contract_address = _to_checksum(self.settings.accounting_contract_address)
-        history_contract_address = getattr(
-            self.settings, "accounting_history_contract_address", ADDRESS_ZERO
-        )
-        if not isinstance(history_contract_address, str) or not history_contract_address:
-            history_contract_address = ADDRESS_ZERO
-        self.history_contract_address = _to_checksum(history_contract_address)
+        self.history_module_address = _to_checksum(ADDRESS_ZERO)
         self.contract = self.w3.eth.contract(address=self.contract_address, abi=ACCOUNTING_ABI)
-        self.history_contract = self.w3.eth.contract(
-            address=self.history_contract_address, abi=ACCOUNTING_HISTORY_ABI
-        )
         self.sapphire_rpc_url = self.settings.sapphire_rpc_url
 
         self.reader_w3: Optional[AsyncWeb3] = (
@@ -126,18 +121,11 @@ class AccountingContractService:
             if self.reader_w3
             else None
         )
-        self.history_contract_reader: Optional[AsyncContract] = (
-            self.reader_w3.eth.contract(
-                address=self.history_contract_address, abi=ACCOUNTING_HISTORY_ABI
-            )
-            if self.reader_w3
-            else None
-        )
 
         self._confidential_reader_w3: Optional[AsyncWeb3] = None
         self._confidential_contract_reader: Optional[AsyncContract] = None
         self._confidential_history_contract_reader: Optional[AsyncContract] = None
-        self._history_contract_validated = False
+        self._history_module_validated = False
         self._deposit_address: Optional[str] = None
         self._siwe_domain: Optional[str] = None
         self._siwe_auth_address: Optional[ChecksumAddress] = None
@@ -313,47 +301,32 @@ class AccountingContractService:
         )
         return self._siwe_auth_reader
 
-    def _set_history_contract_address(self, history_address: ChecksumAddress) -> None:
-        self.history_contract_address = history_address
-        self.history_contract = self.w3.eth.contract(
-            address=history_address,
-            abi=ACCOUNTING_HISTORY_ABI,
-        )
-        self.history_contract_reader = (
-            self.reader_w3.eth.contract(address=history_address, abi=ACCOUNTING_HISTORY_ABI)
-            if self.reader_w3
-            else None
-        )
+    def _set_history_module_address(self, module_address: ChecksumAddress) -> None:
+        self.history_module_address = module_address
         self._confidential_history_contract_reader = None
 
-    async def _validate_history_contract_address(self, history_address: ChecksumAddress) -> None:
-        if history_address == _to_checksum(ADDRESS_ZERO):
-            raise ValueError("AccountingHistory contract is not configured")
+    async def _validate_history_module_address(self, module_address: ChecksumAddress) -> None:
+        if module_address == _to_checksum(ADDRESS_ZERO):
+            raise ValueError("AccountingHistoryModule is not configured")
         if self.reader_w3 is None:
             raise ValueError(
-                "SAPPHIRE_RPC_URL must be configured to read AccountingHistory settings"
+                "SAPPHIRE_RPC_URL must be configured to read AccountingHistoryModule settings"
             )
 
-        code = await self.reader_w3.eth.get_code(history_address)
+        code = await self.reader_w3.eth.get_code(module_address)
         if len(code) == 0:
-            raise ValueError("AccountingHistory contract address has no contract code")
+            raise ValueError("AccountingHistoryModule address has no contract code")
 
         history_reader = self.reader_w3.eth.contract(
-            address=history_address,
+            address=module_address,
             abi=ACCOUNTING_HISTORY_ABI,
         )
-        bound_accounting = _to_checksum(await history_reader.functions.accounting().call())
-        if bound_accounting != self.contract_address:
-            raise ValueError(
-                "AccountingHistory contract is not bound to the configured Accounting contract"
-            )
-
-        bound_siwe_auth = _to_checksum(await history_reader.functions.siweAuth().call())
-        expected_siwe_auth = await self._get_siwe_auth_address()
-        if bound_siwe_auth != expected_siwe_auth:
-            raise ValueError(
-                "AccountingHistory contract does not use the configured Accounting SIWE auth"
-            )
+        try:
+            module_id = HexBytes(await history_reader.functions.MODULE_ID().call()).to_0x_hex()
+        except (BadFunctionCallOutput, ContractLogicError, DecodingError) as exc:
+            raise ValueError("Could not read AccountingHistoryModule MODULE_ID") from exc
+        if module_id != _HISTORY_MODULE_ID:
+            raise ValueError("AccountingHistoryModule has unexpected module id")
 
     async def _get_confidential_reader_contract(self) -> AsyncContract:
         if self._confidential_contract_reader is not None:
@@ -389,31 +362,33 @@ class AccountingContractService:
         )
         return self._confidential_contract_reader
 
-    async def _resolve_history_contract_address(self) -> ChecksumAddress:
-        if self.history_contract_address != _to_checksum(ADDRESS_ZERO):
-            if not getattr(self, "_history_contract_validated", False):
-                await self._validate_history_contract_address(self.history_contract_address)
-                self._history_contract_validated = True
-            return self.history_contract_address
-
+    async def _resolve_history_module_address(self) -> ChecksumAddress:
         contract_reader = self._get_reader_contract()
-        history_address = _to_checksum(await contract_reader.functions.accountingHistory().call())
-        await self._validate_history_contract_address(history_address)
-        self._set_history_contract_address(history_address)
-        self._history_contract_validated = True
-        return history_address
+        module_address = _to_checksum(await contract_reader.functions.historyModule().call())
+
+        if module_address != self.history_module_address:
+            await self._validate_history_module_address(module_address)
+            self._set_history_module_address(module_address)
+            self._history_module_validated = True
+            return module_address
+
+        if not getattr(self, "_history_module_validated", False):
+            await self._validate_history_module_address(module_address)
+            self._history_module_validated = True
+
+        return module_address
 
     async def _get_confidential_history_reader_contract(self) -> AsyncContract:
+        await self._resolve_history_module_address()
         if self._confidential_history_contract_reader is not None:
             return self._confidential_history_contract_reader
 
-        history_address = await self._resolve_history_contract_address()
         await self._get_confidential_reader_contract()
         if self._confidential_reader_w3 is None:
             raise ValueError("Confidential reader is not initialized")
 
         self._confidential_history_contract_reader = self._confidential_reader_w3.eth.contract(
-            address=history_address,
+            address=self.contract_address,
             abi=ACCOUNTING_HISTORY_ABI,
         )
         return self._confidential_history_contract_reader

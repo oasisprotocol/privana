@@ -73,7 +73,6 @@ async def lifespan(_app: FastAPI):
     """
     logger.info("Accounting Module API starting...")
     logger.info("Accounting contract: %s", settings.accounting_contract_address)
-    logger.info("AccountingHistory override: %s", settings.accounting_history_contract_address)
 
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()

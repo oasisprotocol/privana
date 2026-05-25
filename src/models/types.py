@@ -23,8 +23,6 @@ class Settings:
     withdrawal_resolution_timeout: int = 60
     min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei
 
-    accounting_history_contract_address: str = "0x0000000000000000000000000000000000000000"
-
     auth_token_validity_seconds: int = 24 * 60 * 60
     # Allow-list of SIWE domains. A SIWE message's ``domain`` field must match
     # one of these (after canonicalization) for authentication to succeed.

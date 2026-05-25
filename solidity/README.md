@@ -7,7 +7,7 @@ A cross-chain accounting system on Oasis Sapphire. Confidential balance manageme
 The Accounting module consists of these main components:
 
 - **Accounting.sol** — Core accounting contract (UUPS upgradeable). Manages balances, deposits, locks, transfers, withdrawals, and emergency withdraws.
-- **AccountingHistory.sol** — UUPS history sidecar. Stores confidential per-user history and exposes SIWE-authenticated history reads.
+- **AccountingHistoryModule.sol** — non-upgradeable delegated history module. Accounting owns the history storage; the module supplies history read/write code via `delegatecall`.
 - **EVMSignerAndVerifier.sol** — Sapphire-confidential EVM keypair management; signs sweep, gas-funding, and withdrawal transactions for source chains using the `EIP155Signer` precompile.
 - **EIP712SignatureVerifier.sol** — Verifies user-authored EIP-712 signatures for transfer / lock / withdrawal operations.
 - **auth/AccountingSiweAuth.sol** — SIWE-based authentication for confidential Sapphire view calls.
@@ -128,7 +128,7 @@ bun run coverage
 ## Deployment
 
 The `deploy` task provisions the SIWE auth helper, Accounting proxy/implementation,
-AccountingHistory proxy/implementation, and links Accounting to AccountingHistory in one step.
+AccountingHistoryModule, and links Accounting to the module in the same deploy task.
 
 ### Deploy to Sapphire Localnet
 
@@ -143,7 +143,7 @@ npx hardhat deploy --network sapphire-testnet --roflappid <rofl1…>
 ```
 
 Outputs: SIWE-auth address, Accounting proxy/implementation address,
-AccountingHistory proxy/implementation address, EVM signing address, owner.
+AccountingHistoryModule address, EVM signing address, owner.
 
 ### Standalone subtasks
 
@@ -183,23 +183,23 @@ If the task cannot resolve `siweAuth()` from the existing proxy, pass it explici
 npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --siweauth <siwe-auth-address>
 ```
 
-If an AccountingHistory proxy was deployed separately, attach it during upgrade:
+If an AccountingHistoryModule was deployed separately, attach it during upgrade:
 ```shell
-npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --history <history-proxy-address>
+npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --history <history-module-address>
 ```
 
-The upgrade task validates that AccountingHistory is bound to the Accounting proxy and uses the
-same SIWE auth contract. When upgrading from a pre-AccountingHistory deployment, the task deploys
-or validates the history proxy before upgrading Accounting, then links it with `upgradeToAndCall`
-so the upgraded proxy is never left without history storage.
+The upgrade task validates the module marker and contract code. When upgrading from a
+pre-AccountingHistoryModule deployment, the task deploys or validates the module before upgrading
+Accounting, then links it with `upgradeToAndCall` so the upgraded proxy is never left without
+history code.
 
-Existing history entries stored inside the old Accounting proxy are not copied automatically.
-Deployers must either accept a history reset or run an explicit migration before switching API
-traffic to the new history proxy.
+Existing history entries stored inside the old Accounting proxy remain in Accounting storage and
+are read by the delegated module after upgrade.
 
-`getHistory` now lives on `AccountingHistory`, not the `Accounting` ABI. Direct contract consumers
-should resolve `Accounting.accountingHistory()` and call
-`AccountingHistory.getHistory(offset, limit, token)`.
+`getHistory` is not in the `Accounting` ABI. Direct contract consumers should call the Accounting
+proxy address using the `AccountingHistoryModule` ABI; Accounting routes only that selector through
+its fallback. `Accounting.historyModule()` returns the module code address, not a storage-owning
+history contract.
 
 #### 3. Update the README
 
@@ -283,7 +283,7 @@ User-driven escape hatch from a per-user deposit address, with no ROFL involveme
 
 | Task | Purpose |
 |------|---------|
-| `deploy` | Deploy Accounting + AccountingHistory + SIWE auth |
+| `deploy` | Deploy Accounting + AccountingHistoryModule + SIWE auth |
 | `deploy-siwe-auth` | Deploy `AccountingSiweAuth` standalone |
 | `force-import` | Import an existing proxy into hardhat-upgrades |
 | `upgrade` | UUPS upgrade Accounting implementation |
@@ -309,8 +309,7 @@ Run `npx hardhat <task> --help` for parameter details.
 | AccountingSiweAuth | `0xFc97d47F0bc8f4E50333D34c281705E0666D3fD7` |
 | Accounting (Proxy) | `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642` |
 | Accounting (Implementation) | `0x12fb6720c445aa2d38009eb64e191e26C30b4CAA` (refresh after each upgrade) |
-| AccountingHistory (Proxy) | TBD after deployment |
-| AccountingHistory (Implementation) | TBD after deployment |
+| AccountingHistoryModule | TBD after deployment |
 
 **ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
 
@@ -328,8 +327,7 @@ Run `npx hardhat <task> --help` for parameter details.
 | AccountingSiweAuth | TBD |
 | Accounting (Proxy) | TBD |
 | Accounting (Implementation) | TBD |
-| AccountingHistory (Proxy) | TBD |
-| AccountingHistory (Implementation) | TBD |
+| AccountingHistoryModule | TBD |
 
 ## Security Considerations
 
@@ -337,6 +335,7 @@ Run `npx hardhat <task> --help` for parameter details.
 - **Confidential signing:** Sapphire's `EIP155Signer` + `SIGN_DIGEST` precompile keeps the contract-held EVM private key inside the secure environment; signed transactions are returned only to authorized callers
 - **EIP-712:** All user-authored balance operations require typed-data signatures, validated by `EIP712SignatureVerifier`
 - **Signed view-call auth:** `onlyROFLQuery` matches `msg.sender` against the ROFL-published `roflSignerAddress`. `roflEnsureAuthorizedOrigin` is unavailable inside `eth_call`, so signed-query reads use this alternative gate
+- **History module:** Accounting stores history in its own proxy storage and delegates history code to `AccountingHistoryModule`. Only the owner can update the module pointer; deployment tasks validate the module marker before linking.
 - **1-block delays** on `resolveWithdrawal` and `executeEmergencyWithdraw` mitigate same-block read-then-act simulation attacks
 
 ## Development
@@ -346,7 +345,7 @@ Run `npx hardhat <task> --help` for parameter details.
 ```
 contracts/
 ├── Accounting.sol              # Main accounting contract (UUPS proxy)
-├── AccountingHistory.sol       # History storage/read sidecar (UUPS proxy)
+├── AccountingHistoryModule.sol # Delegated history read/write code
 ├── EVMSignerAndVerifier.sol    # EVM keypairs + tx signing
 ├── EIP712SignatureVerifier.sol # User auth via EIP-712
 ├── Types.sol                   # Shared structs and enums

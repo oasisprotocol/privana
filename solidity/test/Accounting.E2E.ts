@@ -1,16 +1,27 @@
-import { expect } from 'chai';
-import { ethers, config, upgrades } from 'hardhat';
-import { keccak256, Wallet } from 'ethers';
-import { AccountingHistory, MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
-import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
-import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
+import { expect } from "chai";
+import { ethers, config, upgrades } from "hardhat";
+import { keccak256, Wallet } from "ethers";
+import {
+  AccountingHistoryModule,
+  MockAccounting,
+  MockAccountingV2,
+  MockSiweAuth,
+} from "../typechain-types";
+import { HardhatNetworkHDAccountsConfig } from "hardhat/types";
+import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import {
+  deployMockAccounting,
+  getDeployer,
+  MOCK_ROFL_APP_ID,
+  mockAuthToken,
+} from "./utils";
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
 // the enum declaration order in Types.sol.
 const ChainType = { EVM: 0 } as const;
 const TokenType = { NativeEVM: 0, ERC20: 1 } as const;
+const HistoryKind = { Deposit: 0 } as const;
 
 const types = {
   Lock: [
@@ -52,7 +63,7 @@ const types = {
     { name: "amount", type: "uint256" },
     { name: "nonce", type: "uint256" },
   ],
-}
+};
 
 const TEST_TOKEN = {
   tokenType: TokenType.ERC20,
@@ -61,27 +72,31 @@ const TEST_TOKEN = {
   // which is not available in the ethers v6 version used by hardhat
   tokenId: "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
   chainId: 84532,
-  address: '0x036cbd53842c5426634e7929541ec2318f3dcf7e',
+  address: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
 };
 
 function parseUsdt(amount: string): bigint {
-  const [whole, fraction = ''] = amount.split('.');
+  const [whole, fraction = ""] = amount.split(".");
   if (fraction.length > 6) {
-    throw new Error('USDT supports up to 6 decimal places');
+    throw new Error("USDT supports up to 6 decimal places");
   }
   const wholePart = BigInt(whole) * BigInt(10 ** 6);
-  const fractionPart = BigInt(fraction.padEnd(6, '0'));
+  const fractionPart = BigInt(fraction.padEnd(6, "0"));
   return wholePart + fractionPart;
 }
 
+function amountWord(amount: bigint): string {
+  return ethers.zeroPadValue(ethers.toBeHex(amount), 32);
+}
+
 async function getBlockTimestamp(): Promise<number> {
-  const block = await ethers.provider.getBlock('latest');
+  const block = await ethers.provider.getBlock("latest");
   return block!.timestamp;
 }
 
 async function waitForUpgradeTx(contract: any): Promise<void> {
   const deploymentTx =
-    typeof contract.deploymentTransaction === 'function'
+    typeof contract.deploymentTransaction === "function"
       ? contract.deploymentTransaction()
       : undefined;
   const tx = deploymentTx ?? contract.deployTransaction;
@@ -90,13 +105,18 @@ async function waitForUpgradeTx(contract: any): Promise<void> {
   }
 }
 
-describe('Accounting', function () {
+describe("Accounting", function () {
   let accounting: MockAccounting;
   let mockSiweAuth: MockSiweAuth;
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
   let user1: HardhatEthersSigner;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: string;
+  };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
   let tokenId: string;
@@ -105,8 +125,11 @@ describe('Accounting', function () {
     const [user1, user2, service] = (await ethers.getSigners()).slice(1, 4);
     const deployer = getDeployer();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
-    mockSiweAuth = await MockSiweAuthFactory.deploy('test');
+    const MockSiweAuthFactory = await ethers.getContractFactory(
+      "MockSiweAuth",
+      deployer,
+    );
+    mockSiweAuth = await MockSiweAuthFactory.deploy("test");
     await mockSiweAuth.waitForDeployment();
 
     accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
@@ -114,13 +137,18 @@ describe('Accounting', function () {
     accountingUser2 = accounting.connect(user2) as MockAccounting;
 
     const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
-      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
+      (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig)
+        .mnemonic,
     );
 
     // Drive index 0 and 1 wallets
     userWallet1 = hdNodeWallet.connect(ethers.provider) as any;
-    userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(ethers.provider) as any;
-    const userLocks = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
+    userWallet2 = hdNodeWallet
+      .derivePath("44'/60'/0'/0/0")
+      .connect(ethers.provider) as any;
+    const userLocks = await accounting.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -128,16 +156,16 @@ describe('Accounting', function () {
       version: domainTuple[2],
       chainId: Number(domainTuple[3]),
       verifyingContract: domainTuple[4],
-    }
+    };
 
     // Set up token info for tests
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+      ethers.zeroPadValue(TEST_TOKEN.address, 20),
     ]);
     const tx1 = await accounting.setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
-      data: data
+      data: data,
     });
     await tx1.wait();
 
@@ -151,7 +179,9 @@ describe('Accounting', function () {
   async function ensurePrivacyScenario(): Promise<void> {
     const ownerBal = await accounting.getBalance(userWallet1.address, tokenId);
     const callerBal = await accounting.getBalance(userWallet2.address, tokenId);
-    const ownerLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const ownerLocks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
 
     if (
       ownerBal === parseUsdt("8") &&
@@ -182,7 +212,7 @@ describe('Accounting', function () {
         amount: parseUsdt("1"),
         expiry,
         nonce: lockNonce,
-      }
+      },
     );
 
     await accounting.createLock(
@@ -191,7 +221,7 @@ describe('Accounting', function () {
       parseUsdt("1"),
       expiry,
       lockNonce,
-      signature
+      signature,
     );
   }
 
@@ -199,7 +229,9 @@ describe('Accounting', function () {
     expect(await accounting.createLockNonces(userWallet1.address)).to.equal(0n);
     expect(await accounting.modifyLockNonces(userWallet1.address)).to.equal(0n);
     // transferLockedNonces is keyed by service address; userWallet2 acts as the service in lock tests
-    expect(await accounting.transferLockedNonces(userWallet2.address)).to.equal(0n);
+    expect(await accounting.transferLockedNonces(userWallet2.address)).to.equal(
+      0n,
+    );
   });
 
   it("Admin adds tokenInfo for Test token", async function () {
@@ -208,27 +240,37 @@ describe('Accounting', function () {
     // Pad chainId to 32 bytes, token address to 20 bytes, then concatenate
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+      ethers.zeroPadValue(TEST_TOKEN.address, 20),
     ]);
 
     const tx = await accounting.connect(admin).setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
-      data: data
+      data: data,
     });
     await tx.wait();
 
     const tokenId = await accounting.getTokenId({
       tokenType: TEST_TOKEN.tokenType,
-      data: data
+      data: data,
     });
 
     expect(tokenId).to.equal(TEST_TOKEN.tokenId);
-    expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
+    expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([
+      TEST_TOKEN.chainId,
+      TEST_TOKEN.address,
+    ]);
   });
 
   it("Set up initial balance via setBalance", async function () {
-    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("10"));
-    const balance = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
+    await accounting.setBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("10"),
+    );
+    const balance = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
     expect(balance).to.equal(parseUsdt("10"));
   });
 
@@ -242,12 +284,18 @@ describe('Accounting', function () {
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("1"),
         nonce: nonce,
-      }
+      },
     );
 
     // Check balances before
-    const balance1Before = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const balance2Before = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
+    const balance1Before = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const balance2Before = await accounting.getBalance(
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+    );
 
     // Submit the transfer to Accounting contract
     const tx = await accounting.transferBalance(
@@ -255,12 +303,18 @@ describe('Accounting', function () {
       TEST_TOKEN.tokenId,
       parseUsdt("1"),
       nonce,
-      signature
+      signature,
     );
     await tx.wait();
 
-    const balance1After = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const balance2After = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
+    const balance1After = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const balance2After = await accounting.getBalance(
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+    );
 
     expect(balance1Before).to.equal(parseUsdt("10"));
     expect(balance1After).to.equal(parseUsdt("9"));
@@ -269,7 +323,7 @@ describe('Accounting', function () {
   });
 
   it("Test locking with EIP712", async function () {
-    const expiry = await getBlockTimestamp() + 3600; // 1 hour from now
+    const expiry = (await getBlockTimestamp()) + 3600; // 1 hour from now
     const lockNonce = await accounting.createLockNonces(userWallet1.address);
     const signature = await userWallet1.signTypedData(
       domain,
@@ -279,13 +333,19 @@ describe('Accounting', function () {
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("1"),
         expiry,
-        nonce: lockNonce
-      }
+        nonce: lockNonce,
+      },
     );
 
     // Check balances before
-    const balance1Before = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const balance2Before = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
+    const balance1Before = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const balance2Before = await accounting.getBalance(
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+    );
 
     // Submit the lock to Accounting contract
     const tx = await accounting.createLock(
@@ -294,12 +354,18 @@ describe('Accounting', function () {
       parseUsdt("1"),
       expiry,
       lockNonce,
-      signature
+      signature,
     );
     await tx.wait();
 
-    const balance1After = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const balance2After = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
+    const balance1After = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const balance2After = await accounting.getBalance(
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+    );
 
     expect(balance1Before).to.equal(parseUsdt("9"));
     expect(balance1After).to.equal(parseUsdt("8"));
@@ -307,7 +373,9 @@ describe('Accounting', function () {
     expect(balance2After).to.equal(parseUsdt("1"));
 
     // It doesn't go to the normal balance, instead a lock is appended to the user info
-    const userLocks = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
+    const userLocks = await accounting.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
 
     expect(userLocks.length).to.equal(1);
     expect(userLocks[0][1]).to.equal(userWallet2.address);
@@ -316,41 +384,56 @@ describe('Accounting', function () {
     expect(userLocks[0][4]).to.be.equal(expiry);
   });
 
-  it('Privacy: view functions derive identity from auth token, so user2 cannot read user1 data', async function () {
+  it("Privacy: view functions derive identity from auth token, so user2 cannot read user1 data", async function () {
     await ensurePrivacyScenario();
 
-    const ownerBal = await accountingUser1.balanceOf(tokenId, mockAuthToken(userWallet1.address));
-    const callerBal = await accountingUser2.balanceOf(tokenId, mockAuthToken(userWallet2.address));
+    const ownerBal = await accountingUser1.balanceOf(
+      tokenId,
+      mockAuthToken(userWallet1.address),
+    );
+    const callerBal = await accountingUser2.balanceOf(
+      tokenId,
+      mockAuthToken(userWallet2.address),
+    );
     expect(ownerBal).to.equal(parseUsdt("8"));
     expect(callerBal).to.equal(parseUsdt("1"));
     expect(callerBal).to.not.equal(ownerBal);
 
-    const ownerLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
-    const callerLocks = await accountingUser2.getUserLocks(mockAuthToken(userWallet2.address));
+    const ownerLocks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
+    const callerLocks = await accountingUser2.getUserLocks(
+      mockAuthToken(userWallet2.address),
+    );
     expect(ownerLocks.length).to.equal(1);
     expect(callerLocks.length).to.equal(0);
   });
 
-  it('Privacy: user-only view functions should return correct data for the owner', async function () {
+  it("Privacy: user-only view functions should return correct data for the owner", async function () {
     await ensurePrivacyScenario();
 
-    const bal = await accountingUser1.balanceOf(tokenId, mockAuthToken(userWallet1.address));
+    const bal = await accountingUser1.balanceOf(
+      tokenId,
+      mockAuthToken(userWallet1.address),
+    );
     expect(bal).to.equal(parseUsdt("8"));
 
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
-    expect(locks).to.be.an('array');
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
+    expect(locks).to.be.an("array");
     expect(locks.length).to.equal(1);
     expect(locks[0][1]).to.equal(userWallet2.address);
     expect(locks[0][2]).to.equal(tokenId);
     expect(locks[0][3]).to.equal(parseUsdt("1"));
   });
 
-  it('Privacy: non-empty auth tokens determine the private-read subject', async function () {
+  it("Privacy: non-empty auth tokens determine the private-read subject", async function () {
     await ensurePrivacyScenario();
 
     const authToken = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['address'],
-      [userWallet1.address]
+      ["address"],
+      [userWallet1.address],
     );
 
     const bal = await accountingUser2.balanceOf(tokenId, authToken);
@@ -361,10 +444,13 @@ describe('Accounting', function () {
     expect(locks[0][1]).to.equal(userWallet2.address);
   });
 
-  it('Privacy: service-scoped total locked balance should only count the caller\'s locks', async function () {
+  it("Privacy: service-scoped total locked balance should only count the caller's locks", async function () {
     await ensurePrivacyScenario();
 
-    const serviceLocks = await accountingUser2.getServiceLocks(userWallet1.address, mockAuthToken(userWallet2.address));
+    const serviceLocks = await accountingUser2.getServiceLocks(
+      userWallet1.address,
+      mockAuthToken(userWallet2.address),
+    );
     expect(serviceLocks.length).to.equal(1);
     expect(serviceLocks[0][1]).to.equal(userWallet2.address);
     expect(serviceLocks[0][2]).to.equal(tokenId);
@@ -372,7 +458,9 @@ describe('Accounting', function () {
   });
 
   it("The service should be able to resolve the lock", async function () {
-    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
+    const transferLockedNonce = await accounting.transferLockedNonces(
+      userWallet2.address,
+    );
 
     const signature = await userWallet2.signTypedData(
       domain,
@@ -384,11 +472,14 @@ describe('Accounting', function () {
         amount: parseUsdt("0.5"),
         nonce: transferLockedNonce,
         serviceAddress: userWallet2.address,
-      }
+      },
     );
 
     // Check balances before
-    const balance1Before = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
+    const balance1Before = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
 
     // Submit the transfer to Accounting contract
     const tx = await accounting.transferFromLock(
@@ -397,7 +488,7 @@ describe('Accounting', function () {
       1,
       parseUsdt("0.5"),
       transferLockedNonce,
-      signature
+      signature,
     );
     await tx.wait();
   });
@@ -415,19 +506,26 @@ describe('Accounting', function () {
     const tx = await accounting.unlockSingleLock(userWallet1.address, 1);
     await tx.wait();
 
-    const userLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const userLocks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     expect(userLocks.length).to.equal(0);
-
   });
 
   it("The user shouldn't be able to create more than 10 locks", async function () {
-    const expiry = await getBlockTimestamp() + 3600; // 1 hour from now
+    const expiry = (await getBlockTimestamp()) + 3600; // 1 hour from now
 
-    const fundTx = await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("2.0"));
+    const fundTx = await accounting.setBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("2.0"),
+    );
     await fundTx.wait();
 
-    const userLocksBefore = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
-    for (let i = 0; i < 10-userLocksBefore.length; i++) {
+    const userLocksBefore = await accounting.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
+    for (let i = 0; i < 10 - userLocksBefore.length; i++) {
       const lockNonce = await accounting.createLockNonces(userWallet1.address);
       const signature = await userWallet1.signTypedData(
         domain,
@@ -437,8 +535,8 @@ describe('Accounting', function () {
           tokenId: TEST_TOKEN.tokenId,
           amount: parseUsdt("0.1"),
           expiry: expiry + i,
-          nonce: lockNonce
-        }
+          nonce: lockNonce,
+        },
       );
 
       const tx = await accounting.createLock(
@@ -447,12 +545,14 @@ describe('Accounting', function () {
         parseUsdt("0.1"),
         expiry + i,
         lockNonce,
-        signature
+        signature,
       );
       await tx.wait();
     }
 
-    const userLocks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const userLocks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     expect(userLocks.length).to.equal(10);
 
     // Try to create the 11th lock, should fail
@@ -465,18 +565,20 @@ describe('Accounting', function () {
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("0.1"),
         expiry: expiry + 11,
-        nonce: lockNonce
-      }
+        nonce: lockNonce,
+      },
     );
 
-    await expect(accounting.createLock(
-      userWallet2.address,
-      TEST_TOKEN.tokenId,
-      parseUsdt("0.1"),
-      expiry + 11,
-      lockNonce,
-      signature
-    )).to.be.reverted; // WithCustomError(accounting, "TooManyActiveLocks"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.createLock(
+        userWallet2.address,
+        TEST_TOKEN.tokenId,
+        parseUsdt("0.1"),
+        expiry + 11,
+        lockNonce,
+        signature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "TooManyActiveLocks"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject replay of createLock signature", async function () {
@@ -494,24 +596,37 @@ describe('Accounting', function () {
         amount: parseUsdt("0.5"),
         expiry,
         nonce: lockNonce,
-      }
+      },
     );
 
     const tx = await accounting.createLock(
-      userWallet1.address, TEST_TOKEN.tokenId,
-      parseUsdt("0.5"), expiry, lockNonce, signature
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("0.5"),
+      expiry,
+      lockNonce,
+      signature,
     );
-    await tx.wait()
+    await tx.wait();
 
-    await expect(accounting.createLock(
-      userWallet1.address, TEST_TOKEN.tokenId,
-      parseUsdt("0.5"), expiry, lockNonce, signature
-    )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.createLock(
+        userWallet1.address,
+        TEST_TOKEN.tokenId,
+        parseUsdt("0.5"),
+        expiry,
+        lockNonce,
+        signature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
-
   it("User should be able to withdraw TEST token using EIP712 signature", async function () {
-    const fundTx = await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("0.15"));
+    const fundTx = await accounting.setBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("0.15"),
+    );
     await fundTx.wait();
 
     const nonce = await accounting.withdrawalNonces(userWallet1.address);
@@ -522,7 +637,7 @@ describe('Accounting', function () {
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("0.1"),
         nonce: nonce,
-      }
+      },
     );
 
     // Submit the withdrawal request to Accounting contract
@@ -530,7 +645,7 @@ describe('Accounting', function () {
       TEST_TOKEN.tokenId,
       parseUsdt("0.1"),
       nonce,
-      signature
+      signature,
     );
     await tx.wait();
 
@@ -543,7 +658,7 @@ describe('Accounting', function () {
 
     // Requires Sapphire EIP155Signer precompile.
     const network = await ethers.provider.getNetwork();
-    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
+    if (0x5afd <= network.chainId && network.chainId <= 0x5aff) {
       const tx2 = await accounting.resolveWithdrawal(0);
       const receipt2 = await tx2.wait();
       const withdrawalAfter = await accounting.withdrawals(0);
@@ -553,48 +668,89 @@ describe('Accounting', function () {
 
   describe("creditDeposit (via mock)", function () {
     it("should credit deposit to beneficiary", async function () {
-      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-        ["uint256", "bytes32", "bytes32", "uint256"],
-        [84532, ethers.id("0xtxhash1"), tokenId, 0]
-      ));
+      const depositId = keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ["uint256", "bytes32", "bytes32", "uint256"],
+          [84532, ethers.id("0xtxhash1"), tokenId, 0],
+        ),
+      );
       const amount = parseUsdt("100");
-      await accounting.mockCreditDeposit(userWallet1.address, tokenId, amount, depositId);
+      await accounting.mockCreditDeposit(
+        userWallet1.address,
+        tokenId,
+        amount,
+        depositId,
+      );
       const balance = await accounting.getBalance(userWallet1.address, tokenId);
       expect(balance).to.be.gte(amount);
     });
 
     it("should reject duplicate deposit key", async function () {
-      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-        ["uint256", "bytes32", "bytes32", "uint256"],
-        [84532, ethers.id("0xtxhash-dedup"), tokenId, 0]
-      ));
-      await accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId);
+      const depositId = keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ["uint256", "bytes32", "bytes32", "uint256"],
+          [84532, ethers.id("0xtxhash-dedup"), tokenId, 0],
+        ),
+      );
+      await accounting.mockCreditDeposit(
+        userWallet1.address,
+        tokenId,
+        parseUsdt("50"),
+        depositId,
+      );
       await expect(
-        accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId)
+        accounting.mockCreditDeposit(
+          userWallet1.address,
+          tokenId,
+          parseUsdt("50"),
+          depositId,
+        ),
       ).to.be.reverted; // WithCustomError(accounting, "DepositAlreadyProcessed"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should reject zero amount", async function () {
-      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-        ["uint256", "bytes32", "bytes32", "uint256"],
-        [84532, ethers.id("0xtxhash-zero"), tokenId, 0]
-      ));
+      const depositId = keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ["uint256", "bytes32", "bytes32", "uint256"],
+          [84532, ethers.id("0xtxhash-zero"), tokenId, 0],
+        ),
+      );
       await expect(
-        accounting.mockCreditDeposit(userWallet1.address, tokenId, 0n, depositId)
-      ).to.be.reverted// WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+        accounting.mockCreditDeposit(
+          userWallet1.address,
+          tokenId,
+          0n,
+          depositId,
+        ),
+      ).to.be.reverted; // WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should reject unregistered token", async function () {
-      const fakeTokenId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-        ["uint8", "bytes"],
-        [1, ethers.AbiCoder.defaultAbiCoder().encode(["uint256", "address"], [84532, ethers.ZeroAddress])]
-      ));
-      const depositId = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-        ["uint256", "bytes32", "bytes32", "uint256"],
-        [84532, ethers.id("0xtxhash-unreg"), fakeTokenId, 0]
-      ));
+      const fakeTokenId = keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ["uint8", "bytes"],
+          [
+            1,
+            ethers.AbiCoder.defaultAbiCoder().encode(
+              ["uint256", "address"],
+              [84532, ethers.ZeroAddress],
+            ),
+          ],
+        ),
+      );
+      const depositId = keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ["uint256", "bytes32", "bytes32", "uint256"],
+          [84532, ethers.id("0xtxhash-unreg"), fakeTokenId, 0],
+        ),
+      );
       await expect(
-        accounting.mockCreditDeposit(userWallet1.address, fakeTokenId, parseUsdt("100"), depositId)
+        accounting.mockCreditDeposit(
+          userWallet1.address,
+          fakeTokenId,
+          parseUsdt("100"),
+          depositId,
+        ),
       ).to.be.reverted; // WithCustomError(accounting, "UnsupportedTokenType"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
   });
@@ -607,10 +763,18 @@ describe('Accounting', function () {
         this.skip();
       }
 
-      const addr1 = await accounting.getDepositAddress(ChainType.EVM, 0, mockAuthToken(userWallet1.address));
+      const addr1 = await accounting.getDepositAddress(
+        ChainType.EVM,
+        0,
+        mockAuthToken(userWallet1.address),
+      );
       expect(addr1).to.equal("0xC739394587942f984FF3e5E28FEaA96a88D52E97");
 
-      const addr2 = await accounting.getDepositAddress(ChainType.EVM, 0, mockAuthToken(userWallet2.address));
+      const addr2 = await accounting.getDepositAddress(
+        ChainType.EVM,
+        0,
+        mockAuthToken(userWallet2.address),
+      );
       expect(addr2).to.equal("0xE6bB861D91d5d84A2278c4f88E899bf1b5Af91b8");
     });
   });
@@ -618,11 +782,19 @@ describe('Accounting', function () {
   describe("emergencyWithdraw", function () {
     it("should create emergency withdraw request", async function () {
       const user = await ethers.getSigner(userWallet1.address);
-      const expectedId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+      const expectedId = await accounting.emergencyWithdrawKey(
+        userWallet1.address,
+        tokenId,
+        0,
+      );
 
       await expect(
-        accounting.connect(user).requestEmergencyWithdraw(tokenId, userWallet1.address, 0)
-      ).to.emit(accounting, "EmergencyWithdrawRequested").withArgs(expectedId, tokenId);
+        accounting
+          .connect(user)
+          .requestEmergencyWithdraw(tokenId, userWallet1.address, 0),
+      )
+        .to.emit(accounting, "EmergencyWithdrawRequested")
+        .withArgs(expectedId, tokenId);
 
       const req = await accounting.emergencyWithdrawRequests(expectedId);
       expect(req.toAddress).to.equal(userWallet1.address);
@@ -631,20 +803,38 @@ describe('Accounting', function () {
 
     it("should overwrite request on re-request (implicit cancel)", async function () {
       const user = await ethers.getSigner(userWallet1.address);
-      const requestId = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
+      const requestId = await accounting.emergencyWithdrawKey(
+        userWallet1.address,
+        tokenId,
+        0,
+      );
 
       // Re-request with a different destination — overwrites the prior slot.
       const newDest = userWallet1.address;
-      await accounting.connect(user).requestEmergencyWithdraw(tokenId, newDest, 0);
+      await accounting
+        .connect(user)
+        .requestEmergencyWithdraw(tokenId, newDest, 0);
 
       const req = await accounting.emergencyWithdrawRequests(requestId);
       expect(req.toAddress).to.equal(newDest);
     });
 
     it("should isolate requests by (beneficiary, tokenId, version)", async function () {
-      const keyA = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 0);
-      const keyB = await accounting.emergencyWithdrawKey(userWallet1.address, tokenId, 1);
-      const keyC = await accounting.emergencyWithdrawKey(userWallet2.address, tokenId, 0);
+      const keyA = await accounting.emergencyWithdrawKey(
+        userWallet1.address,
+        tokenId,
+        0,
+      );
+      const keyB = await accounting.emergencyWithdrawKey(
+        userWallet1.address,
+        tokenId,
+        1,
+      );
+      const keyC = await accounting.emergencyWithdrawKey(
+        userWallet2.address,
+        tokenId,
+        0,
+      );
       expect(keyA).to.not.equal(keyB);
       expect(keyA).to.not.equal(keyC);
       expect(keyB).to.not.equal(keyC);
@@ -654,7 +844,11 @@ describe('Accounting', function () {
       // executeEmergencyWithdraw calls EIP155Signer.sign() which needs Sapphire precompiles.
       // On Hardhat we verify state transitions up to the signing step; on Sapphire we get signedTx.
       const user1 = (await ethers.getSigners())[1];
-      const tx1 = await accountingUser1.requestEmergencyWithdraw(tokenId, userWallet2.address, 0);
+      const tx1 = await accountingUser1.requestEmergencyWithdraw(
+        tokenId,
+        userWallet2.address,
+        0,
+      );
       await tx1.wait();
 
       // Requires Sapphire EIP155Signer precompile.
@@ -662,8 +856,13 @@ describe('Accounting', function () {
       if (network.chainId < 0x5afd || network.chainId > 0x5aff) {
         await expect(
           accountingUser1.executeEmergencyWithdraw(
-            user1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
-          )
+            user1.address,
+            tokenId,
+            0,
+            0,
+            parseUsdt("1"),
+            1000000000n,
+          ),
         ).to.be.reverted;
         this.skip();
       }
@@ -671,17 +870,36 @@ describe('Accounting', function () {
       // Full happy path on Sapphire: decode signedTx and verify EIP-155 chainId matches
       // the chainId encoded in tokens[tokenId].data. Regression test for the issue where
       // caller-supplied chainId could produce a signed tx for the wrong EVM chain.
-      const signedTx: string = await accounting.executeEmergencyWithdraw.staticCall(
-        user1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+      const signedTx: string =
+        await accounting.executeEmergencyWithdraw.staticCall(
+          user1.address,
+          tokenId,
+          0,
+          0,
+          parseUsdt("1"),
+          1000000000n,
+        );
+      expect(ethers.Transaction.from(signedTx).chainId).to.equal(
+        BigInt(TEST_TOKEN.chainId),
       );
-      expect(ethers.Transaction.from(signedTx).chainId).to.equal(BigInt(TEST_TOKEN.chainId));
 
       const tx = await accounting.executeEmergencyWithdraw(
-        user1.address, tokenId, 0, 0, parseUsdt("1"), 1000000000n
+        user1.address,
+        tokenId,
+        0,
+        0,
+        parseUsdt("1"),
+        1000000000n,
       );
       await tx.wait();
-      const requestId = await accounting.emergencyWithdrawKey(user1.address, tokenId, 0);
-      await expect(tx).to.emit(accounting, "EmergencyWithdrawExecuted").withArgs(requestId);
+      const requestId = await accounting.emergencyWithdrawKey(
+        user1.address,
+        tokenId,
+        0,
+      );
+      await expect(tx)
+        .to.emit(accounting, "EmergencyWithdrawExecuted")
+        .withArgs(requestId);
     });
 
     it("should reject request with unregistered tokenId", async function () {
@@ -690,16 +908,25 @@ describe('Accounting', function () {
       const user = await ethers.getSigner(userWallet1.address);
       const unknownTokenId = "0x" + "11".repeat(32);
       await expect(
-        accounting.connect(user).requestEmergencyWithdraw(unknownTokenId, userWallet1.address, 0)
+        accounting
+          .connect(user)
+          .requestEmergencyWithdraw(unknownTokenId, userWallet1.address, 0),
       ).to.be.reverted; // WithCustomError(accounting, "UnsupportedTokenType"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("should reject execute on non-existent request", async function () {
       // Unused (beneficiary, version) pair — slot is empty.
       await expect(
-        accounting.connect(await ethers.getSigner(userWallet1.address)).executeEmergencyWithdraw(
-          userWallet1.address, tokenId, 99, 0, parseUsdt("1"), 1000000000n
-        )
+        accounting
+          .connect(await ethers.getSigner(userWallet1.address))
+          .executeEmergencyWithdraw(
+            userWallet1.address,
+            tokenId,
+            99,
+            0,
+            parseUsdt("1"),
+            1000000000n,
+          ),
       ).to.be.reverted; // WithCustomError(accounting, "EmergencyWithdrawNotFound"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
@@ -715,7 +942,13 @@ describe('Accounting', function () {
       expect(await fresh.roflSignerAddress()).to.equal(ethers.ZeroAddress);
 
       await expect(
-        fresh.generateGasFundingTx.staticCall(userWallet1.address, 84532, 10n, 0n, 1000000000n)
+        fresh.generateGasFundingTx.staticCall(
+          userWallet1.address,
+          84532,
+          10n,
+          0n,
+          1000000000n,
+        ),
       ).to.be.reverted; // WithCustomError(fresh, "RoflSignerNotSet"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
@@ -728,8 +961,8 @@ describe('Accounting', function () {
     });
 
     it("should reject zero address in setter", async function () {
-      await expect(accounting.mockSetRoflSignerAddress(ethers.ZeroAddress))
-        .to.be.reverted; // WithCustomError(accounting, "InvalidAddress"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+      await expect(accounting.mockSetRoflSignerAddress(ethers.ZeroAddress)).to
+        .be.reverted; // WithCustomError(accounting, "InvalidAddress"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
     it("real setRoflSignerAddress is gated by onlyROFL", async function () {
@@ -737,9 +970,8 @@ describe('Accounting', function () {
       // On Hardhat the Sapphire precompile doesn't exist, so the call reverts — which is
       // exactly the guarantee the modifier provides. If the gate were removed, the call
       // would succeed (since the inner body is a plain storage write).
-      await expect(
-        accounting.setRoflSignerAddress(userWallet1.address)
-      ).to.be.reverted;
+      await expect(accounting.setRoflSignerAddress(userWallet1.address)).to.be
+        .reverted;
     });
 
     // Precondition for the parametrized cases below: roflSignerAddress was set to userWallet1
@@ -748,40 +980,68 @@ describe('Accounting', function () {
       {
         name: "generateSweepNativeTransfer",
         call: (signer: typeof userWallet2) =>
-          accounting.connect(signer).generateSweepNativeTransfer.staticCall(
-            userWallet1.address, ChainType.EVM, 1n, 84532, 10n, 0n, 1000000000n
-          ),
+          accounting
+            .connect(signer)
+            .generateSweepNativeTransfer.staticCall(
+              userWallet1.address,
+              ChainType.EVM,
+              1n,
+              84532,
+              10n,
+              0n,
+              1000000000n,
+            ),
       },
       {
         name: "generateSweepERC20Transfer",
         call: (signer: typeof userWallet2) =>
-          accounting.connect(signer).generateSweepERC20Transfer.staticCall(
-            userWallet1.address, ChainType.EVM, 1n, 84532, userWallet2.address, 10n, 0n, 1000000000n
-          ),
+          accounting
+            .connect(signer)
+            .generateSweepERC20Transfer.staticCall(
+              userWallet1.address,
+              ChainType.EVM,
+              1n,
+              84532,
+              userWallet2.address,
+              10n,
+              0n,
+              1000000000n,
+            ),
       },
       {
         name: "generateGasFundingTx",
         call: (signer: typeof userWallet2) =>
-          accounting.connect(signer).generateGasFundingTx.staticCall(
-            userWallet1.address, 84532, 10n, 0n, 1000000000n
-          ),
+          accounting
+            .connect(signer)
+            .generateGasFundingTx.staticCall(
+              userWallet1.address,
+              84532,
+              10n,
+              0n,
+              1000000000n,
+            ),
       },
     ];
 
     wrongSenderCases.forEach(({ name, call }) => {
       it(`${name} rejects wrong sender with NotAuthorizedROFL`, async function () {
         await expect(call(userWallet2)).to.be.revertedWithCustomError(
-          accounting, "NotAuthorizedROFL"
+          accounting,
+          "NotAuthorizedROFL",
         );
       });
     });
   });
-
 });
 
-describe('WithdrawFromLock', function () {
+describe("WithdrawFromLock", function () {
   let accounting: MockAccounting;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: string;
+  };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
   let userWallet3: Wallet;
@@ -790,24 +1050,32 @@ describe('WithdrawFromLock', function () {
 
   before(async () => {
     const provider = ethers.provider;
-    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
+    const mnemonic = (
+      config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig
+    ).mnemonic;
 
-    userWallet1 = ethers.HDNodeWallet
-      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/0")
-      .connect(provider) as any;
-    userWallet2 = ethers.HDNodeWallet
-      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/1")
-      .connect(provider) as any;
-    userWallet3 = ethers.HDNodeWallet
-      .fromPhrase(mnemonic, undefined, "m/44'/60'/0'/0/2")
-      .connect(provider) as any;
+    userWallet1 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/0",
+    ).connect(provider) as any;
+    userWallet2 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/1",
+    ).connect(provider) as any;
+    userWallet3 = ethers.HDNodeWallet.fromPhrase(
+      mnemonic,
+      undefined,
+      "m/44'/60'/0'/0/2",
+    ).connect(provider) as any;
   });
 
   beforeEach(async () => {
     const [deployer] = await ethers.getSigners();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
-    const mockSiweAuth = await MockSiweAuthFactory.deploy('test');
+    const MockSiweAuthFactory = await ethers.getContractFactory("MockSiweAuth");
+    const mockSiweAuth = await MockSiweAuthFactory.deploy("test");
     await mockSiweAuth.waitForDeployment();
 
     accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
@@ -822,18 +1090,25 @@ describe('WithdrawFromLock', function () {
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+      ethers.zeroPadValue(TEST_TOKEN.address, 20),
     ]);
     await accounting.setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
-      data: data
+      data: data,
     });
     await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n);
   });
 
-  async function createLockForService(lockAmount: bigint, serviceAddress: string): Promise<bigint> {
-    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("5"));
-    const expiry = await getBlockTimestamp() + 3600;
+  async function createLockForService(
+    lockAmount: bigint,
+    serviceAddress: string,
+  ): Promise<bigint> {
+    await accounting.setBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("5"),
+    );
+    const expiry = (await getBlockTimestamp()) + 3600;
     const lockNonce = await accounting.createLockNonces(userWallet1.address);
     const lockSignature = await userWallet1.signTypedData(
       domain,
@@ -844,7 +1119,7 @@ describe('WithdrawFromLock', function () {
         amount: lockAmount,
         expiry,
         nonce: lockNonce,
-      }
+      },
     );
 
     await accounting.createLock(
@@ -853,15 +1128,20 @@ describe('WithdrawFromLock', function () {
       lockAmount,
       expiry,
       lockNonce,
-      lockSignature
+      lockSignature,
     );
 
-    const userLocks = await accounting.connect(userWallet1).getUserLocks(mockAuthToken(userWallet1.address));
+    const userLocks = await accounting
+      .connect(userWallet1)
+      .getUserLocks(mockAuthToken(userWallet1.address));
     return userLocks[0][0];
   }
 
   it("should withdraw from lock to external destination and store toAddress", async function () {
-    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const lockId = await createLockForService(
+      parseUsdt("2"),
+      userWallet2.address,
+    );
     const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
 
     const signature = await userWallet2.signTypedData(
@@ -873,7 +1153,7 @@ describe('WithdrawFromLock', function () {
         lockId,
         amount: parseUsdt("1"),
         nonce,
-      }
+      },
     );
 
     await accounting.withdrawFromLock(
@@ -882,10 +1162,12 @@ describe('WithdrawFromLock', function () {
       lockId,
       parseUsdt("1"),
       nonce,
-      signature
+      signature,
     );
 
-    const locksAfter = await accounting.connect(userWallet1).getUserLocks(mockAuthToken(userWallet1.address));
+    const locksAfter = await accounting
+      .connect(userWallet1)
+      .getUserLocks(mockAuthToken(userWallet1.address));
     expect(locksAfter[0][3]).to.equal(parseUsdt("1"));
 
     const withdrawal = await accounting.withdrawals(0);
@@ -897,7 +1179,10 @@ describe('WithdrawFromLock', function () {
   });
 
   it("should reject withdrawFromLock with zero destination", async function () {
-    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const lockId = await createLockForService(
+      parseUsdt("2"),
+      userWallet2.address,
+    );
     const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
 
     const signature = await userWallet2.signTypedData(
@@ -909,7 +1194,7 @@ describe('WithdrawFromLock', function () {
         lockId,
         amount: parseUsdt("1"),
         nonce,
-      }
+      },
     );
 
     await expect(
@@ -919,13 +1204,16 @@ describe('WithdrawFromLock', function () {
         lockId,
         parseUsdt("1"),
         nonce,
-        signature
-      )
+        signature,
+      ),
     ).to.be.reverted; // WithCustomError(accounting, "AddressMismatch"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("should reject withdrawFromLock signed by non-service", async function () {
-    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const lockId = await createLockForService(
+      parseUsdt("2"),
+      userWallet2.address,
+    );
     const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
 
     const signature = await userWallet1.signTypedData(
@@ -937,7 +1225,7 @@ describe('WithdrawFromLock', function () {
         lockId,
         amount: parseUsdt("1"),
         nonce,
-      }
+      },
     );
 
     await expect(
@@ -947,13 +1235,16 @@ describe('WithdrawFromLock', function () {
         lockId,
         parseUsdt("1"),
         nonce,
-        signature
-      )
+        signature,
+      ),
     ).to.be.reverted; // WithCustomError(accounting, "InvalidSignature"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("should reject replay of withdrawFromLock signature", async function () {
-    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const lockId = await createLockForService(
+      parseUsdt("2"),
+      userWallet2.address,
+    );
     const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);
 
     const signature = await userWallet2.signTypedData(
@@ -965,7 +1256,7 @@ describe('WithdrawFromLock', function () {
         lockId,
         amount: parseUsdt("1"),
         nonce,
-      }
+      },
     );
 
     await accounting.withdrawFromLock(
@@ -974,7 +1265,7 @@ describe('WithdrawFromLock', function () {
       lockId,
       parseUsdt("1"),
       nonce,
-      signature
+      signature,
     );
 
     await expect(
@@ -984,19 +1275,23 @@ describe('WithdrawFromLock', function () {
         lockId,
         parseUsdt("1"),
         nonce,
-        signature
-      )
+        signature,
+      ),
     ).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
-
 });
 
-describe('ModifyLock', function () {
+describe("ModifyLock", function () {
   let accounting: MockAccounting;
   let mockSiweAuth: MockSiweAuth;
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: string;
+  };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
 
@@ -1004,16 +1299,21 @@ describe('ModifyLock', function () {
 
   before(async () => {
     const provider = ethers.provider;
-    const [user1, user2] = (await ethers.getSigners()).slice(1,3);
+    const [user1, user2] = (await ethers.getSigners()).slice(1, 3);
     const deployer = getDeployer();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
-    mockSiweAuth = await MockSiweAuthFactory.deploy('test');
+    const MockSiweAuthFactory = await ethers.getContractFactory(
+      "MockSiweAuth",
+      deployer,
+    );
+    mockSiweAuth = await MockSiweAuthFactory.deploy("test");
     await mockSiweAuth.waitForDeployment();
     mockSiweAuth = mockSiweAuth.connect((await ethers.getSigners())[0]); // Use wrapped signer for sending txes.
 
     accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
-    const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
+    const mnemonic = (
+      config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig
+    ).mnemonic;
     userWallet1 = ethers.HDNodeWallet.fromPhrase(
       mnemonic,
       undefined,
@@ -1033,25 +1333,29 @@ describe('ModifyLock', function () {
       version: domainTuple[2],
       chainId: Number(domainTuple[3]),
       verifyingContract: domainTuple[4],
-    }
+    };
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+      ethers.zeroPadValue(TEST_TOKEN.address, 20),
     ]);
 
     const tx = await accounting.setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
-      data: data
+      data: data,
     });
     await tx.wait();
 
     // Set up initial balance via setBalance
-    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt("10"));
+    await accounting.setBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt("10"),
+    );
   });
 
   it("User should be able to add funds to an existing lock", async function () {
-    const expiry = await getBlockTimestamp() + 3600;
+    const expiry = (await getBlockTimestamp()) + 3600;
     const lockNonce = await accounting.createLockNonces(userWallet1.address);
 
     const lockSignature = await userWallet1.signTypedData(
@@ -1062,8 +1366,8 @@ describe('ModifyLock', function () {
         tokenId: TEST_TOKEN.tokenId,
         amount: parseUsdt("1"),
         expiry,
-        nonce: lockNonce
-      }
+        nonce: lockNonce,
+      },
     );
 
     await accounting.createLock(
@@ -1072,11 +1376,16 @@ describe('ModifyLock', function () {
       parseUsdt("1"),
       expiry,
       lockNonce,
-      lockSignature
+      lockSignature,
     );
 
-    const balanceBefore = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksBefore = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const balanceBefore = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const locksBefore = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locksBefore[0][0];
     expect(locksBefore[0][3]).to.equal(parseUsdt("1"));
 
@@ -1089,8 +1398,8 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: parseUsdt("2"),
         newExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
     const tx = await accounting.modifyLock(
@@ -1098,12 +1407,17 @@ describe('ModifyLock', function () {
       parseUsdt("2"),
       newExpiry,
       modifyNonce,
-      modifyLockSignature
+      modifyLockSignature,
     );
     await tx.wait();
 
-    const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const balanceAfter = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const locksAfter = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
 
     expect(balanceAfter).to.equal(balanceBefore - parseUsdt("2"));
     expect(locksAfter[0][3]).to.equal(parseUsdt("3"));
@@ -1111,7 +1425,9 @@ describe('ModifyLock', function () {
   });
 
   it("User should be able to add funds while keeping the same expiry", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1123,8 +1439,8 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: parseUsdt("0.5"),
         newExpiry: currentExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
     const lockAmountBefore = locks[0][3];
@@ -1134,16 +1450,20 @@ describe('ModifyLock', function () {
       parseUsdt("0.5"),
       currentExpiry,
       modifyNonce,
-      modifyLockSignature
+      modifyLockSignature,
     );
 
-    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locksAfter = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     expect(locksAfter[0][3]).to.equal(lockAmountBefore + parseUsdt("0.5"));
     expect(locksAfter[0][4]).to.equal(currentExpiry);
   });
 
   it("User should be able to extend expiry without adding funds", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 3600;
@@ -1157,23 +1477,31 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: 0,
         newExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
-    const balanceBefore = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
+    const balanceBefore = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
 
     const tx = await accounting.modifyLock(
       lockId,
       0,
       newExpiry,
       modifyNonce,
-      modifyLockSignature
+      modifyLockSignature,
     );
     await tx.wait();
 
-    const balanceAfter = await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const balanceAfter = await accounting.getBalance(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+    );
+    const locksAfter = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
 
     expect(balanceAfter).to.equal(balanceBefore);
     expect(locksAfter[0][3]).to.equal(lockAmountBefore);
@@ -1181,7 +1509,7 @@ describe('ModifyLock', function () {
   });
 
   it("Should reject modifyLock with invalid lock ID", async function () {
-    const expiry = await getBlockTimestamp() + 3600;
+    const expiry = (await getBlockTimestamp()) + 3600;
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
 
     const modifyLockSignature = await userWallet1.signTypedData(
@@ -1191,21 +1519,25 @@ describe('ModifyLock', function () {
         lockId: 999,
         amount: parseUsdt("1"),
         newExpiry: expiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
-    await expect(accounting.modifyLock(
-      999,
-      parseUsdt("1"),
-      expiry,
-      modifyNonce,
-      modifyLockSignature
-    )).to.be.reverted; // WithCustomError(accounting, "InvalidLockId"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.modifyLock(
+        999,
+        parseUsdt("1"),
+        expiry,
+        modifyNonce,
+        modifyLockSignature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidLockId"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject modifyLock with earlier expiry", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const earlierExpiry = currentExpiry - 1000;
@@ -1218,21 +1550,25 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: parseUsdt("1"),
         newExpiry: earlierExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
-    await expect(accounting.modifyLock(
-      lockId,
-      parseUsdt("1"),
-      earlierExpiry,
-      modifyNonce,
-      modifyLockSignature
-    )).to.be.reverted;; // WithCustomError(accounting, "InvalidExpiry"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.modifyLock(
+        lockId,
+        parseUsdt("1"),
+        earlierExpiry,
+        modifyNonce,
+        modifyLockSignature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidExpiry"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject modifyLock with zero amount and same expiry (no-op)", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1244,21 +1580,25 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: 0,
         newExpiry: currentExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
-    await expect(accounting.modifyLock(
-      lockId,
-      0,
-      currentExpiry,
-      modifyNonce,
-      modifyLockSignature
-    )).to.be.reverted; // WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.modifyLock(
+        lockId,
+        0,
+        currentExpiry,
+        modifyNonce,
+        modifyLockSignature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject modifyLock with insufficient balance", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet1.address);
@@ -1270,21 +1610,25 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: parseUsdt("1000000"),
         newExpiry: currentExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
-    await expect(accounting.modifyLock(
-      lockId,
-      parseUsdt("1000000"),
-      currentExpiry,
-      modifyNonce,
-      modifyLockSignature
-    )).to.be.reverted; // WithCustomError(accounting, "InsufficientBalance"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.modifyLock(
+        lockId,
+        parseUsdt("1000000"),
+        currentExpiry,
+        modifyNonce,
+        modifyLockSignature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InsufficientBalance"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should derive modifyLock user from signer", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = locks[0][4];
     const modifyNonce = await accounting.modifyLockNonces(userWallet2.address);
@@ -1296,21 +1640,25 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: parseUsdt("0.1"),
         newExpiry: currentExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
-    await expect(accounting.modifyLock(
-      lockId,
-      parseUsdt("0.1"),
-      currentExpiry,
-      modifyNonce,
-      modifyLockSignature
-    )).to.be.reverted; // WithCustomError(accounting, "InvalidLockId"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.modifyLock(
+        lockId,
+        parseUsdt("0.1"),
+        currentExpiry,
+        modifyNonce,
+        modifyLockSignature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidLockId"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject replay of modifyLock signature", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const currentExpiry = Number(locks[0][4]);
     const newExpiry = currentExpiry + 100;
@@ -1323,8 +1671,8 @@ describe('ModifyLock', function () {
         lockId: lockId,
         amount: parseUsdt("0.1"),
         newExpiry,
-        nonce: modifyNonce
-      }
+        nonce: modifyNonce,
+      },
     );
 
     const tx = await accounting.modifyLock(
@@ -1332,24 +1680,30 @@ describe('ModifyLock', function () {
       parseUsdt("0.1"),
       newExpiry,
       modifyNonce,
-      modifyLockSignature
+      modifyLockSignature,
     );
     await tx.wait();
 
-    await expect(accounting.modifyLock(
-      lockId,
-      parseUsdt("0.1"),
-      newExpiry,
-      modifyNonce,
-      modifyLockSignature
-    )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.modifyLock(
+        lockId,
+        parseUsdt("0.1"),
+        newExpiry,
+        modifyNonce,
+        modifyLockSignature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Service should still be able to transfer from lock after funds are added", async function () {
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
     const lockAmount = locks[0][3];
-    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
+    const transferLockedNonce = await accounting.transferLockedNonces(
+      userWallet2.address,
+    );
 
     const signature = await userWallet2.signTypedData(
       domain,
@@ -1361,10 +1715,13 @@ describe('ModifyLock', function () {
         amount: parseUsdt("0.5"),
         nonce: transferLockedNonce,
         serviceAddress: userWallet2.address,
-      }
+      },
     );
 
-    const balance2Before = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
+    const balance2Before = await accounting.getBalance(
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+    );
 
     await accounting.transferFromLock(
       userWallet1.address,
@@ -1372,11 +1729,16 @@ describe('ModifyLock', function () {
       lockId,
       parseUsdt("0.5"),
       transferLockedNonce,
-      signature
+      signature,
     );
 
-    const balance2After = await accounting.getBalance(userWallet2.address, TEST_TOKEN.tokenId);
-    const locksAfter = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const balance2After = await accounting.getBalance(
+      userWallet2.address,
+      TEST_TOKEN.tokenId,
+    );
+    const locksAfter = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
 
     expect(balance2After).to.equal(balance2Before + parseUsdt("0.5"));
     expect(locksAfter[0][3]).to.equal(lockAmount - parseUsdt("0.5"));
@@ -1384,9 +1746,13 @@ describe('ModifyLock', function () {
 
   it("Should reject replay of transferFromLock signature", async function () {
     // Service (userWallet2) transfers from its lock on userWallet1's account
-    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const locks = await accountingUser1.getUserLocks(
+      mockAuthToken(userWallet1.address),
+    );
     const lockId = locks[0][0];
-    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
+    const transferLockedNonce = await accounting.transferLockedNonces(
+      userWallet2.address,
+    );
 
     const signature = await userWallet2.signTypedData(
       domain,
@@ -1398,23 +1764,33 @@ describe('ModifyLock', function () {
         amount: parseUsdt("0.1"),
         nonce: transferLockedNonce,
         serviceAddress: userWallet2.address,
-      }
+      },
     );
 
     const tx1 = await accounting.transferFromLock(
-      userWallet1.address, userWallet2.address, lockId,
-      parseUsdt("0.1"), transferLockedNonce, signature
+      userWallet1.address,
+      userWallet2.address,
+      lockId,
+      parseUsdt("0.1"),
+      transferLockedNonce,
+      signature,
     );
     await tx1.wait();
 
-    await expect(accounting.transferFromLock(
-      userWallet1.address, userWallet2.address, lockId,
-      parseUsdt("0.1"), transferLockedNonce, signature
-    )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(
+      accounting.transferFromLock(
+        userWallet1.address,
+        userWallet2.address,
+        lockId,
+        parseUsdt("0.1"),
+        transferLockedNonce,
+        signature,
+      ),
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 });
 
-describe('Upgradability', function () {
+describe("Upgradability", function () {
   let accounting: MockAccounting;
   let mockSiweAuth: MockSiweAuth;
   let proxyAddress: string;
@@ -1424,8 +1800,11 @@ describe('Upgradability', function () {
   before(async () => {
     const deployer = getDeployer();
 
-    const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
-    mockSiweAuth = await MockSiweAuthFactory.deploy('test');
+    const MockSiweAuthFactory = await ethers.getContractFactory(
+      "MockSiweAuth",
+      deployer,
+    );
+    mockSiweAuth = await MockSiweAuthFactory.deploy("test");
     await mockSiweAuth.waitForDeployment();
 
     accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
@@ -1440,16 +1819,20 @@ describe('Upgradability', function () {
     // Set up initial state
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
-      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+      ethers.zeroPadValue(TEST_TOKEN.address, 20),
     ]);
     await accounting.setTokenInfo({
       tokenType: TEST_TOKEN.tokenType,
-      data: data
+      data: data,
     });
 
     // Set a balance using the test helper
     const initialBalance = parseUsdt("100");
-    await accounting.setBalance(user.address, TEST_TOKEN.tokenId, initialBalance);
+    await accounting.setBalance(
+      user.address,
+      TEST_TOKEN.tokenId,
+      initialBalance,
+    );
 
     // Set gas price for a chain
     const testChainId = 84532n; // Base Sepolia
@@ -1457,125 +1840,234 @@ describe('Upgradability', function () {
     await accounting.setGasPrice(testChainId, testGasPrice);
 
     // Verify initial state
-    const balanceBefore = await accounting.getBalance(user.address, TEST_TOKEN.tokenId);
+    const balanceBefore = await accounting.getBalance(
+      user.address,
+      TEST_TOKEN.tokenId,
+    );
     const evmAddressBefore = await accounting.evmAddress();
     const ownerBefore = await accounting.owner();
     const transferNonceBefore = await accounting.transferNonces(user.address);
-    const withdrawalNonceBefore = await accounting.withdrawalNonces(user.address);
-    const createLockNonceBefore = await accounting.createLockNonces(user.address);
-    const modifyLockNonceBefore = await accounting.modifyLockNonces(user.address);
-    const transferLockedNonceBefore = await accounting.transferLockedNonces(user.address);
+    const withdrawalNonceBefore = await accounting.withdrawalNonces(
+      user.address,
+    );
+    const createLockNonceBefore = await accounting.createLockNonces(
+      user.address,
+    );
+    const modifyLockNonceBefore = await accounting.modifyLockNonces(
+      user.address,
+    );
+    const transferLockedNonceBefore = await accounting.transferLockedNonces(
+      user.address,
+    );
     const gasPriceBefore = await accounting.gasPrices(testChainId);
     const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
     expect(balanceBefore).to.equal(initialBalance);
 
     // Upgrade to the same implementation (simulates an upgrade)
-    const AccountingV2Factory = await ethers.getContractFactory('MockAccounting');
-    const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
-      kind: 'uups',
-      constructorArgs: [await mockSiweAuth.getAddress()]
-    }) as unknown as MockAccounting;
+    const AccountingV2Factory =
+      await ethers.getContractFactory("MockAccounting");
+    const upgraded = (await upgrades.upgradeProxy(
+      proxyAddress,
+      AccountingV2Factory,
+      {
+        kind: "uups",
+        constructorArgs: [await mockSiweAuth.getAddress()],
+        unsafeAllow: [
+          "constructor",
+          "state-variable-immutable",
+          "delegatecall",
+        ],
+      },
+    )) as unknown as MockAccounting;
     await waitForUpgradeTx(upgraded);
 
     // Verify state is preserved after upgrade
-    const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
+    const balanceAfter = await upgraded.getBalance(
+      user.address,
+      TEST_TOKEN.tokenId,
+    );
     const evmAddressAfter = await upgraded.evmAddress();
     const ownerAfter = await upgraded.owner();
     const transferNonceAfter = await upgraded.transferNonces(user.address);
     const withdrawalNonceAfter = await upgraded.withdrawalNonces(user.address);
     const createLockNonceAfter = await upgraded.createLockNonces(user.address);
     const modifyLockNonceAfter = await upgraded.modifyLockNonces(user.address);
-    const transferLockedNonceAfter = await upgraded.transferLockedNonces(user.address);
+    const transferLockedNonceAfter = await upgraded.transferLockedNonces(
+      user.address,
+    );
     const gasPriceAfter = await upgraded.gasPrices(testChainId);
     const tokenInfoAfter = await upgraded.tokens(TEST_TOKEN.tokenId);
 
-    expect(balanceAfter).to.equal(initialBalance, "Balance should be preserved after upgrade");
-    expect(evmAddressAfter).to.equal(evmAddressBefore, "EVM address should be preserved after upgrade");
-    expect(ownerAfter).to.equal(ownerBefore, "Owner should be preserved after upgrade");
-    expect(transferNonceAfter).to.equal(transferNonceBefore, "Transfer nonce should be preserved after upgrade");
-    expect(withdrawalNonceAfter).to.equal(withdrawalNonceBefore, "Withdrawal nonce should be preserved after upgrade");
-    expect(createLockNonceAfter).to.equal(createLockNonceBefore, "createLock nonce should be preserved after upgrade");
-    expect(modifyLockNonceAfter).to.equal(modifyLockNonceBefore, "modifyLock nonce should be preserved after upgrade");
-    expect(transferLockedNonceAfter).to.equal(transferLockedNonceBefore, "transferLocked nonce should be preserved after upgrade");
-    expect(gasPriceAfter).to.equal(gasPriceBefore, "Gas price should be preserved after upgrade");
-    expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
-    expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");
+    expect(balanceAfter).to.equal(
+      initialBalance,
+      "Balance should be preserved after upgrade",
+    );
+    expect(evmAddressAfter).to.equal(
+      evmAddressBefore,
+      "EVM address should be preserved after upgrade",
+    );
+    expect(ownerAfter).to.equal(
+      ownerBefore,
+      "Owner should be preserved after upgrade",
+    );
+    expect(transferNonceAfter).to.equal(
+      transferNonceBefore,
+      "Transfer nonce should be preserved after upgrade",
+    );
+    expect(withdrawalNonceAfter).to.equal(
+      withdrawalNonceBefore,
+      "Withdrawal nonce should be preserved after upgrade",
+    );
+    expect(createLockNonceAfter).to.equal(
+      createLockNonceBefore,
+      "createLock nonce should be preserved after upgrade",
+    );
+    expect(modifyLockNonceAfter).to.equal(
+      modifyLockNonceBefore,
+      "modifyLock nonce should be preserved after upgrade",
+    );
+    expect(transferLockedNonceAfter).to.equal(
+      transferLockedNonceBefore,
+      "transferLocked nonce should be preserved after upgrade",
+    );
+    expect(gasPriceAfter).to.equal(
+      gasPriceBefore,
+      "Gas price should be preserved after upgrade",
+    );
+    expect(tokenInfoAfter.tokenType).to.equal(
+      tokenInfoBefore.tokenType,
+      "Token info should be preserved after upgrade",
+    );
+    expect(tokenInfoAfter.data).to.equal(
+      tokenInfoBefore.data,
+      "Token data should be preserved after upgrade",
+    );
 
     // Verify the proxy address is the same
-    expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
+    expect(await upgraded.getAddress()).to.equal(
+      proxyAddress,
+      "Proxy address should remain the same",
+    );
   });
 
-  it("Should atomically link AccountingHistory when upgrading from previous layout", async function () {
+  it("Should atomically link AccountingHistoryModule when upgrading from previous layout", async function () {
     const deployer = getDeployer();
     const siweAuthAddress = await mockSiweAuth.getAddress();
-    const PreviousFactory = await ethers.getContractFactory('MockAccountingPrevious', deployer);
+    const PreviousFactory = await ethers.getContractFactory(
+      "MockAccountingPrevious",
+      deployer,
+    );
     const previous = await upgrades.deployProxy(
       PreviousFactory,
       [MOCK_ROFL_APP_ID, deployer.address],
       {
-        kind: 'uups',
-        initializer: 'initialize',
+        kind: "uups",
+        initializer: "initialize",
         constructorArgs: [siweAuthAddress],
-      }
+        unsafeAllow: ["constructor", "state-variable-immutable"],
+      },
     );
     await previous.waitForDeployment();
     const previousProxyAddress = await previous.getAddress();
 
-    const AccountingHistoryFactory = await ethers.getContractFactory('AccountingHistory', deployer);
-    const history = await upgrades.deployProxy(
-      AccountingHistoryFactory,
-      [previousProxyAddress, deployer.address],
-      {
-        kind: 'uups',
-        initializer: 'initialize',
-        constructorArgs: [siweAuthAddress],
-        unsafeAllow: ['constructor', 'state-variable-immutable'],
-      }
-    ) as unknown as AccountingHistory;
-    await history.waitForDeployment();
-    const historyAddress = await history.getAddress();
+    const seedPayload = ethers.concat([
+      TEST_TOKEN.tokenId,
+      amountWord(parseUsdt("7")),
+      ethers.keccak256(ethers.toUtf8Bytes("previous-inline-history")),
+    ]);
+    await (previous as any).mockAppendHistory(deployer.address, 0, seedPayload);
 
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
-    const upgraded = await upgrades.upgradeProxy(
+    const AccountingHistoryModuleFactory = await ethers.getContractFactory(
+      "AccountingHistoryModule",
+      deployer,
+    );
+    const historyModule = await AccountingHistoryModuleFactory.deploy();
+    await historyModule.waitForDeployment();
+    const historyAddress = await historyModule.getAddress();
+
+    const AccountingFactory = await ethers.getContractFactory(
+      "MockAccounting",
+      deployer,
+    );
+    const upgraded = (await upgrades.upgradeProxy(
       previousProxyAddress,
       AccountingFactory,
       {
-        kind: 'uups',
+        kind: "uups",
         constructorArgs: [siweAuthAddress],
-        call: { fn: 'setAccountingHistory', args: [historyAddress] },
-      }
-    ) as unknown as MockAccounting;
+        unsafeAllow: [
+          "constructor",
+          "state-variable-immutable",
+          "delegatecall",
+        ],
+        call: { fn: "setHistoryModule", args: [historyAddress] },
+      },
+    )) as unknown as MockAccounting;
     await waitForUpgradeTx(upgraded);
 
-    expect(await upgraded.accountingHistory()).to.equal(historyAddress);
+    expect(await upgraded.historyModule()).to.equal(historyAddress);
     expect(await upgraded.owner()).to.equal(deployer.address);
+
+    const historyReader = AccountingHistoryModuleFactory.attach(
+      previousProxyAddress,
+    ) as unknown as AccountingHistoryModule;
+    const [history, total] = await historyReader.getHistory(
+      0,
+      10,
+      mockAuthToken(deployer.address),
+    );
+    expect(total).to.equal(1n);
+    expect(history[0].kind).to.equal(HistoryKind.Deposit);
+    expect(history[0].timestamp).to.be.greaterThan(0n);
+    expect(history[0].payload).to.equal(seedPayload);
   });
 
   it("Should only allow owner to upgrade", async function () {
     const attacker = getDeployer(1);
 
-    const AccountingV2Factory = await ethers.getContractFactory('MockAccounting', attacker);
+    const AccountingV2Factory = await ethers.getContractFactory(
+      "MockAccounting",
+      attacker,
+    );
 
     // TODO: https://github.com/oasisprotocol/sapphire-paratime/issues/688
     const network = await ethers.provider.getNetwork();
-    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
-      const upgradeFactory = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
-        kind: 'uups',
-        constructorArgs: [await mockSiweAuth.getAddress()]
-      });
+    if (0x5afd <= network.chainId && network.chainId <= 0x5aff) {
+      const upgradeFactory = await upgrades.upgradeProxy(
+        proxyAddress,
+        AccountingV2Factory,
+        {
+          kind: "uups",
+          constructorArgs: [await mockSiweAuth.getAddress()],
+          unsafeAllow: [
+            "constructor",
+            "state-variable-immutable",
+            "delegatecall",
+          ],
+        },
+      );
 
-      let receipt = await ethers.provider.getTransactionReceipt(upgradeFactory.deployTransaction!.hash);
+      let receipt = await ethers.provider.getTransactionReceipt(
+        upgradeFactory.deployTransaction!.hash,
+      );
       while (!receipt) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        receipt = await ethers.provider.getTransactionReceipt(upgradeFactory.deployTransaction!.hash);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        receipt = await ethers.provider.getTransactionReceipt(
+          upgradeFactory.deployTransaction!.hash,
+        );
       }
       expect(receipt!.status).to.equal(0);
     } else {
       await expect(
         upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
-          kind: 'uups',
-          constructorArgs: [await mockSiweAuth.getAddress()]
-        })
+          kind: "uups",
+          constructorArgs: [await mockSiweAuth.getAddress()],
+          unsafeAllow: [
+            "constructor",
+            "state-variable-immutable",
+            "delegatecall",
+          ],
+        }),
       ).to.be.revertedWithCustomError(accounting, "OwnableUnauthorizedAccount");
     }
   });
@@ -1583,33 +2075,33 @@ describe('Upgradability', function () {
   it("Should prevent re-initialization", async function () {
     const deployer = getDeployer();
 
-    await expect(
-      accounting.initialize(MOCK_ROFL_APP_ID, deployer.address)
-    ).to.be.reverted; // WithCustomError(accounting, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(accounting.initialize(MOCK_ROFL_APP_ID, deployer.address)).to
+      .be.reverted; // WithCustomError(accounting, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should prevent initialization on implementation contract directly", async function () {
     const deployer = getDeployer();
 
     // Deploy implementation directly (not via proxy)
-    const AccountingFactory = await ethers.getContractFactory('MockAccounting');
-    const implementation = await AccountingFactory.deploy(await mockSiweAuth.getAddress());
+    const AccountingFactory = await ethers.getContractFactory("MockAccounting");
+    const implementation = await AccountingFactory.deploy(
+      await mockSiweAuth.getAddress(),
+    );
     await implementation.waitForDeployment();
 
     // _disableInitializers() in the constructor should block initialize()
-    await expect(
-      implementation.initialize(MOCK_ROFL_APP_ID, deployer.address)
-    ).to.be.reverted; // WithCustomError(implementation, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(implementation.initialize(MOCK_ROFL_APP_ID, deployer.address))
+      .to.be.reverted; // WithCustomError(implementation, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
   it("Should reject upgrade to non-UUPS contract", async function () {
     // MockSiweAuth is a plain (non-UUPS) contract — upgrading to it should fail
-    const NonUUPSFactory = await ethers.getContractFactory('MockSiweAuth');
+    const NonUUPSFactory = await ethers.getContractFactory("MockSiweAuth");
 
     // OZ plugin validates upgrade safety off-chain before sending any tx
     try {
       await upgrades.upgradeProxy(proxyAddress, NonUUPSFactory, {
-        kind: 'uups',
+        kind: "uups",
         constructorArgs: ["test-domain"],
       });
       expect.fail("Expected upgrade to non-UUPS contract to be rejected");
@@ -1624,18 +2116,35 @@ describe('Upgradability', function () {
 
     // Set up initial state
     const initialBalance = parseUsdt("50");
-    await accounting.setBalance(user.address, TEST_TOKEN.tokenId, initialBalance);
+    await accounting.setBalance(
+      user.address,
+      TEST_TOKEN.tokenId,
+      initialBalance,
+    );
 
-    const balanceBefore = await accounting.getBalance(user.address, TEST_TOKEN.tokenId);
+    const balanceBefore = await accounting.getBalance(
+      user.address,
+      TEST_TOKEN.tokenId,
+    );
     expect(balanceBefore).to.equal(initialBalance);
 
     // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
-    const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
-    const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
-      kind: 'uups',
-      unsafeAllow: ['missing-initializer'],
-      constructorArgs: [await mockSiweAuth.getAddress()],
-    }) as unknown as MockAccountingV2;
+    const AccountingV2Factory =
+      await ethers.getContractFactory("MockAccountingV2");
+    const upgraded = (await upgrades.upgradeProxy(
+      proxyAddress,
+      AccountingV2Factory,
+      {
+        kind: "uups",
+        unsafeAllow: [
+          "missing-initializer",
+          "constructor",
+          "state-variable-immutable",
+          "delegatecall",
+        ],
+        constructorArgs: [await mockSiweAuth.getAddress()],
+      },
+    )) as unknown as MockAccountingV2;
     await waitForUpgradeTx(upgraded);
 
     // Call reinitializer
@@ -1648,13 +2157,14 @@ describe('Upgradability', function () {
     // Verify existing state is preserved
     const balanceAfter = await upgraded.balanceOf(
       TEST_TOKEN.tokenId,
-      mockAuthToken(user.address)
+      mockAuthToken(user.address),
     );
-    expect(balanceAfter).to.equal(initialBalance, "Balance should survive V2 upgrade");
+    expect(balanceAfter).to.equal(
+      initialBalance,
+      "Balance should survive V2 upgrade",
+    );
 
     // Reinitializer should not be callable again
-    await expect(
-      upgraded.initializeV2(99)
-    ).to.be.reverted; // WithCustomError(upgraded, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    await expect(upgraded.initializeV2(99)).to.be.reverted; // WithCustomError(upgraded, "InvalidInitialization"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 });

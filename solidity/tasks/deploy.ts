@@ -5,142 +5,102 @@ function normalizeAddress(address: string): string {
   return address.toLowerCase();
 }
 
-function isMissingAccountingHistoryGetter(error: any): boolean {
-  const result = error?.value ?? error?.data ?? error?.result;
+function isEmptyCallResult(value: any): boolean {
+  if (value === "0x") {
+    return true;
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return [value.data, value.result, value.value].some(isEmptyCallResult);
+}
+
+function isMissingHistoryModuleGetter(error: any): boolean {
   return (
-    error?.code === "BAD_DATA" ||
-    (error?.code === "CALL_EXCEPTION" && result === "0x")
+    (error?.code === "BAD_DATA" || error?.code === "CALL_EXCEPTION") &&
+    isEmptyCallResult(error)
   );
 }
 
-async function deployAccountingHistory(
-  hre: any,
-  accountingAddress: string,
-  ownerAddress: string,
-  siweAuthAddress: string
-) {
-  const AccountingHistory =
-    await hre.ethers.getContractFactory("AccountingHistory");
-  const history = await hre.upgrades.deployProxy(
-    AccountingHistory,
-    [accountingAddress, ownerAddress],
-    {
-      kind: "uups",
-      initializer: "initialize",
-      constructorArgs: [siweAuthAddress],
-      unsafeAllow: ["constructor", "state-variable-immutable"],
-      txOverrides: { gasLimit: 15000000 },
-    }
+async function deployHistoryModule(hre: any) {
+  const AccountingHistoryModule = await hre.ethers.getContractFactory(
+    "AccountingHistoryModule",
   );
+  const history = await AccountingHistoryModule.deploy({
+    gasLimit: 5000000,
+  });
   await history.waitForDeployment();
   return history;
 }
 
-async function validateAccountingHistory(
-  hre: any,
-  historyAddress: string,
-  accountingAddress: string,
-  siweAuthAddress: string
-) {
+async function validateHistoryModule(hre: any, historyAddress: string) {
   if (
     !hre.ethers.isAddress(historyAddress) ||
     historyAddress === hre.ethers.ZeroAddress
   ) {
-    throw new Error(`Invalid AccountingHistory address: ${historyAddress}`);
+    throw new Error(
+      `Invalid AccountingHistoryModule address: ${historyAddress}`,
+    );
   }
 
   const code = await hre.ethers.provider.getCode(historyAddress);
   if (code === "0x") {
     throw new Error(
-      `AccountingHistory address has no contract code: ${historyAddress}`
+      `AccountingHistoryModule address has no contract code: ${historyAddress}`,
     );
   }
 
   const history = await hre.ethers.getContractAt(
-    "AccountingHistory",
-    historyAddress
+    "AccountingHistoryModule",
+    historyAddress,
   );
-  const boundAccounting = await history.accounting();
-  if (
-    normalizeAddress(boundAccounting) !== normalizeAddress(accountingAddress)
-  ) {
+  const moduleId = await history.MODULE_ID();
+  const expectedModuleId = hre.ethers.id("privana.accounting.historyModule.v1");
+  if (moduleId !== expectedModuleId) {
     throw new Error(
-      `AccountingHistory is bound to ${boundAccounting}, expected ${accountingAddress}`
-    );
-  }
-
-  const boundSiweAuth = await history.siweAuth();
-  if (normalizeAddress(boundSiweAuth) !== normalizeAddress(siweAuthAddress)) {
-    throw new Error(
-      `AccountingHistory uses SIWE auth ${boundSiweAuth}, expected ${siweAuthAddress}`
+      `AccountingHistoryModule has unexpected module id: ${moduleId}`,
     );
   }
 
   return history;
 }
 
-async function readLinkedAccountingHistory(
+async function readLinkedHistoryModule(
   hre: any,
-  accounting: any
+  accounting: any,
 ): Promise<string> {
   try {
-    return await accounting.accountingHistory();
+    return await accounting.historyModule();
   } catch (error) {
-    if (!isMissingAccountingHistoryGetter(error)) {
+    if (!isMissingHistoryModuleGetter(error)) {
       throw error;
     }
-    // Pre-AccountingHistory implementations do not expose this getter.
+    // Pre-AccountingHistoryModule implementations do not expose this getter.
     return hre.ethers.ZeroAddress;
   }
 }
 
-async function resolveAccountingHistory(
+async function resolveHistoryModule(
   hre: any,
   accounting: any,
-  accountingAddress: string,
-  ownerAddress: string,
-  siweAuthAddress: string,
-  requestedHistoryAddress?: string
+  requestedHistoryAddress?: string,
 ) {
   let historyAddress = requestedHistoryAddress;
 
   if (historyAddress) {
-    await validateAccountingHistory(
-      hre,
-      historyAddress,
-      accountingAddress,
-      siweAuthAddress
-    );
+    await validateHistoryModule(hre, historyAddress);
   } else {
-    historyAddress = await readLinkedAccountingHistory(hre, accounting);
+    historyAddress = await readLinkedHistoryModule(hre, accounting);
 
     if (historyAddress === hre.ethers.ZeroAddress) {
-      const history = await deployAccountingHistory(
-        hre,
-        accountingAddress,
-        ownerAddress,
-        siweAuthAddress
-      );
+      const history = await deployHistoryModule(hre);
       historyAddress = await history.getAddress();
-      const historyImpl =
-        await hre.upgrades.erc1967.getImplementationAddress(historyAddress);
-      console.log(`AccountingHistory proxy address: ${historyAddress}`);
-      console.log(`AccountingHistory implementation address: ${historyImpl}`);
-      await validateAccountingHistory(
-        hre,
-        historyAddress,
-        accountingAddress,
-        siweAuthAddress
-      );
+      console.log(`AccountingHistoryModule address: ${historyAddress}`);
+      await validateHistoryModule(hre, historyAddress);
     } else {
-      await validateAccountingHistory(
-        hre,
-        historyAddress,
-        accountingAddress,
-        siweAuthAddress
-      );
+      await validateHistoryModule(hre, historyAddress);
       console.log(
-        `Existing AccountingHistory proxy address: ${historyAddress}`
+        `Existing AccountingHistoryModule address: ${historyAddress}`,
       );
     }
   }
@@ -148,58 +108,40 @@ async function resolveAccountingHistory(
   return historyAddress;
 }
 
-async function ensureAccountingHistory(
+async function ensureHistoryModule(
   hre: any,
   accounting: any,
-  accountingAddress: string,
-  ownerAddress: string,
-  siweAuthAddress: string,
-  requestedHistoryAddress?: string
+  requestedHistoryAddress?: string,
 ) {
-  const historyAddress = await resolveAccountingHistory(
+  const historyAddress = await resolveHistoryModule(
     hre,
     accounting,
-    accountingAddress,
-    ownerAddress,
-    siweAuthAddress,
-    requestedHistoryAddress
-  );
-  await validateAccountingHistory(
-    hre,
-    historyAddress,
-    accountingAddress,
-    siweAuthAddress
+    requestedHistoryAddress,
   );
 
-  const linkedHistoryAddress = await readLinkedAccountingHistory(
-    hre,
-    accounting
-  );
+  const linkedHistoryAddress = await readLinkedHistoryModule(hre, accounting);
   if (
     normalizeAddress(linkedHistoryAddress) !== normalizeAddress(historyAddress)
   ) {
-    if (linkedHistoryAddress !== hre.ethers.ZeroAddress) {
-      throw new Error(
-        `Accounting is already linked to AccountingHistory ${linkedHistoryAddress}, expected ${historyAddress}`
-      );
-    }
-    const tx = await accounting.setAccountingHistory(historyAddress);
+    const tx = await accounting.setHistoryModule(historyAddress);
     await tx.wait();
-    console.log(`Accounting linked to AccountingHistory: ${historyAddress}`);
+    console.log(
+      `Accounting linked to AccountingHistoryModule: ${historyAddress}`,
+    );
   }
 
   return historyAddress;
 }
 
-task("deploy-proveth-verifier")
-  .setAction(async (_, hre) => {
-    const ProvethVerifier = await hre.ethers.getContractFactory("ProvethVerifier");
-    const provethVerifier = await ProvethVerifier.deploy({ gasLimit: 5000000 });
-    await provethVerifier.waitForDeployment();
-    const address = await provethVerifier.getAddress();
-    console.log(`ProvethVerifier deployed at: ${address}`);
-    return address;
-  });
+task("deploy-proveth-verifier").setAction(async (_, hre) => {
+  const ProvethVerifier =
+    await hre.ethers.getContractFactory("ProvethVerifier");
+  const provethVerifier = await ProvethVerifier.deploy({ gasLimit: 5000000 });
+  await provethVerifier.waitForDeployment();
+  const address = await provethVerifier.getAddress();
+  console.log(`ProvethVerifier deployed at: ${address}`);
+  return address;
+});
 
 task("deploy")
   .addParam("roflappid", "The ROFL app ID (hex 0x... or bech32 rofl1...)")
@@ -210,9 +152,10 @@ task("deploy")
     const roflAppIdHex = parseRoflAppId(args.roflappid);
 
     // Deploy AccountingSiweAuth
-    const AccountingSiweAuth = await hre.ethers.getContractFactory("AccountingSiweAuth");
+    const AccountingSiweAuth =
+      await hre.ethers.getContractFactory("AccountingSiweAuth");
     const siweAuth = await AccountingSiweAuth.deploy(roflAppIdHex, {
-      gasLimit: 10000000
+      gasLimit: 10000000,
     });
     await siweAuth.waitForDeployment();
     const siweAuthAddress = await siweAuth.getAddress();
@@ -223,29 +166,28 @@ task("deploy")
       Accounting,
       [roflAppIdHex, deployer.address],
       {
-        kind: 'uups',
-        initializer: 'initialize',
+        kind: "uups",
+        initializer: "initialize",
         constructorArgs: [siweAuthAddress],
-        txOverrides: { gasLimit: 15000000 }
-      }
+        unsafeAllow: [
+          "constructor",
+          "state-variable-immutable",
+          "delegatecall",
+        ],
+        txOverrides: { gasLimit: 15000000 },
+      },
     );
 
     await proxy.waitForDeployment();
 
     const proxyAddress = await proxy.getAddress();
-    const historyAddress = await ensureAccountingHistory(
-      hre,
-      proxy,
-      proxyAddress,
-      deployer.address,
-      siweAuthAddress
-    );
+    const historyAddress = await ensureHistoryModule(hre, proxy);
     const implAddress =
       await hre.upgrades.erc1967.getImplementationAddress(proxyAddress);
 
     console.log(`AccountingSiweAuth address: ${siweAuthAddress}`);
     console.log(`Proxy address: ${proxyAddress}`);
-    console.log(`AccountingHistory address: ${historyAddress}`);
+    console.log(`AccountingHistoryModule address: ${historyAddress}`);
     console.log(`Implementation address: ${implAddress}`);
     console.log(`EVM signing address: ${await proxy.evmAddress()}`);
     console.log(`Owner: ${await proxy.owner()}`);
@@ -259,9 +201,10 @@ task("deploy-siwe-auth")
   .setAction(async (args, hre) => {
     const roflAppIdHex = parseRoflAppId(args.roflappid);
 
-    const AccountingSiweAuth = await hre.ethers.getContractFactory("AccountingSiweAuth");
+    const AccountingSiweAuth =
+      await hre.ethers.getContractFactory("AccountingSiweAuth");
     const siweAuth = await AccountingSiweAuth.deploy(roflAppIdHex, {
-      gasLimit: 10000000
+      gasLimit: 10000000,
     });
     await siweAuth.waitForDeployment();
     const siweAuthAddress = await siweAuth.getAddress();
@@ -274,7 +217,9 @@ task("deploy-siwe-auth")
 
 task("force-import")
   .addParam("proxy", "The proxy contract address to import")
-  .setDescription("Force import an existing proxy into OpenZeppelin's deployment state")
+  .setDescription(
+    "Force import an existing proxy into OpenZeppelin's deployment state",
+  )
   .setAction(async (args, hre) => {
     const Accounting = await hre.ethers.getContractFactory("Accounting");
 
@@ -284,8 +229,9 @@ task("force-import")
     console.log(`Current siweAuth: ${siweAuthAddress}`);
 
     await hre.upgrades.forceImport(args.proxy, Accounting, {
-      kind: 'uups',
+      kind: "uups",
       constructorArgs: [siweAuthAddress],
+      unsafeAllow: ["constructor", "state-variable-immutable", "delegatecall"],
     });
 
     console.log(`Proxy ${args.proxy} imported successfully`);
@@ -295,11 +241,11 @@ task("upgrade")
   .addParam("proxy", "The proxy contract address to upgrade")
   .addOptionalParam(
     "siweauth",
-    "The AccountingSiweAuth address for the new implementation. If omitted, reuse proxy's current siweAuth"
+    "The AccountingSiweAuth address for the new implementation. If omitted, reuse proxy's current siweAuth",
   )
   .addOptionalParam(
     "history",
-    "Existing AccountingHistory proxy to attach. If omitted and none is set, deploy one."
+    "Existing AccountingHistoryModule to attach. If omitted and none is set, deploy one.",
   )
   .setDescription("Upgrade the Accounting proxy to a new implementation")
   .setAction(async (args, hre) => {
@@ -313,7 +259,7 @@ task("upgrade")
         console.log(`Resolved siweAuth from proxy: ${siweAuthAddress}`);
       } catch {
         throw new Error(
-          "Could not resolve current siweAuth from proxy. Pass --siweauth <address> for this upgrade."
+          "Could not resolve current siweAuth from proxy. Pass --siweauth <address> for this upgrade.",
         );
       }
     }
@@ -324,40 +270,29 @@ task("upgrade")
 
     // Get current implementation for comparison
     const currentImpl = await hre.upgrades.erc1967.getImplementationAddress(
-      args.proxy
+      args.proxy,
     );
     console.log(`Current implementation: ${currentImpl}`);
 
-    const ownerAddress = await current.owner();
-    const currentHistoryAddress = await readLinkedAccountingHistory(
-      hre,
-      current
-    );
-    const historyAddress = await resolveAccountingHistory(
+    const currentHistoryAddress = await readLinkedHistoryModule(hre, current);
+    const historyAddress = await resolveHistoryModule(
       hre,
       current,
-      args.proxy,
-      ownerAddress,
-      siweAuthAddress,
-      args.history
+      args.history,
     );
     const upgradeOptions: any = {
-      kind: 'uups',
+      kind: "uups",
       constructorArgs: [siweAuthAddress],
-      redeployImplementation: 'always',
+      unsafeAllow: ["constructor", "state-variable-immutable", "delegatecall"],
+      redeployImplementation: "always",
       txOverrides: { gasLimit: 15000000 },
     };
     if (
       normalizeAddress(currentHistoryAddress) !==
       normalizeAddress(historyAddress)
     ) {
-      if (currentHistoryAddress !== hre.ethers.ZeroAddress) {
-        throw new Error(
-          `Accounting is already linked to AccountingHistory ${currentHistoryAddress}, expected ${historyAddress}`
-        );
-      }
       upgradeOptions.call = {
-        fn: "setAccountingHistory",
+        fn: "setHistoryModule",
         args: [historyAddress],
       };
     }
@@ -366,35 +301,30 @@ task("upgrade")
     const upgraded = await hre.upgrades.upgradeProxy(
       args.proxy,
       Accounting,
-      upgradeOptions
+      upgradeOptions,
     );
 
     await upgraded.waitForDeployment();
 
     const newImplAddress = await hre.upgrades.erc1967.getImplementationAddress(
-      args.proxy
+      args.proxy,
     );
     console.log(`Upgraded! New implementation: ${newImplAddress}`);
-    const linkedHistoryAddress = await upgraded.accountingHistory();
+    const linkedHistoryAddress = await upgraded.historyModule();
     if (
       normalizeAddress(linkedHistoryAddress) !==
       normalizeAddress(historyAddress)
     ) {
       throw new Error(
-        `AccountingHistory link mismatch after upgrade: ${linkedHistoryAddress}, expected ${historyAddress}`
+        `AccountingHistoryModule link mismatch after upgrade: ${linkedHistoryAddress}, expected ${historyAddress}`,
       );
     }
-    await validateAccountingHistory(
-      hre,
-      historyAddress,
-      args.proxy,
-      siweAuthAddress
-    );
-    console.log(`AccountingHistory address: ${historyAddress}`);
+    await validateHistoryModule(hre, historyAddress);
+    console.log(`AccountingHistoryModule address: ${historyAddress}`);
 
     if (currentImpl === newImplAddress) {
       console.log(
-        `Warning: Implementation address unchanged. Upgrade may have been a no-op.`
+        `Warning: Implementation address unchanged. Upgrade may have been a no-op.`,
       );
     }
 
