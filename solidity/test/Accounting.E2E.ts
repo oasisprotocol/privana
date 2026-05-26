@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
 import { keccak256, Wallet } from 'ethers';
-import { AccountingHistoryModule, MockAccounting, MockAccountingPrevious, MockAccountingV2, MockSiweAuth } from '../typechain-types';
+import { AccountingHistoryModule, MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
@@ -123,9 +123,9 @@ describe('Accounting', function () {
     accountingUser1 = accounting.connect(user1) as MockAccounting;
     accountingUser2 = accounting.connect(user2) as MockAccounting;
 
-    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
+    const hdNodeWallet = ethers.HDNodeWallet.fromPhrase(
       (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
-    ) as unknown as MockAccountingPrevious;
+    );
 
     // Drive index 0 and 1 wallets
     userWallet1 = hdNodeWallet.connect(ethers.provider) as any;
@@ -1651,15 +1651,7 @@ describe('Upgradability', function () {
   });
 
   it("Should support V2 upgrade with new state variables and reinitializer", async function () {
-    const deployer = getDeployer();
-    const user = (await ethers.getSigners())[1];
-
-    // Set up initial state
-    const initialBalance = parseUsdt("50");
-    await accounting.setBalance(user.address, TEST_TOKEN.tokenId, initialBalance);
-
-    const balanceBefore = await accounting.getBalance(user.address, TEST_TOKEN.tokenId);
-    expect(balanceBefore).to.equal(initialBalance);
+    const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
 
     // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
     const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
@@ -1677,8 +1669,9 @@ describe('Upgradability', function () {
     expect(await upgraded.newStateVar()).to.equal(42);
 
     // Verify existing state is preserved
-    const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
-    expect(balanceAfter).to.equal(initialBalance, "Balance should survive V2 upgrade");
+    const tokenInfoAfter = await upgraded.tokens(TEST_TOKEN.tokenId);
+    expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should survive V2 upgrade");
+    expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should survive V2 upgrade");
 
     // Reinitializer should not be callable again
     await expect(

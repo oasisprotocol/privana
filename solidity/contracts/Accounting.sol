@@ -26,9 +26,6 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * and automated withdrawals via EIP-712 signatures.
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
-    bytes32 private constant _HISTORY_MODULE_SLOT =
-        bytes32(uint256(keccak256("privana.accounting.historyModule")) - 1);
-
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAccountingSiweAuth public immutable siweAuth;
     /// @dev internal (not private) so MockAccounting test helper can set balances directly.
@@ -52,6 +49,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     /// @dev Accounting-owned history storage. History read/write code lives in
     ///      AccountingHistoryModule and executes here via delegatecall.
     mapping(address user => HistoryEntry[] entries) private history;
+    address public historyModule;
 
     struct EmergencyWithdrawRequest {
         address toAddress;
@@ -102,7 +100,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error DepositAlreadyProcessed();
     error InvalidHistoryModule();
     error InvalidSiweAuth();
-    error UnknownSelector(bytes4 sig);
 
     struct WithdrawalRequest {
         address userAddress;
@@ -170,23 +167,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             revert InvalidHistoryModule();
         }
 
-        bytes32 slot = _HISTORY_MODULE_SLOT;
-        assembly {
-            sstore(slot, module)
-        }
+        historyModule = module;
 
         emit HistoryModuleSet(module);
-    }
-
-    function historyModule()
-        public
-        view
-        returns (address historyModuleAddress)
-    {
-        bytes32 slot = _HISTORY_MODULE_SLOT;
-        assembly {
-            historyModuleAddress := sload(slot)
-        }
     }
 
     function _historyModule()
@@ -194,7 +177,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         view
         returns (address historyModuleAddress)
     {
-        historyModuleAddress = historyModule();
+        historyModuleAddress = historyModule;
         if (historyModuleAddress == address(0)) {
             revert InvalidHistoryModule();
         }
@@ -229,6 +212,20 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
                 (user, kind, payload)
             )
         );
+    }
+
+    function getHistory(
+        int256 offset,
+        uint256 limit,
+        bytes calldata token
+    ) external returns (HistoryEntry[] memory page, uint256 total) {
+        bytes memory result = _delegateHistory(
+            abi.encodeCall(
+                IAccountingHistoryModule.getHistory,
+                (offset, limit, token)
+            )
+        );
+        return abi.decode(result, (HistoryEntry[], uint256));
     }
 
     function _appendUserCounterpartyHistory(
@@ -1054,20 +1051,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return keccak256(abi.encode(info.tokenType, info.data));
     }
 
-    /// @dev Only history reads are routed through fallback. History writes use
-    ///      explicit internal delegatecalls from Accounting state transitions.
-    // solhint-disable-next-line payable-fallback,no-complex-fallback
-    fallback() external {
-        bytes4 sig = msg.sig;
-        if (sig == IAccountingHistoryModule.getHistory.selector) {
-            bytes memory result = _delegateHistory(msg.data);
-            assembly {
-                return(add(result, 0x20), mload(result))
-            }
-        }
-        revert UnknownSelector(sig);
-    }
-
     /**
      * @notice Registers or updates token information in the system.
      *
@@ -1182,5 +1165,5 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[40] private __gap;
+    uint256[39] private __gap;
 }

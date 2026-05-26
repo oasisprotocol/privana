@@ -5,8 +5,7 @@ import {HistoryEntry, HistoryKind} from "../Types.sol";
 
 /**
  * @title IAccountingHistoryModule
- * @notice Selector list for the delegated history runtime served at the
- *         Accounting proxy address.
+ * @notice Selector list for Accounting's delegated history runtime.
  * @dev Accounting owns the history storage. The module only supplies code that
  *      executes against Accounting storage via `delegatecall`.
  */

@@ -359,15 +359,17 @@ describe('Accounting history', function () {
   it('keeps delegated history on the previous inline storage slot', async function () {
     const previousHistory = await storageEntry('contracts/test/MockAccountingPrevious.sol', 'MockAccountingPrevious', 'history');
     const currentHistory = await storageEntry('contracts/Accounting.sol', 'Accounting', 'history');
-    const currentGap = await storageEntry('contracts/Accounting.sol', 'Accounting', '__gap', '40_storage');
+    const currentHistoryModule = await storageEntry('contracts/Accounting.sol', 'Accounting', 'historyModule');
+    const currentGap = await storageEntry('contracts/Accounting.sol', 'Accounting', '__gap', '39_storage');
 
     expect(previousHistory.slot).to.equal('108');
     expect(currentHistory.slot).to.equal('108');
+    expect(currentHistoryModule.slot).to.equal('109');
     expect(await historyModuleContract.HISTORY_SLOT()).to.equal(BigInt(currentHistory.slot));
-    expect(currentGap.slot).to.equal('109');
+    expect(currentGap.slot).to.equal('110');
   });
 
-  it('reserves getHistory for the delegated fallback only', async function () {
+  it('exposes getHistory through the Accounting ABI', async function () {
     const accountingArtifact = await artifacts.readArtifact('Accounting');
     const selectors = new Set(
       accountingArtifact.abi
@@ -378,7 +380,7 @@ describe('Accounting history', function () {
         })
     );
 
-    expect(selectors.has(ethers.id('getHistory(int256,uint256,bytes)').slice(0, 10))).to.equal(false);
+    expect(selectors.has(ethers.id('getHistory(int256,uint256,bytes)').slice(0, 10))).to.equal(true);
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {

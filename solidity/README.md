@@ -196,9 +196,8 @@ history code.
 Existing history entries stored inside the old Accounting proxy remain in Accounting storage and
 are read by the delegated module after upgrade.
 
-`getHistory` is not in the `Accounting` ABI. Direct contract consumers should call the Accounting
-proxy address using the `AccountingHistoryModule` ABI; Accounting routes only that selector through
-its fallback. `Accounting.historyModule()` returns the module code address, not a storage-owning
+`getHistory` is exposed on Accounting and delegates to `AccountingHistoryModule` at the proxy
+address. `Accounting.historyModule()` returns the module code address, not a storage-owning
 history contract.
 
 #### 3. Update the README

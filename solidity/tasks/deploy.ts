@@ -256,21 +256,18 @@ task("upgrade")
     const currentImpl = await hre.upgrades.erc1967.getImplementationAddress(args.proxy);
     console.log(`Current implementation: ${currentImpl}`);
 
-    const currentHistoryAddress = await readLinkedHistoryModule(hre, current);
     const historyAddress = await resolveHistoryModule(hre, current, args.history);
     const upgradeOptions: UpgradeOptions = {
       kind: 'uups',
       constructorArgs: [siweAuthAddress],
       unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
       redeployImplementation: 'always',
-      txOverrides: { gasLimit: 15000000 }
-    };
-    if (normalizeAddress(currentHistoryAddress) !== normalizeAddress(historyAddress)) {
-      upgradeOptions.call = {
+      txOverrides: { gasLimit: 15000000 },
+      call: {
         fn: "setHistoryModule",
         args: [historyAddress],
-      };
-    }
+      },
+    };
 
     // Always redeploy implementation to avoid caching issues
     const upgraded = await hre.upgrades.upgradeProxy(args.proxy, Accounting, upgradeOptions);
