@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "onchain-signer",
@@ -19,7 +20,7 @@
         "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
         "@nomicfoundation/hardhat-toolbox": "^4.0.0",
         "@nomicfoundation/hardhat-verify": "^2.0.2",
-        "@oasisprotocol/sapphire-contracts": "0.2.15",
+        "@oasisprotocol/sapphire-contracts": "0.2.16",
         "@oasisprotocol/sapphire-hardhat": "^2.22.3",
         "@oasisprotocol/sapphire-paratime": "^2.3.0",
         "@openzeppelin/hardhat-upgrades": "^3.0.0",
@@ -288,7 +289,7 @@
 
     "@oasisprotocol/deoxysii": ["@oasisprotocol/deoxysii@0.0.6", "", {}, "sha512-TI51bIpChfsla9aRbjip6zvTbz6rpsqKgM7MqJvSfeFF6G5xLXQcbSC9u/1hOnOOazd7HaqA9NvaXQdeKCb3yw=="],
 
-    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.15", "", { "dependencies": { "@openzeppelin/contracts": "^5.0.2" } }, "sha512-4R0G46TYljkdwXLxWqXEiPfRKab9QK1gXrzgx9wjJFxlWh1uyMNkSGdKmuBmD3cWMgUW0wRLI0wJfQYgZTv/Yg=="],
+    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.16", "", { "dependencies": { "@openzeppelin/contracts": "^5.0.2" } }, "sha512-5Ii4IJEi6iVqNPGLiCrB1ZZWYfDmBicUbu7Wg04/t6Z840Q9H3KpRwh20k3EHparC39DHKwx6i8+g7rGzR5DWA=="],
 
     "@oasisprotocol/sapphire-hardhat": ["@oasisprotocol/sapphire-hardhat@2.22.3", "", { "dependencies": { "@oasisprotocol/sapphire-paratime": "^2.3.0" }, "peerDependencies": { "hardhat": "2.x" } }, "sha512-9GqmHx9XC2mMSuejFjoS6PnRH2zPfWmbA9N/LBBd0uGkzVxVkMquqqhz5WDq0qpzJqoKHVn5PhM5gG8We3DWWQ=="],
 
