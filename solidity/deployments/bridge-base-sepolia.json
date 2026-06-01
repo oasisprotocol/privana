@@ -1,0 +1,25 @@
+{
+  "network": "base-sepolia",
+  "chainId": 84532,
+  "createX": "0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed",
+  "saltMode": "permissioned-no-cross-chain-redeploy-protection",
+  "xroseRawSalt": "0x378efed49df1747fb79aa186af752db62f6c4f06002f902854d4fc4ab553125d",
+  "xroseGuardedSalt": "0x9a409a9b6b7237644329ac4e87562324cf2ccd883788db2402ebe3e634f604fb",
+  "xrose": "0xf59D011bBc8AE7F7901Ed8052f590fE886D70F24",
+  "roflBridgeRawSalt": "0x378efed49df1747fb79aa186af752db62f6c4f060057c68c14c283469671e829",
+  "roflBridgeGuardedSalt": "0x3ba61ebd88c54c757fd0a49c17677dfbfc83abc5c563bad39214519e34d55cfb",
+  "roflBridgeSameAddressRequired": false,
+  "roflBridge": "0xb6ad491dC46735F87aA1212458ce777467fa8749",
+  "roflSigner": "0x88931bE19b73652DB0f6b329C8E01ce2FDdbf288",
+  "owner": "0x378efed49Df1747FB79aA186af752dB62f6c4f06",
+  "factory": "0x378efed49Df1747FB79aA186af752dB62f6c4f06",
+  "xerc20Source": "defi-wonderland/xERC20@da2afabdeb1bad9ccda2f6eb928cd99e852530be",
+  "xroseConstructor": [
+    "XRose",
+    "xROSE",
+    "0x378efed49Df1747FB79aA186af752dB62f6c4f06"
+  ],
+  "xroseRuntimeHash": "0x63e9e549f8052339eaecc9745769f56762693c2fa4455c2e1d8693eeea5abf34",
+  "mintLimit": "250000000000000000000000",
+  "burnLimit": "250000000000000000000000"
+}

@@ -12,6 +12,7 @@ COPY . .
 
 # Verify Solidity artifacts exist (run 'make solidity-build' locally if this fails)
 RUN test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json \
+    && test -f solidity/artifacts/contracts/AccountingHistoryModule.sol/AccountingHistoryModule.json \
     && test -f solidity/artifacts/contracts/auth/AccountingSiweAuth.sol/AccountingSiweAuth.json \
     || (echo "ERROR: Solidity artifacts not found. Run 'make solidity-build' before building Docker image." && exit 1)
 

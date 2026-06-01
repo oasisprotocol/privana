@@ -143,6 +143,280 @@
         "title": "BatchBalancesResponse",
         "type": "object"
       },
+      "BridgeWithdrawAdvisory": {
+        "description": "Non-binding gas observations surfaced on the Sapphire branch only.",
+        "properties": {
+          "gas_price_seen_wei": {
+            "title": "Gas Price Seen Wei",
+            "type": "string"
+          },
+          "recommended_gas_limit": {
+            "title": "Recommended Gas Limit",
+            "type": "string"
+          },
+          "safety_margin": {
+            "title": "Safety Margin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gas_price_seen_wei",
+          "recommended_gas_limit",
+          "safety_margin"
+        ],
+        "title": "BridgeWithdrawAdvisory",
+        "type": "object"
+      },
+      "BridgeWithdrawEip712Envelope": {
+        "description": "Wrapper carrying the EIP-712 type name + message.",
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/BridgeWithdrawEip712Message"
+          },
+          "type": {
+            "const": "BridgeWithdraw",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "title": "BridgeWithdrawEip712Envelope",
+        "type": "object"
+      },
+      "BridgeWithdrawEip712Message": {
+        "description": "EIP-712 ``BridgeWithdraw`` message.\n\nField order mirrors the on-chain typehash verbatim \u2014 see\n``solidity/contracts/EIP712SignatureVerifier.sol``. Pinned at import via\nthe module-level check below so a serializer/ordering drift fails on\nimport instead of silently breaking ecrecover for signed payloads.",
+        "properties": {
+          "amount": {
+            "title": "Amount",
+            "type": "string"
+          },
+          "destChainId": {
+            "title": "Destchainid",
+            "type": "string"
+          },
+          "maxGasCost": {
+            "title": "Maxgascost",
+            "type": "string"
+          },
+          "nonce": {
+            "title": "Nonce",
+            "type": "string"
+          },
+          "routeAddress": {
+            "title": "Routeaddress",
+            "type": "string"
+          },
+          "toAddress": {
+            "title": "Toaddress",
+            "type": "string"
+          },
+          "userAddress": {
+            "title": "Useraddress",
+            "type": "string"
+          }
+        },
+        "required": [
+          "userAddress",
+          "toAddress",
+          "destChainId",
+          "routeAddress",
+          "amount",
+          "maxGasCost",
+          "nonce"
+        ],
+        "title": "BridgeWithdrawEip712Message",
+        "type": "object"
+      },
+      "BridgeWithdrawQuoteRequest": {
+        "description": "Request payload for a bridge-withdrawal quote.\n\n``user_nonce`` is informational only \u2014 the server reads the authoritative\nnonce from ``withdrawalNonces(user_address)`` and writes that value into\nboth the response envelope and the EIP-712 message.",
+        "properties": {
+          "dest_chain_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Dest Chain Id",
+            "type": "integer"
+          },
+          "gross_amount": {
+            "exclusiveMinimum": 0.0,
+            "title": "Gross Amount",
+            "type": "integer"
+          },
+          "to_address": {
+            "minLength": 1,
+            "title": "To Address",
+            "type": "string"
+          },
+          "user_address": {
+            "minLength": 1,
+            "title": "User Address",
+            "type": "string"
+          },
+          "user_nonce": {
+            "minimum": 0.0,
+            "title": "User Nonce",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user_address",
+          "to_address",
+          "dest_chain_id",
+          "gross_amount",
+          "user_nonce"
+        ],
+        "title": "BridgeWithdrawQuoteRequest",
+        "type": "object"
+      },
+      "BridgeWithdrawQuoteResponse": {
+        "description": "Bridge-withdrawal quote envelope.\n\n``advisory`` is populated on the Sapphire native-release branch and\n``None`` on registered-route branches (operator pays foreign gas; the\nuser has no reserve to size). ``quote_config_version`` and ``expires_at``\nare envelope fields \u2014 they are not part of the EIP-712 payload.",
+        "properties": {
+          "advisory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BridgeWithdrawAdvisory"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dest_chain_id": {
+            "title": "Dest Chain Id",
+            "type": "integer"
+          },
+          "eip712": {
+            "$ref": "#/components/schemas/BridgeWithdrawEip712Envelope"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "fee_model": {
+            "title": "Fee Model",
+            "type": "string"
+          },
+          "gross_amount": {
+            "title": "Gross Amount",
+            "type": "string"
+          },
+          "max_gas_cost": {
+            "title": "Max Gas Cost",
+            "type": "string"
+          },
+          "net_amount": {
+            "title": "Net Amount",
+            "type": "string"
+          },
+          "quote_config_version": {
+            "title": "Quote Config Version",
+            "type": "string"
+          },
+          "route_address": {
+            "title": "Route Address",
+            "type": "string"
+          },
+          "token_decimals": {
+            "title": "Token Decimals",
+            "type": "integer"
+          },
+          "token_symbol": {
+            "title": "Token Symbol",
+            "type": "string"
+          },
+          "user_nonce": {
+            "title": "User Nonce",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dest_chain_id",
+          "route_address",
+          "fee_model",
+          "gross_amount",
+          "max_gas_cost",
+          "net_amount",
+          "user_nonce",
+          "quote_config_version",
+          "expires_at",
+          "token_symbol",
+          "token_decimals",
+          "eip712"
+        ],
+        "title": "BridgeWithdrawQuoteResponse",
+        "type": "object"
+      },
+      "BridgeWithdrawSubmitRequest": {
+        "description": "Submit payload for a user-signed bridge withdrawal.\n\nAll fields except ``signature`` echo what the user signed in the EIP-712\n``BridgeWithdraw`` message; ``quote_config_version`` and ``expires_at``\nbind the request to the authoritative quote config snapshot. Server-side\nvalidation runs structural gates before any contract call; on-chain\n``verifyBridgeWithdrawSignature`` is the authoritative signature check.",
+        "properties": {
+          "amount": {
+            "exclusiveMinimum": 0.0,
+            "title": "Amount",
+            "type": "integer"
+          },
+          "dest_chain_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Dest Chain Id",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "max_gas_cost": {
+            "minimum": 0.0,
+            "title": "Max Gas Cost",
+            "type": "integer"
+          },
+          "quote_config_version": {
+            "pattern": "^bridge-quote-v1:0x[0-9a-f]{64}$",
+            "title": "Quote Config Version",
+            "type": "string"
+          },
+          "route_address": {
+            "pattern": "^0x[0-9a-fA-F]{40}$",
+            "title": "Route Address",
+            "type": "string"
+          },
+          "signature": {
+            "pattern": "^0x[0-9a-fA-F]{130}$",
+            "title": "Signature",
+            "type": "string"
+          },
+          "to_address": {
+            "pattern": "^0x[0-9a-fA-F]{40}$",
+            "title": "To Address",
+            "type": "string"
+          },
+          "user_address": {
+            "pattern": "^0x[0-9a-fA-F]{40}$",
+            "title": "User Address",
+            "type": "string"
+          },
+          "user_nonce": {
+            "minimum": 0.0,
+            "title": "User Nonce",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user_address",
+          "to_address",
+          "dest_chain_id",
+          "route_address",
+          "amount",
+          "max_gas_cost",
+          "quote_config_version",
+          "expires_at",
+          "user_nonce",
+          "signature"
+        ],
+        "title": "BridgeWithdrawSubmitRequest",
+        "type": "object"
+      },
       "DepositAddressRequest": {
         "description": "Request to get a per-user deposit address.",
         "properties": {
@@ -388,6 +662,17 @@
             ],
             "title": "Deposit Id"
           },
+          "from_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Address"
+          },
           "kind": {
             "enum": [
               "deposit",
@@ -395,6 +680,8 @@
               "createLock",
               "transferFromLock",
               "transferBalance",
+              "modifyLock",
+              "unlockLock",
               "unknown"
             ],
             "title": "Kind",
@@ -403,6 +690,17 @@
           "timestamp": {
             "title": "Timestamp",
             "type": "integer"
+          },
+          "to_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Address"
           },
           "token_id": {
             "anyOf": [
@@ -2243,6 +2541,90 @@
           }
         ],
         "summary": "Get Balance",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/bridge/withdrawals/quote": {
+      "post": {
+        "description": "Quote a bridge withdrawal: gross/max-gas/net + EIP-712 message to sign.",
+        "operationId": "bridge_withdrawal_quote_v1_accounting_bridge_withdrawals_quote_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BridgeWithdrawQuoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BridgeWithdrawQuoteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bridge Withdrawal Quote",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/bridge/withdrawals/submit": {
+      "post": {
+        "description": "Submit a user-signed bridge withdrawal. Validates against the live quote config.",
+        "operationId": "bridge_withdrawal_submit_v1_accounting_bridge_withdrawals_submit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BridgeWithdrawSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionSubmissionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bridge Withdrawal Submit",
         "tags": [
           "Accounting"
         ]

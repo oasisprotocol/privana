@@ -14,6 +14,7 @@
     "format": "npm-run-all format:**",
     "build": "hardhat compile",
     "check:size": "hardhat run scripts/check-bytecode-size.ts --no-compile",
+    "check:size:update": "UPDATE_BASELINE=1 hardhat run scripts/check-bytecode-size.ts --no-compile",
     "test:hardhat": "hardhat test",
     "test:sapphire-localnet": "hardhat test --network sapphire-localnet",
     "test": "npm-run-all test:**",

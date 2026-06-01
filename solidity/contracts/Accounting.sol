@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {AccountingStorage} from "./AccountingStorage.sol";
 import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
 import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
-import {
-    ChainType,
-    FundLock,
-    HistoryEntry,
-    HistoryKind,
-    TokenInfo,
-    TokenType,
-    UnsupportedTokenType,
-    UserInfo
-} from "./Types.sol";
+import {ChainType, GasPriceNotSet, HistoryEntry, HistoryKind, InvalidAddress, InvalidAmount, TokenInfo, TokenType, UnsupportedTokenType} from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
+import {IBridgeModule} from "./interfaces/IBridgeModule.sol";
+import {ILockModule} from "./interfaces/ILockModule.sol";
+import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.sol";
+import {EIP155Signer} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -24,89 +20,60 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
  * and automated withdrawals via EIP-712 signatures.
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
-    /// @dev Maximum entries returned by `getHistory` in a single call.
-    uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
+contract Accounting is AccountingStorage, UUPSUpgradeable {
+    /// @notice Chain-agnostic tokenId for bridge-asset ROSE.
+    /// @dev Equals getTokenId(TokenInfo(TokenType.BridgeAsset, encodeBridgeAssetTokenData("ROSE"))).
+    ///      Pinned literal so off-chain consumers (ROFL TEE) can read a stable value
+    ///      without recomputing the hash. Cross-Layer Contract rule 2.
+    bytes32 public constant ROSE_TOKEN_ID =
+        0xca91975d6c6810eb4077546d4fbdb49fa231f351cddfc915862f7c0dad81a7aa;
+
+    /// @dev ERC-1967-style unstructured slot for the delegated `BridgeModule`
+    ///      pointer. Equals `bytes32(uint256(keccak256("flexvaults.accounting.bridgeModule")) - 1)`.
+    ///      Lives outside `__gap` so adding the dispatcher does not shift
+    ///      structured storage. Collision-checked against ERC-1967
+    ///      `_IMPLEMENTATION_SLOT` and `_ADMIN_SLOT` in tests.
+    bytes32 private constant _BRIDGE_MODULE_SLOT =
+        bytes32(uint256(keccak256("flexvaults.accounting.bridgeModule")) - 1);
+
+    /// @dev ERC-1967-style unstructured slot for the delegated `LockModule`
+    ///      pointer. Equals `bytes32(uint256(keccak256("flexvaults.accounting.lockModule")) - 1)`.
+    ///      Lives outside `__gap` so adding the dispatcher does not shift
+    ///      structured storage. Collision-checked against ERC-1967
+    ///      `_IMPLEMENTATION_SLOT` and `_ADMIN_SLOT` in tests.
+    bytes32 private constant _LOCK_MODULE_SLOT =
+        bytes32(uint256(keccak256("flexvaults.accounting.lockModule")) - 1);
 
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAccountingSiweAuth public immutable siweAuth;
-    /// @dev internal (not private) so MockAccounting test helper can set balances directly.
-    mapping(address user => mapping(bytes32 tokenId => uint256 balance))
-        internal balances;
-    mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
-    mapping(bytes32 depositId => bool processed) public processedDeposits;
-    mapping(address user => UserInfo) private userInfo;
 
-    WithdrawalRequest[] public withdrawals;
+    /// @notice Emitted when the delegated bridge module pointer is updated.
+    event BridgeModuleSet(address indexed module);
 
-    uint256 private nextLockId;
+    /// @notice Emitted when the delegated lock module pointer is updated.
+    event LockModuleSet(address indexed module);
 
-    /// @dev Array of all registered token IDs for enumeration
-    bytes32[] private registeredTokenIds;
-
-    /// @dev requestId = keccak256(abi.encode(beneficiary, tokenId, version)).
-    /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
-    /// Re-requesting overwrites; no explicit cancel needed.
-    mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
-    mapping(address user => HistoryEntry[] entries) private history;
-
-    struct EmergencyWithdrawRequest {
-        address toAddress;
-        uint256 blockNumber; // 0 ⇒ slot empty
-    }
-
-    error EmergencyWithdrawTooSoon();
-    error EmergencyWithdrawNotFound();
-
-    event EmergencyWithdrawRequested(bytes32 indexed requestId, bytes32 indexed tokenId);
-    event EmergencyWithdrawExecuted(bytes32 indexed requestId);
-
-    event Deposit(
-        bytes32 indexed tokenId,
-        uint256 amount,
-        bytes32 depositId
-    );
-
-    event Withdrawal(
-        address indexed userAddress,
-        bytes32 indexed tokenId,
-        uint256 amount,
-        uint256 chainId
-    );
-
-    event WithdrawalResolved(
-        uint256 indexed index,
-        address indexed userAddress,
-        bytes32 indexed tokenId,
-        address toAddress,
-        uint256 amount,
-        uint256 chainId
-    );
-
-    event TokenRegistered(bytes32 indexed tokenId, TokenType tokenType);
-
-    error InsufficientBalance();
-    error TooManyActiveLocks();
-    error InvalidLockId();
-    error LockNotExpired();
-    error InsufficientLockedAmount();
-    error AddressMismatch();
-    error InvalidExpiry();
-    error InvalidAmount();
-    error WithdrawalTooSoon();
-    error Unauthorized();
-    error DepositAlreadyProcessed();
     error InvalidSiweAuth();
 
-    struct WithdrawalRequest {
-        address userAddress;
-        address toAddress;
-        uint256 amount;
-        uint256 blockNumber;
-        bytes32 tokenId;
-        bool resolved;
-        bytes txIdentifier; // nonce, utxo identifier, or similar
-    }
+    /// @dev Raised when a routed bridge selector is invoked but no bridge
+    ///      module address has been configured via `setBridgeModule`.
+    error BridgeModuleNotSet();
+
+    /// @dev Raised when a routed lock selector is invoked but no lock module
+    ///      address has been configured via `setLockModule`.
+    error LockModuleNotSet();
+
+    /// @dev Raised when the proxy receives a calldata selector that is neither
+    ///      a resident `Accounting` selector nor in a delegated-module allowlist.
+    error UnknownSelector(bytes4 sig);
+
+    /// @dev Raised when `setBridgeModule` is called with a non-zero address
+    ///      whose `code.length` is zero (i.e. an EOA or undeployed contract).
+    error BridgeModuleNotContract();
+
+    /// @dev Raised when `setLockModule` is called with a non-zero address
+    ///      whose `code.length` is zero (i.e. an EOA or undeployed contract).
+    error LockModuleNotContract();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
@@ -121,7 +88,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param _roflAppID The ROFL app identifier
      * @param _owner Address that will own this contract
      */
-    function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
+    function __Accounting_init(
+        bytes21 _roflAppID,
+        address _owner
+    ) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
         __EVMSignerAndVerifier_init(_roflAppID, _owner);
         nextLockId = 1;
@@ -133,7 +103,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param _roflAppID The ROFL app identifier (stable across redeployments)
      * @param _owner Address that will own this contract
      */
-    function initialize(bytes21 _roflAppID, address _owner) external virtual initializer {
+    function initialize(
+        bytes21 _roflAppID,
+        address _owner
+    ) external virtual initializer {
         __Accounting_init(_roflAppID, _owner);
     }
 
@@ -142,12 +115,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
      * @param newImplementation Address of the new implementation contract
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
-
-    /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
-    function renounceOwnership() public pure override {
-        revert();
-    }
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyOwner {}
 
     function _authSender(bytes memory token) internal view returns (address) {
         if (token.length != 0) {
@@ -156,18 +126,31 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return msg.sender;
     }
 
-    function _appendHistory(
-        address user,
-        HistoryKind kind,
-        bytes memory payload
-    ) internal {
-        history[user].push(
-            HistoryEntry({
-                kind: kind,
-                timestamp: uint64(block.timestamp),
-                payload: payload
-            })
+    function setHistoryModule(address module) external onlyOwner {
+        if (module == address(0)) {
+            revert InvalidHistoryModule();
+        }
+        if (module.code.length == 0) {
+            revert InvalidHistoryModule();
+        }
+
+        historyModule = module;
+
+        emit HistoryModuleSet(module);
+    }
+
+    function getHistory(
+        int256 offset,
+        uint256 limit,
+        bytes calldata token
+    ) external returns (HistoryEntry[] memory page, uint256 total) {
+        bytes memory result = _delegateHistory(
+            abi.encodeCall(
+                IAccountingHistoryModule.getHistory,
+                (offset, limit, token)
+            )
         );
+        return abi.decode(result, (HistoryEntry[], uint256));
     }
 
     /**
@@ -183,7 +166,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         bytes calldata siweToken
     ) external view returns (address depositAddr) {
         address beneficiary = _authSender(siweToken);
-        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
+        (depositAddr, ) = _deriveDepositKeypair(
+            beneficiary,
+            chainType,
+            version
+        );
     }
 
     /**
@@ -199,12 +186,24 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 amount,
         bytes32 depositId
     ) external onlyROFL {
+        _creditDeposit(beneficiary, tokenId, amount, depositId);
+    }
+
+    /// @dev Body of `creditDeposit` factored out so test mocks can exercise the
+    ///      exact production logic without re-implementing it.
+    function _creditDeposit(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId
+    ) internal {
         if (beneficiary == address(0)) revert AddressMismatch();
         if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
         if (amount == 0) revert InvalidAmount();
         if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
         processedDeposits[depositId] = true;
         balances[beneficiary][tokenId] += amount;
+        _increaseLedgerTotal(tokenId, amount);
         _appendHistory(
             beneficiary,
             HistoryKind.Deposit,
@@ -288,442 +287,68 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 amount,
         uint256 gasPrice
     ) public returns (bytes memory signedTx) {
+        if (tokens[tokenId].tokenType == TokenType.BridgeAsset)
+            revert BridgeAssetNotSupported();
+
         bytes32 requestId = emergencyWithdrawKey(beneficiary, tokenId, version);
-        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[requestId];
+        EmergencyWithdrawRequest memory req = emergencyWithdrawRequests[
+            requestId
+        ];
         if (req.blockNumber == 0) revert EmergencyWithdrawNotFound();
-        if (block.number - req.blockNumber < 1) revert EmergencyWithdrawTooSoon();
+        if (block.number - req.blockNumber < 1)
+            revert EmergencyWithdrawTooSoon();
 
         TokenInfo memory tInfo = tokens[tokenId];
 
         // Dispatch on tokenType; the else-revert is the single exhaustiveness guard.
-        // When a non-EVM TokenType is added, add a branch here with its ChainType.
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            signedTx = generateDepositAddressTransfer(
-                beneficiary,
-                ChainType.EVM,
-                version,
-                chainId,
-                req.toAddress,
-                amount,
-                sourceChainNonce,
-                gasPrice
-            );
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
-                .decodeEVMErc20TokenData(tInfo.data);
-            signedTx = generateDepositAddressERC20Transfer(
-                beneficiary,
-                ChainType.EVM,
-                version,
-                chainId,
-                req.toAddress,
-                tokenAddress,
-                amount,
-                sourceChainNonce,
-                gasPrice
-            );
-        } else {
-            revert UnsupportedTokenType();
-        }
-
-        emit EmergencyWithdrawExecuted(requestId);
-    }
-
-    // ─── Locks ────────────────────────────────────────────────────────
-
-    /**
-     * @notice Creates a lock on user funds for exclusive access by a designated service.
-     *
-     * This function allows users to lock a portion of their funds for use by a specific
-     * service. Locked funds are removed from the user's available balance but remain
-     * owned by the user until the lock expires or the service transfers them.
-     *
-     * The locking mechanism enables:
-     * - Escrow-like functionality for service interactions
-     * - Temporary delegation of fund access to trusted services
-     * - Time-bounded locks that automatically expire
-     * - Multiple concurrent locks per user (up to 10)
-     *
-     * Security features:
-     * - EIP-712 signature verification to authorize the lock
-     * - Expiry timestamp validation to ensure locks are created with future expiry
-     * - Balance verification before locking
-     * - Limited number of active locks per user (max 10)
-     *
-     * @dev The signature must be from the user whose funds are being locked.
-     *      Locked funds are stored in the user's activeLocks array.
-     *      The expiry must be a timestamp in the future (> block.timestamp).
-     *
-     * @param serviceAddress The address of the service that will have access to the locked funds
-     * @param tokenId The identifier of the token to lock
-     * @param amount The amount of tokens to lock
-     * @param expiry The timestamp when the lock expires and funds can be reclaimed (must be in future)
-     * @param nonce The nonce for replay protection (must match user's current createLockNonces)
-     * @param signature The EIP-712 signature from the user authorizing the lock
-     */
-    function createLock(
-        address serviceAddress,
-        bytes32 tokenId,
-        uint256 amount,
-        uint256 expiry,
-        uint256 nonce,
-        bytes calldata signature
-    ) public {
-        if (expiry <= block.timestamp) revert InvalidExpiry();
-        if (amount == 0) revert InvalidAmount();
-
-        address userAddress = EIP712SignatureVerifier.verifyLockSignature(
-            serviceAddress,
-            tokenId,
-            amount,
-            expiry,
-            nonce,
-            signature
-        );
-
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        if (locks.length >= 10) revert TooManyActiveLocks();
-
-        if (balances[userAddress][tokenId] < amount)
-            revert InsufficientBalance();
-
-        balances[userAddress][tokenId] -= amount;
-
-        uint256 lockId = nextLockId++;
-        locks.push(
-            FundLock({
-                lockId: lockId,
-                serviceId: serviceAddress,
-                tokenId: tokenId,
-                amount: amount,
-                expiry: expiry
-            })
-        );
-
-        _appendHistory(
-            userAddress,
-            HistoryKind.CreateLock,
-            abi.encodePacked(tokenId, amount, serviceAddress)
-        );
-    }
-
-    function _findLockIndex(
-        FundLock[] storage locks,
-        uint256 lockId
-    ) internal view returns (uint256) {
-        for (uint256 i = 0; i < locks.length; i++) {
-            if (locks[i].lockId == lockId) {
-                return i;
-            }
-        }
-        revert InvalidLockId();
-    }
-
-    function _scheduleWithdrawal(
-        address userAddress,
-        address toAddress,
-        bytes32 tokenId,
-        uint256 amount
-    ) internal {
-        TokenInfo memory tInfo = tokens[tokenId];
-
-        bytes memory txIdentifier;
+        // Both branches feed into one shared `EIP155Signer.sign` call below — the
+        // heavy precompile invocation appears once in bytecode instead of twice.
+        address txTo;
+        uint256 txValue;
+        uint64 txGasLimit;
+        bytes memory txData;
         uint256 chainId;
 
         if (tInfo.tokenType == TokenType.NativeEVM) {
             chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+            txTo = req.toAddress;
+            txValue = amount;
+            txGasLimit = gasLimitNativeWithdraw;
         } else if (tInfo.tokenType == TokenType.ERC20) {
-            (chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
-                tInfo.data
+            address tokenAddress;
+            (chainId, tokenAddress) = EVMSignerAndVerifier
+                .decodeEVMErc20TokenData(tInfo.data);
+            txTo = tokenAddress;
+            txGasLimit = gasLimitERC20Withdraw;
+            txData = abi.encodeWithSignature(
+                "transfer(address,uint256)",
+                req.toAddress,
+                amount
             );
-            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
         } else {
             revert UnsupportedTokenType();
         }
 
-        withdrawals.push(
-            WithdrawalRequest({
-                userAddress: userAddress,
-                toAddress: toAddress,
-                amount: amount,
-                blockNumber: block.number,
-                tokenId: tokenId,
-                txIdentifier: txIdentifier,
-                resolved: false
+        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+            beneficiary,
+            ChainType.EVM,
+            version
+        );
+        signedTx = EIP155Signer.sign(
+            depositAddr,
+            depositSecret,
+            EIP155Signer.EthTx({
+                nonce: sourceChainNonce,
+                gasPrice: gasPrice,
+                gasLimit: txGasLimit,
+                to: txTo,
+                value: txValue,
+                data: txData,
+                chainId: chainId
             })
         );
 
-        emit Withdrawal(userAddress, tokenId, amount, chainId);
-    }
-
-    /**
-     * @notice Modifies an existing lock by increasing the locked amount and/or extending expiry.
-     * @dev Expiry can only be extended (newExpiry >= current expiry). Amount increases are
-     *      drawn from the user's available balance. Authorized via EIP-712 user signature.
-     * @param lockId The unique identifier of the lock to modify
-     * @param amount Additional amount to add to the lock (0 to only extend expiry)
-     * @param newExpiry The new expiry timestamp for the lock
-     * @param nonce The nonce for replay protection (must match user's current modifyLockNonces)
-     * @param signature The EIP-712 signature from the user authorizing the modification
-     */
-    function modifyLock(
-        uint256 lockId,
-        uint256 amount,
-        uint256 newExpiry,
-        uint256 nonce,
-        bytes calldata signature
-    ) public {
-        address userAddress = EIP712SignatureVerifier.verifyModifyLockSignature(
-            lockId,
-            amount,
-            newExpiry,
-            nonce,
-            signature
-        );
-
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        uint256 lockIndex = _findLockIndex(locks, lockId);
-        FundLock storage lock = locks[lockIndex];
-
-        if (newExpiry < lock.expiry) revert InvalidExpiry();
-
-        if (amount == 0 && newExpiry == lock.expiry) revert InvalidAmount();
-
-        if (amount > 0) {
-            if (balances[userAddress][lock.tokenId] < amount)
-                revert InsufficientBalance();
-
-            balances[userAddress][lock.tokenId] -= amount;
-            lock.amount += amount;
-        }
-
-        lock.expiry = newExpiry;
-    }
-
-    /**
-     * @notice Unlocks a single expired fund lock and returns funds to the user's available balance.
-     *
-     * This function allows users to reclaim funds from an expired lock. Once a lock's
-     * expiry timestamp has passed, the original user can call this function to
-     * unlock the funds and restore them to their available balance.
-     *
-     * The unlocking process:
-     * 1. Validates the lock index exists
-     * 2. Checks that the lock has expired (block.timestamp >= expiry)
-     * 3. Returns any remaining locked amount to the user's balance
-     * 4. Removes the lock from the user's active locks array
-     *
-     * Security features:
-     * - Time-based expiry validation to prevent premature unlocking
-     * - Index bounds checking to prevent invalid access
-     * - Efficient lock removal using swap-and-pop pattern
-     *
-     * @dev Uses swap-and-pop to remove locks efficiently from the array.
-     *      The lock order may change after removal due to the swap operation.
-     *      Anyone can call this function for any user if the lock has expired.
-     *      The purpose of this function is to allow users to reclaim funds if
-     *      a service goes down or becomes unresponsive.
-     *
-     * @param userAddress The address of the user whose lock should be unlocked
-     * @param lockId The unique identifier of the lock to unlock
-     */
-    function unlockSingleLock(address userAddress, uint256 lockId) public {
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        uint256 lockIndex = _findLockIndex(locks, lockId);
-        FundLock memory lock = locks[lockIndex];
-
-        if (lock.amount != 0) {
-            if (block.timestamp < lock.expiry) revert LockNotExpired();
-            balances[userAddress][lock.tokenId] += lock.amount;
-        }
-
-        locks[lockIndex] = locks[locks.length - 1];
-        locks.pop();
-    }
-
-    /**
-     * @notice Unlocks all expired fund locks for a user and returns funds to available balance.
-     *
-     * This function iterates through all of a user's active locks and unlocks any that
-     * have expired. This is a convenience function to avoid calling unlockSingleLock
-     * multiple times when a user has several expired locks.
-     *
-     * @dev Iterates backwards to handle swap-and-pop without skipping elements.
-     *      Anyone can call this function for any user.
-     *
-     * @param userAddress The address of the user whose expired locks should be unlocked
-     * @return unlockedCount The number of locks that were successfully unlocked
-     */
-    function unlockAllExpiredLocks(
-        address userAddress
-    ) external returns (uint256 unlockedCount) {
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        unlockedCount = 0;
-        uint256 i = locks.length;
-
-        while (i > 0) {
-            i--;
-            FundLock memory lock = locks[i];
-
-            if (block.timestamp >= lock.expiry && lock.amount > 0) {
-                balances[userAddress][lock.tokenId] += lock.amount;
-
-                locks[i] = locks[locks.length - 1];
-                locks.pop();
-                unlockedCount++;
-            }
-        }
-
-        return unlockedCount;
-    }
-
-    /**
-     * @notice Transfers locked funds under service authorization.
-     *
-     * This function allows a service to transfer funds that were previously locked
-     * to them by a user. Unlike regular transfers, this requires authorization from
-     * the service (not the original user) since the funds are under the service's
-     * temporary control.
-     *
-     * The transfer process:
-     * 1. Validates the lock index and retrieves the lock details
-     * 2. Verifies the service's EIP-712 signature authorizing the transfer
-     * 3. Checks that the lock has sufficient funds for the transfer
-     * 4. Reduces the locked amount and credits the recipient
-     * 5. Removes the lock if all funds are transferred
-     *
-     * Security features:
-     * - Service signature verification (not user signature)
-     * - Lock amount validation before transfer
-     * - Automatic lock cleanup when empty
-     * - Signature replay protection via EIP712SignatureVerifier
-     *
-     * @dev The signature must be from the service address associated with the lock.
-     *      If the lock amount reaches zero, the lock is automatically removed.
-     *      The lock array may be reordered due to swap-and-pop removal. The service is
-     *      a user (managed the same way as regular users) and any user can act as a service.
-     *
-     * @param userAddress The address of the user who originally locked the funds
-     * @param toAddress The address receiving the transferred locked funds
-     * @param lockId The unique identifier of the lock to transfer from
-     * @param amount The amount of locked tokens to transfer
-     * @param nonce The nonce for replay protection (must match service's current transferLockedNonces)
-     * @param signature The EIP-712 signature from the service authorizing the transfer
-     */
-    function transferFromLock(
-        address userAddress,
-        address toAddress,
-        uint256 lockId,
-        uint256 amount,
-        uint256 nonce,
-        bytes calldata signature
-    ) public {
-        if (amount == 0) revert InvalidAmount();
-
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        uint256 lockIndex = _findLockIndex(locks, lockId);
-        FundLock storage lock = locks[lockIndex];
-
-        EIP712SignatureVerifier.verifyTransferLockedSignature(
-            lock.serviceId,
-            userAddress,
-            toAddress,
-            lockId,
-            amount,
-            nonce,
-            signature
-        );
-
-        if (lock.amount < amount) revert InsufficientLockedAmount();
-
-        lock.amount -= amount;
-        balances[toAddress][lock.tokenId] += amount;
-
-        _appendHistory(
-            userAddress,
-            HistoryKind.TransferFromLock,
-            abi.encodePacked(lock.tokenId, amount, toAddress)
-        );
-
-        if (lock.amount == 0) {
-            locks[lockIndex] = locks[locks.length - 1];
-            locks.pop();
-        }
-    }
-
-    /**
-     * @notice Withdraws locked funds to an external on-chain address via scheduled withdrawal.
-     * @dev Service-authorized counterpart to `transferFromLock`: instead of crediting an
-     *      internal balance, this schedules a cross-chain withdrawal signed by ROFL.
-     *      Signature must come from the lock's serviceId. If `lock.amount` hits zero the
-     *      slot is removed via swap-and-pop.
-     * @param userAddress The user who originally created the lock
-     * @param toAddress The external destination address on the token's source chain
-     * @param lockId The unique identifier of the lock to withdraw from
-     * @param amount The amount of locked tokens to withdraw
-     * @param nonce The nonce for replay protection (must match service's current withdrawFromLock nonce)
-     * @param signature The EIP-712 signature from the service authorizing the withdrawal
-     */
-    function withdrawFromLock(
-        address userAddress,
-        address toAddress,
-        uint256 lockId,
-        uint256 amount,
-        uint256 nonce,
-        bytes calldata signature
-    ) public {
-        if (amount == 0) revert InvalidAmount();
-        if (toAddress == address(0)) revert AddressMismatch();
-
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
-
-        uint256 lockIndex = _findLockIndex(locks, lockId);
-        FundLock storage lock = locks[lockIndex];
-
-        EIP712SignatureVerifier.verifyWithdrawFromLockSignature(
-            lock.serviceId,
-            userAddress,
-            toAddress,
-            lockId,
-            amount,
-            nonce,
-            signature
-        );
-
-        if (lock.amount < amount) revert InsufficientLockedAmount();
-
-        lock.amount -= amount;
-
-        bytes32 tokenId = lock.tokenId;
-
-        if (lock.amount == 0) {
-            locks[lockIndex] = locks[locks.length - 1];
-            locks.pop();
-        }
-
-        _scheduleWithdrawal(userAddress, toAddress, tokenId, amount);
-        _appendHistory(
-            userAddress,
-            HistoryKind.Withdraw,
-            abi.encodePacked(tokenId, amount, toAddress)
-        );
+        emit EmergencyWithdrawExecuted(requestId);
     }
 
     /**
@@ -775,10 +400,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
 
-        _appendHistory(
+        _appendTransferHistoryForParticipants(
             userAddress,
+            toAddress,
             HistoryKind.TransferBalance,
-            abi.encodePacked(tokenId, amount, toAddress)
+            tokenId,
+            amount
         );
     }
 
@@ -807,6 +434,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         bytes calldata signature
     ) public {
         if (amount == 0) revert InvalidAmount();
+        if (tokens[tokenId].tokenType == TokenType.BridgeAsset)
+            revert BridgeAssetNotSupported();
 
         address userAddress = EIP712SignatureVerifier.verifyWithdrawSignature(
             tokenId,
@@ -821,10 +450,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
 
         _scheduleWithdrawal(userAddress, userAddress, tokenId, amount);
-        _appendHistory(
+        _appendUserCounterpartyHistory(
             userAddress,
             HistoryKind.Withdraw,
-            abi.encodePacked(tokenId, amount, userAddress)
+            tokenId,
+            amount,
+            userAddress
         );
     }
 
@@ -861,11 +492,13 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (block.number - withdrawalRequest.blockNumber < 1) {
             revert WithdrawalTooSoon();
         }
-
-        address userAddress = withdrawalRequest.userAddress;
-        address toAddress = withdrawalRequest.toAddress;
+        // BridgeAsset (ROSE) requests have a 4-tuple `txIdentifier` and must use
+        // `resolveBridgeWithdrawal`. Here the dispatch's else-branch
+        // `UnsupportedTokenType` revert handles them naturally — `TokenType.BridgeAsset`
+        // is neither `NativeEVM` nor `ERC20`.
         bytes32 tokenId = withdrawalRequest.tokenId;
         uint256 amount = withdrawalRequest.amount;
+        address toAddress = withdrawalRequest.toAddress;
         TokenInfo memory tInfo = tokens[tokenId];
         uint256 chainId;
 
@@ -894,20 +527,29 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             revert UnsupportedTokenType();
         }
 
-        // Only mark resolved and emit event if not already resolved
-        if (!withdrawalRequest.resolved) {
-            withdrawalRequest.resolved = true;
-            emit WithdrawalResolved(
-                index,
-                userAddress,
-                tokenId,
-                toAddress,
-                amount,
-                chainId
-            );
-        }
-
+        _markResolved(withdrawalRequest, index, chainId);
         return signedTx;
+    }
+
+    /// @dev Idempotent finalize: flips `resolved` and emits `WithdrawalResolved` only on
+    ///      first call. Duplicated by design — an identical body lives in
+    ///      `BridgeModule._markResolved`; sharing via a delegatecall hop would cost more
+    ///      bytes than the duplicated emit-encoding.
+    function _markResolved(
+        WithdrawalRequest storage req,
+        uint256 index,
+        uint256 chainId
+    ) internal {
+        if (req.resolved) return;
+        req.resolved = true;
+        emit WithdrawalResolved(
+            index,
+            req.userAddress,
+            req.tokenId,
+            req.toAddress,
+            req.amount,
+            chainId
+        );
     }
 
     /**
@@ -958,6 +600,234 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
+     * @notice Configure the address of the delegated `BridgeModule` runtime.
+     * @dev Owner-only. Rejects `address(0)` and any address that is not a
+     *      deployed contract (`code.length == 0`). EOAs are rejected by the
+     *      contract check. Stored in an ERC-1967-style unstructured slot to
+     *      keep `__gap` untouched.
+     * @param module Address of the deployed `BridgeModule` implementation.
+     */
+    function setBridgeModule(address module) external onlyOwner {
+        if (module == address(0)) revert InvalidAddress();
+        if (module.code.length == 0) revert BridgeModuleNotContract();
+        bytes32 slot = _BRIDGE_MODULE_SLOT;
+        assembly {
+            sstore(slot, module)
+        }
+        emit BridgeModuleSet(module);
+    }
+
+    /**
+     * @notice Read the configured `BridgeModule` address.
+     * @return moduleAddr Current bridge module pointer; `address(0)` if unset.
+     */
+    function bridgeModule() external view returns (address moduleAddr) {
+        bytes32 slot = _BRIDGE_MODULE_SLOT;
+        assembly {
+            moduleAddr := sload(slot)
+        }
+    }
+
+    /**
+     * @notice Configure the address of the delegated `LockModule` runtime.
+     * @dev Owner-only. Rejects `address(0)` and any address that is not a
+     *      deployed contract (`code.length == 0`). EOAs are rejected by the
+     *      contract check. Stored in an ERC-1967-style unstructured slot to
+     *      keep `__gap` untouched.
+     * @param module Address of the deployed `LockModule` implementation.
+     */
+    function setLockModule(address module) external onlyOwner {
+        if (module == address(0)) revert InvalidAddress();
+        if (module.code.length == 0) revert LockModuleNotContract();
+        bytes32 slot = _LOCK_MODULE_SLOT;
+        assembly {
+            sstore(slot, module)
+        }
+        emit LockModuleSet(module);
+    }
+
+    /**
+     * @notice Read the configured `LockModule` address.
+     * @return moduleAddr Current lock module pointer; `address(0)` if unset.
+     */
+    function lockModule() external view returns (address moduleAddr) {
+        bytes32 slot = _LOCK_MODULE_SLOT;
+        assembly {
+            moduleAddr := sload(slot)
+        }
+    }
+
+    // ─── Custody-tx clear surface (operator last-resort recovery) ──────
+
+    /// @notice Owner-authorized clearance action for a stuck custody-tx record;
+    ///         the off-chain executor maps it onto a per-record recovery.
+    enum ClearAction {
+        Requeue,
+        Abandon,
+        MarkSuccessWithHash,
+        BurnNonce
+    }
+
+    /// @notice Emitted when the owner signals a clear for a custody-tx record.
+    event CustodyTxCleared(
+        uint256 indexed chainId,
+        uint256 indexed nonce,
+        ClearAction action,
+        bytes32 vouchedTxHash
+    );
+
+    error CustodyTxAlreadyCleared(
+        uint256 chainId,
+        uint256 nonce,
+        bytes32 existingHash
+    );
+    error CustodyTxClearMissingVouch();
+    error CustodyTxClearUnexpectedVouch();
+    error CustodyTxClearNonceOutOfRange(uint256 chainId, uint256 nonce);
+    /// @dev `signNonceBurn` for a slot not cleared as `BurnNonce`. Distinct from
+    ///      `CustodyTxClearUnexpectedVouch` so the two failures are tellable apart.
+    error CustodyTxClearNotBurnAuthorized(uint256 chainId, uint256 nonce);
+
+    /**
+     * @notice Record an owner-authorized, one-shot clear for a custody-tx record
+     *         stuck in the off-chain executor's blocking state.
+     * @dev Signal + idempotency bus only: stores no record state, trusts the
+     *      off-chain proof. First-clear-wins, so a mis-keyed clear is irreversible;
+     *      `nonce < nonces[chainId]` is the only on-chain sanity check.
+     * @param chainId Destination chain whose custody-EOA nonce is cleared.
+     * @param nonce Custody-EOA nonce of the stuck record.
+     * @param action Recovery the off-chain executor should apply.
+     * @param vouchedTxHash Destination tx hash for `MarkSuccessWithHash`; zero otherwise.
+     */
+    function clearCustodyTx(
+        uint256 chainId,
+        uint256 nonce,
+        ClearAction action,
+        bytes32 vouchedTxHash
+    ) external onlyOwner {
+        // Bound to allocated nonces: a future-slot write would be a permanent typo.
+        if (nonce >= nonces[chainId]) {
+            revert CustodyTxClearNonceOutOfRange(chainId, nonce);
+        }
+        if (clearAppliedHash[chainId][nonce] != bytes32(0)) {
+            revert CustodyTxAlreadyCleared(
+                chainId,
+                nonce,
+                clearAppliedHash[chainId][nonce]
+            );
+        }
+        if (action == ClearAction.MarkSuccessWithHash) {
+            if (vouchedTxHash == bytes32(0)) revert CustodyTxClearMissingVouch();
+        } else {
+            if (vouchedTxHash != bytes32(0)) {
+                revert CustodyTxClearUnexpectedVouch();
+            }
+        }
+        clearAppliedHash[chainId][nonce] = keccak256(
+            abi.encode(action, vouchedTxHash)
+        );
+        emit CustodyTxCleared(chainId, nonce, action, vouchedTxHash);
+    }
+
+    /**
+     * @notice Sign a value-0 self-transfer at a specific custody-EOA nonce to
+     *         advance past a reserved-but-un-mineable nonce.
+     * @dev Owner-gated end-to-end: reverts unless the slot was first cleared with
+     *      `ClearAction.BurnNonce`, so ROFL-query auth alone cannot burn arbitrary
+     *      nonces. Takes the nonce explicitly (fills a gap; no auto-increment).
+     * @param chainId Destination chain the burn tx targets.
+     * @param nonce Exact stuck custody-EOA nonce to burn.
+     * @return signedTx RLP-encoded signed legacy tx, ready to broadcast.
+     */
+    function signNonceBurn(
+        uint256 chainId,
+        uint64 nonce
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        if (
+            clearAppliedHash[chainId][nonce] !=
+            keccak256(abi.encode(ClearAction.BurnNonce, bytes32(0)))
+        ) {
+            revert CustodyTxClearNotBurnAuthorized(chainId, nonce);
+        }
+        // Zero gas price signs an un-mineable tx; owner must setGasPrice first.
+        if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+        signedTx = EIP155Signer.sign(
+            evmAddress,
+            secretKey,
+            EIP155Signer.EthTx({
+                nonce: nonce,
+                gasPrice: gasPrices[chainId],
+                gasLimit: gasLimitNativeSweep,
+                to: evmAddress,
+                value: 0,
+                data: "",
+                chainId: chainId
+            })
+        );
+    }
+
+    /**
+     * @notice Dispatch routed module selectors to their delegated runtime via
+     *         `delegatecall`; revert all other unknown selectors.
+     * @dev Allowlists are hardcoded against `IBridgeModule` / `ILockModule`
+     *      selector constants. Unknown selectors revert `UnknownSelector(sig)`
+     *      — there is no fall-through to a module. UUPS / Ownable / resident
+     *      `Accounting` selectors are dispatched normally by Solidity before
+     *      this fallback runs, so they cannot be shadowed by an allowlist. Both
+     *      module groups share one `delegatecall` block; only the resolved
+     *      pointer differs.
+     */
+    fallback() external {
+        bytes4 sig = msg.sig;
+        address moduleAddr;
+        if (
+            sig == IBridgeModule.requestBridgeWithdrawal.selector ||
+            sig == IBridgeModule.resolveBridgeWithdrawal.selector ||
+            sig == IBridgeModule.setRoflBridge.selector ||
+            sig == IBridgeModule.generateSweepERC20TransferToBridge.selector ||
+            sig == IBridgeModule.reserveBridgeBurn.selector ||
+            sig == IBridgeModule.generateBridgeBurnTransfer.selector ||
+            sig == IBridgeModule.getBridgeBurnRequest.selector
+        ) {
+            bytes32 slot = _BRIDGE_MODULE_SLOT;
+            assembly {
+                moduleAddr := sload(slot)
+            }
+            if (moduleAddr == address(0)) revert BridgeModuleNotSet();
+        } else if (
+            sig == ILockModule.createLock.selector ||
+            sig == ILockModule.modifyLock.selector ||
+            sig == ILockModule.unlockSingleLock.selector ||
+            sig == ILockModule.unlockAllExpiredLocks.selector ||
+            sig == ILockModule.transferFromLock.selector ||
+            sig == ILockModule.withdrawFromLock.selector ||
+            sig == ILockModule.getUserLocks.selector ||
+            sig == ILockModule.getServiceLocks.selector
+        ) {
+            bytes32 slot = _LOCK_MODULE_SLOT;
+            assembly {
+                moduleAddr := sload(slot)
+            }
+            if (moduleAddr == address(0)) revert LockModuleNotSet();
+        } else {
+            revert UnknownSelector(sig);
+        }
+
+        assembly {
+            calldatacopy(0, 0, calldatasize())
+            let ok := delegatecall(gas(), moduleAddr, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            switch ok
+            case 0 {
+                revert(0, returndatasize())
+            }
+            default {
+                return(0, returndatasize())
+            }
+        }
+    }
+
+    /**
      * @notice Returns all registered token IDs.
      * @return Array of all registered token IDs
      */
@@ -972,54 +842,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      */
     function withdrawalCount() external view returns (uint256) {
         return withdrawals.length;
-    }
-
-    /**
-     * @notice Returns active locks for the authenticated user. Requires auth token for private reads.
-     * @param token SIWE auth token identifying the caller
-     * @return Array of active fund locks owned by the authenticated user
-     */
-    function getUserLocks(
-        bytes memory token
-    ) public view returns (FundLock[] memory) {
-        address user = _authSender(token);
-        if (user == address(0)) revert Unauthorized();
-        return userInfo[user].activeLocks;
-    }
-
-    /**
-     * @notice Returns locks for `user` scoped to authenticated service identity.
-     * @param user The lock owner whose locks should be filtered
-     * @param token SIWE auth token identifying the caller as the service
-     * @return Array of `user`'s locks where serviceId matches the authenticated caller
-     */
-    function getServiceLocks(
-        address user,
-        bytes memory token
-    ) public view returns (FundLock[] memory) {
-        address service = _authSender(token);
-        if (service == address(0)) revert Unauthorized();
-
-        UserInfo storage uInfo = userInfo[user];
-        FundLock[] storage allLocks = uInfo.activeLocks;
-
-        uint256 matchCount = 0;
-        for (uint256 i = 0; i < allLocks.length; i++) {
-            if (allLocks[i].serviceId == service) {
-                matchCount++;
-            }
-        }
-
-        FundLock[] memory serviceLocks = new FundLock[](matchCount);
-        uint256 currentIndex = 0;
-        for (uint256 i = 0; i < allLocks.length; i++) {
-            if (allLocks[i].serviceId == service) {
-                serviceLocks[currentIndex] = allLocks[i];
-                currentIndex++;
-            }
-        }
-
-        return serviceLocks;
     }
 
     /**
@@ -1038,57 +860,23 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
-     * @notice Returns authenticated user history entries within a single page, oldest first.
-     * @param offset Non-negative number of page starting at 0, or negative number for the page starting from the end (-1 is last page)
-     * @param limit Requested page size, capped at 100 entries
-     * @param token SIWE auth token identifying the caller
-     * @return page Page of history entries (oldest first within the page)
-     * @return total Total history entries for the authenticated user
+     * @notice Total credited supply for a bridge-asset tokenId.
+     * @dev Public, unauthenticated read — ledger total is per-token aggregate state,
+     *      not user-scoped balance. Only `ROSE_TOKEN_ID` accumulates; every other
+     *      tokenId returns 0.
+     * @param tokenId The token identifier
+     * @return The aggregate ledger total credited for `tokenId`
      */
-    function getHistory(
-        int256 offset,
-        uint256 limit,
-        bytes calldata token
-    ) external view returns (HistoryEntry[] memory page, uint256 total) {
-        address user = _authSender(token);
-        if (user == address(0)) revert Unauthorized();
-        HistoryEntry[] storage all = history[user];
-        total = all.length;
-
-        uint256 pageSize = limit > MAX_HISTORY_PAGE_SIZE ? MAX_HISTORY_PAGE_SIZE : limit;
-        if (total == 0 || pageSize == 0) {
-            return (new HistoryEntry[](0), total);
-        }
-
-        uint256 pageCount = (total + pageSize - 1) / pageSize;
-        uint256 start;
-        if (offset < 0) {
-            // Avoid negating type(int256).min.
-            uint256 pageFromEnd = uint256(-(offset + 1)) + 1;
-            if (pageFromEnd > pageCount) {
-                return (new HistoryEntry[](0), total);
-            }
-            start = (pageCount - pageFromEnd) * pageSize;
-        } else {
-            if (uint256(offset) >= pageCount) {
-                return (new HistoryEntry[](0), total);
-            }
-            start = uint256(offset) * pageSize;
-        }
-
-        if (total - start < pageSize) {
-            pageSize = total - start;
-        }
-
-        page = new HistoryEntry[](pageSize);
-        for (uint256 i = 0; i < pageSize; i++) {
-            page[i] = all[start + i];
-        }
+    function ledgerTotalOf(bytes32 tokenId) external view returns (uint256) {
+        return _ledgerTotal[tokenId];
     }
 
-    /**
-     * @dev Reserved storage gap for future upgrades.
-     * This allows adding new state variables without shifting storage layout.
-     */
-    uint256[40] private __gap;
+    /// @dev No-op for any tokenId other than `ROSE_TOKEN_ID`: `NativeEVM` and
+    ///      `ERC20` deposit paths stay out of the bridge ledger by design.
+    ///      `_decreaseLedgerTotal` lives in `BridgeModule` (sole caller is
+    ///      `requestBridgeWithdrawal`); leaving it out of `Accounting` saves
+    ///      bytecode in the size-pressed root runtime.
+    function _increaseLedgerTotal(bytes32 tokenId, uint256 amount) internal {
+        if (tokenId == ROSE_TOKEN_ID) _ledgerTotal[tokenId] += amount;
+    }
 }

@@ -1,5 +1,6 @@
 """Main entry point for the Accounting Module API."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -17,7 +18,11 @@ from src.auth.client_registry import get_client_registry
 from src.auth.jwt_keys import get_jwt_key_manager
 from src.auth.siwe_config import get_siwe_configs
 from src.config import load_settings
+from src.config.bridge_validation import validate_bridge_settings
+from src.services import bridge_route_reconciler
 from src.services.accounting_contract import get_accounting_contract_service
+from src.services.bridge_startup_check import verify_bridge_runtime
+from src.services.custody_tx_executor import get_custody_tx_executor
 from src.services.deposit_processor import get_deposit_processor
 from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
 from src.services.withdrawal_processor import get_withdrawal_processor
@@ -74,6 +79,9 @@ async def lifespan(_app: FastAPI):
     logger.info("Accounting Module API starting...")
     logger.info("Accounting contract: %s", settings.accounting_contract_address)
 
+    validate_bridge_settings(settings)
+    logger.info("Bridge settings validated")
+
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()
     await jwt_key_manager.initialize()
@@ -94,30 +102,77 @@ async def lifespan(_app: FastAPI):
             raise
         logger.info("AuthToken encryption key synced to contract")
 
+        await verify_bridge_runtime(get_accounting_contract_service(), settings)
+        logger.info("Bridge runtime checks passed")
+
         await bootstrap_rofl_signer_address(get_accounting_contract_service())
 
-    withdrawal_processor = get_withdrawal_processor()
-    await withdrawal_processor.start()
-    logger.info("Withdrawal processor started")
+    # Custody-tx executor owns every outbound tx signed by Accounting.evmAddress().
+    # Must start before the withdrawal processor — the processor enqueues into
+    # this executor instead of broadcasting directly.
+    custody_executor = get_custody_tx_executor(get_accounting_contract_service())
+    if not os.getenv("DISABLE_ROFL_KEYS"):
+        await custody_executor.verify_startup_gas_balances()
+    await custody_executor.reconcile_on_startup()
+    # Replay on-chain reservations (BridgeBurnReserved + withdrawal queue)
+    # so a wiped state dir does not leave the nonce-gap guard permanently
+    # blocking the chain.
+    await custody_executor.load_from_onchain_reservations()
 
     # Initialize deposit processor — failure here means broken config, crash startup.
     processor = get_deposit_processor()
     logger.info("Deposit processor initialized")
 
-    # Resume incomplete sweeps from a previous crash — best-effort, don't block startup.
+    # Resume incomplete sweeps BEFORE starting the executor's chain loops.
+    # Preflight callables do not survive a ROFL restart; resume re-enqueues
+    # bridge-in records to register fresh preflights, so the chain loops do
+    # not mark them AWAITING_CLEAR on first contact. Best-effort — don't block
+    # startup on transient RPC failures.
     try:
         await processor.resume_incomplete_sweeps()
         logger.info("Sweep recovery complete")
     except Exception:
         logger.exception("Sweep recovery failed — incomplete sweeps may need manual attention")
 
+    await custody_executor.start()
+    logger.info("Custody-tx executor started")
+
+    withdrawal_processor = get_withdrawal_processor()
+    await withdrawal_processor.start()
+    logger.info("Withdrawal processor started")
+
     # Periodic retry for SWEPT records whose credit failed (at startup or runtime).
     processor.start_recovery_loop()
 
+    # Skipped under DISABLE_ROFL_KEYS — the reconciler issues ROFL-signed writes.
+    reconciler_stop = asyncio.Event()
+    reconciler_task: asyncio.Task | None = None
+    if not os.getenv("DISABLE_ROFL_KEYS"):
+        reconciler_task = asyncio.create_task(
+            bridge_route_reconciler.run_loop(
+                reconciler_stop,
+                accounting=get_accounting_contract_service(),
+                sweep_engine=processor.sweep_engine,
+                custody_executor=custody_executor,
+                settings=settings,
+            ),
+            name="bridge-route-reconciler",
+        )
+
     yield
 
+    reconciler_stop.set()
+    if reconciler_task is not None:
+        try:
+            await asyncio.wait_for(reconciler_task, timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning("Bridge route reconciler did not exit within 30s; cancelling")
+            reconciler_task.cancel()
+        except Exception:
+            logger.exception("Bridge route reconciler exited with error")
     await processor.stop()
     await withdrawal_processor.stop()
+    await custody_executor.stop()
     logger.info("Accounting Module API shutting down...")
 
 

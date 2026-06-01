@@ -23,6 +23,13 @@ class Settings:
     withdrawal_resolution_timeout: int = 60
     min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei
 
+    # Bridge — xROSE / ROFLBridge (chain-agnostic via CREATE3)
+    rofl_bridge_address: str = ""
+    xrose_address: str = ""
+    bridge_mint_limit_wei: int = 0
+    bridge_burn_limit_wei: int = 0
+    bridge_route_reconcile_interval: int = 30
+
     auth_token_validity_seconds: int = 24 * 60 * 60
     # Allow-list of SIWE domains. A SIWE message's ``domain`` field must match
     # one of these (after canonicalization) for authentication to succeed.

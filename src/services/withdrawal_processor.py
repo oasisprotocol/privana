@@ -12,7 +12,16 @@ from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
 from src.config import CHAIN_NAMES, load_settings
-from src.services.accounting_contract import AccountingContractService
+from src.config.bridge_validation import destination_chain_ids
+from src.services.accounting_contract import (
+    AccountingContractService,
+    _decode_bridge_tx_identifier,
+)
+from src.services.custody_tx_executor import (
+    CustodyTxExecutor,
+    CustodyTxKind,
+    CustodyTxRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +43,9 @@ def decode_contract_error(exc: Exception) -> tuple[str, str]:
 
 _MIN_RPC_INTERVAL = 0.1
 
+# A handful of consecutive fetch failures means the processor is blind, not idle.
+_PENDING_POLL_CRITICAL_THRESHOLD = 5
+
 
 class WithdrawalProcessor:
     """Polls the Accounting contract for pending withdrawals, resolves them on
@@ -45,7 +57,7 @@ class WithdrawalProcessor:
     transactions have not yet landed on-chain.
     """
 
-    def __init__(self):
+    def __init__(self, custody_executor: Optional[CustodyTxExecutor] = None):
         self.settings = load_settings()
         self.accounting_service = AccountingContractService(self.settings)
         self._contract_address = Web3.to_checksum_address(self.settings.accounting_contract_address)
@@ -58,11 +70,11 @@ class WithdrawalProcessor:
 
         self._is_running = False
         self._task: Optional[asyncio.Task] = None
-        # Track highest processed withdrawal index per chain (for sequential processing)
-        self._chain_high_water_mark: Dict[int, int] = {}
         self._last_rpc_call: float = 0
         self._destination_web3: Dict[int, AsyncWeb3] = {}
         self._evm_address: Optional[str] = None
+        self._custody_executor = custody_executor
+        self._consecutive_poll_failures = 0
 
     async def _rate_limited_call(self, coro_factory):
         """Execute an async call with rate limiting and retries.
@@ -108,6 +120,59 @@ class WithdrawalProcessor:
                 lambda: self._contract.functions.evmAddress().call()
             )
         return self._evm_address
+
+    def _get_custody_executor(self) -> CustodyTxExecutor:
+        if self._custody_executor is None:
+            from src.services.custody_tx_executor import get_custody_tx_executor
+
+            self._custody_executor = get_custody_tx_executor(self.accounting_service)
+        return self._custody_executor
+
+    def _derive_kind(self, chain_id: int, is_bridge_asset: bool) -> CustodyTxKind:
+        if is_bridge_asset:
+            return (
+                CustodyTxKind.SAPPHIRE_RELEASE
+                if chain_id == self.settings.sapphire_chain_id
+                else CustodyTxKind.BASE_MINT
+            )
+        return CustodyTxKind.NORMAL_WITHDRAWAL
+
+    @staticmethod
+    def _decode_normal_withdrawal_nonce(tx_identifier: bytes) -> int:
+        return decode(["uint64"], tx_identifier)[0]
+
+    async def _enqueue_for_executor(
+        self,
+        chain_id: int,
+        evm_nonce: int,
+        kind: CustodyTxKind,
+        id: str,
+        signed_tx: bytes,
+        *,
+        route_address: Optional[str] = None,
+        max_gas_cost: Optional[int] = None,
+        withdrawal_index: Optional[int] = None,
+        to_address: Optional[str] = None,
+        amount: Optional[int] = None,
+    ) -> None:
+        # Bridge metadata is threaded onto the request so the executor's
+        # kind-routed preflight can reconstruct policy gates after a restart
+        # without relying on in-memory closures.
+        executor = self._get_custody_executor()
+        await executor.enqueue(
+            CustodyTxRequest(
+                chain_id=chain_id,
+                evm_nonce=evm_nonce,
+                kind=kind,
+                id=id,
+                signed_tx=bytes(signed_tx),
+                route_address=route_address,
+                max_gas_cost=max_gas_cost,
+                withdrawal_index=withdrawal_index,
+                to_address=to_address,
+                amount=amount,
+            )
+        )
 
     async def _catch_up_missing_broadcasts(self, chain_ids: Optional[List[int]] = None):
         """Find and broadcast any resolved-but-not-broadcast withdrawals.
@@ -205,39 +270,69 @@ class WithdrawalProcessor:
                 )
                 continue
 
-            # Decode nonce from txIdentifier
-            nonce = decode(["uint64"], tx_identifier)[0]
-
-            # Get chain_id for this withdrawal
-            token_id_bytes = result[4]
-            try:
-                context = await self.accounting_service._get_token_context(HexBytes(token_id_bytes))
-                withdrawal_chain_id = context.chain_id
-            except Exception as e:
-                logger.warning(f"Withdrawal #{index}: failed to get token context - {e}")
-                withdrawal_chain_id = 0
+            # Bridge txIdentifier (128 bytes) layout is
+            #   abi.encode(uint256 destChainId, uint64 destTxNonce, address, uint256)
+            # so decoding the first uint64 slot reads destChainId, not the
+            # nonce we want. Non-bridge withdrawals carry abi.encode(uint64).
+            is_bridge_asset = len(tx_identifier) >= 128
+            route_address: Optional[str] = None
+            max_gas_cost: int = 0
+            if is_bridge_asset:
+                dest_chain_id, nonce, route_address, max_gas_cost = _decode_bridge_tx_identifier(
+                    tx_identifier
+                )
+                # BridgeAsset tokens have TokenContext.chain_id=None, so
+                # routing must come from the decoded destChainId.
+                withdrawal_chain_id = dest_chain_id
+            else:
+                nonce = decode(["uint64"], tx_identifier)[0]
+                token_id_bytes = result[4]
+                try:
+                    context = await self.accounting_service._get_token_context(
+                        HexBytes(token_id_bytes)
+                    )
+                    withdrawal_chain_id = context.chain_id
+                except Exception as e:
+                    logger.warning(f"Withdrawal #{index}: failed to get token context - {e}")
+                    withdrawal_chain_id = 0
 
             if withdrawal_chain_id != chain_id or nonce not in target_nonces:
                 continue
 
-            # Found a missing one - broadcast it
-            logger.info(f"Withdrawal #{index}: broadcasting missing nonce {nonce}")
-            signed_tx = await self._rate_limited_call(
-                lambda idx=index: contract_reader.functions.resolveWithdrawal(idx).call()
-            )
-            try:
-                tx_hash = await self._rate_limited_call(
-                    lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
+            # Sapphire records defer signing — preflight regenerates per attempt.
+            logger.info(f"Withdrawal #{index}: enqueueing missing nonce {nonce}")
+            bridge_chain_ids = destination_chain_ids(self.settings)
+            sapphire_chain_id = self.settings.sapphire_chain_id
+            if is_bridge_asset and chain_id in bridge_chain_ids:
+                signed_tx = await self._rate_limited_call(
+                    lambda idx=index: self.accounting_service.resolve_bridge_withdrawal(idx)
                 )
-                logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
+            elif is_bridge_asset and chain_id == sapphire_chain_id:
+                signed_tx = b""
+            else:
+                signed_tx = await self._rate_limited_call(
+                    lambda idx=index: contract_reader.functions.resolveWithdrawal(idx).call()
+                )
+            try:
+                kind = self._derive_kind(
+                    chain_id=chain_id,
+                    is_bridge_asset=is_bridge_asset,
+                )
+                await self._enqueue_for_executor(
+                    chain_id=chain_id,
+                    evm_nonce=nonce,
+                    kind=kind,
+                    id=str(index),
+                    signed_tx=signed_tx,
+                    route_address=(route_address if is_bridge_asset else None),
+                    max_gas_cost=(max_gas_cost if is_bridge_asset else None),
+                    withdrawal_index=index,
+                    to_address=(result[1] if is_bridge_asset else None),
+                    amount=(int(result[2]) if is_bridge_asset else None),
+                )
                 found_nonces.add(nonce)
             except Exception as exc:
-                error_str = str(exc).lower()
-                if "nonce too low" in error_str or "already known" in error_str:
-                    logger.info(f"Withdrawal #{index}: already broadcast")
-                    found_nonces.add(nonce)
-                else:
-                    logger.error(f"Withdrawal #{index}: broadcast failed - {exc}")
+                logger.error(f"Withdrawal #{index}: enqueue failed - {exc}")
 
             if index > 0 and index % 100 == 0:
                 logger.info(
@@ -258,12 +353,39 @@ class WithdrawalProcessor:
             pending = result.get("pending", [])
             current_block = result.get("current_block", 0)
 
-            # Filter by block delay and not already processed (per-chain high water mark)
+            # Skip indices the executor already tracks (any status): the executor
+            # halts on blocking statuses, so re-pulling a stuck index only churns
+            # redundant resolve attempts. Double-spend is prevented by enqueue's
+            # per-(chain_id, evm_nonce) idempotency and the on-chain idempotent
+            # resolve — not by this filter. Fail closed on read errors: a chain
+            # whose record set is unknown is skipped this poll.
+            known_by_chain: Dict[int, Set[int]] = {}
+            skip_chains: Set[int] = set()
+            executor = self._get_custody_executor()
+            for w in pending:
+                cid = w.get("chain_id")
+                if not cid or cid in known_by_chain or cid in skip_chains:
+                    continue
+                try:
+                    records = executor.get_records_for_chain(cid)
+                except Exception:
+                    logger.exception(
+                        "Could not read executor records for chain %s; "
+                        "skipping pending withdrawals for this chain this poll",
+                        cid,
+                    )
+                    skip_chains.add(cid)
+                    continue
+                known_by_chain[cid] = {
+                    r.withdrawal_index for r in records if r.withdrawal_index is not None
+                }
+
             eligible = [
                 w
                 for w in pending
                 if (current_block - w["block_number"] >= 1)
-                and w["index"] > self._chain_high_water_mark.get(w.get("chain_id", 0), -1)
+                and w.get("chain_id", 0) not in skip_chains
+                and w["index"] not in known_by_chain.get(w.get("chain_id", 0), set())
             ]
 
             # Group by chain_id and sort by index within each chain
@@ -272,7 +394,16 @@ class WithdrawalProcessor:
             for w in eligible:
                 chain_id = w.get("chain_id")
                 if not chain_id:
-                    # Token not registered - already logged in accounting_contract.py
+                    if w.get("is_bridge_asset"):
+                        # BridgeAsset records must carry a decoded destChainId from
+                        # the on-chain txIdentifier by the time they reach this loop.
+                        # A missing chain_id here means the upstream decoder did not
+                        # run — a cross-layer contract violation, not a routing issue.
+                        logger.error(
+                            f"Bridge withdrawal #{w.get('index')} missing decoded "
+                            f"destChainId — upstream txIdentifier decode did not run"
+                        )
+                    # else: token not registered - already logged in accounting_contract.py
                     # Skip to avoid infinite retries; requires token registration to fix
                     continue
                 if chain_id not in by_chain:
@@ -283,10 +414,21 @@ class WithdrawalProcessor:
             for chain_id in by_chain:
                 by_chain[chain_id].sort(key=lambda x: x["index"])
 
+            self._consecutive_poll_failures = 0
             return by_chain
 
-        except Exception as e:
-            logger.error(f"Error getting pending withdrawals: {e}")
+        except Exception:
+            self._consecutive_poll_failures += 1
+            logger.exception(
+                "Error getting pending withdrawals (consecutive=%d); treating as no work this poll",
+                self._consecutive_poll_failures,
+            )
+            if self._consecutive_poll_failures == _PENDING_POLL_CRITICAL_THRESHOLD:
+                logger.critical(
+                    "Pending-withdrawal fetch failed %d consecutive polls — withdrawal "
+                    "processing is stalled; operator attention required",
+                    self._consecutive_poll_failures,
+                )
             return {}
 
     async def _resolve_and_broadcast(self, withdrawal: Dict) -> bool:
@@ -314,12 +456,21 @@ class WithdrawalProcessor:
             )
             is_resolved = withdrawal_data[5]
 
-            # Step 2: If not resolved, submit resolveWithdrawal and wait
+            # Step 2: If not resolved, submit the resolve tx and wait.
+            # BridgeAsset must use resolveBridgeWithdrawal — resolveWithdrawal
+            # reverts UnsupportedTokenType.
+            is_bridge_asset = bool(withdrawal.get("is_bridge_asset"))
             if not is_resolved:
-                logger.info(f"Withdrawal #{index}: submitting resolveWithdrawal")
-                await self._rate_limited_call(
-                    lambda: self.accounting_service.resolve_withdrawal(index)
-                )
+                if is_bridge_asset:
+                    logger.info(f"Withdrawal #{index}: submitting resolveBridgeWithdrawal")
+                    await self._rate_limited_call(
+                        lambda: self.accounting_service.submit_resolve_bridge_withdrawal(index)
+                    )
+                else:
+                    logger.info(f"Withdrawal #{index}: submitting resolveWithdrawal")
+                    await self._rate_limited_call(
+                        lambda: self.accounting_service.resolve_withdrawal(index)
+                    )
                 logger.info(f"Withdrawal #{index}: submitted")
 
                 # Wait for resolution (poll until resolved)
@@ -339,40 +490,52 @@ class WithdrawalProcessor:
                     logger.warning(f"Withdrawal #{index}: timeout waiting for resolution")
                     return False
 
-            # Step 3: Get signedTx by calling resolveWithdrawal (idempotent)
+            # BridgeAsset must use `resolveBridgeWithdrawal` — `resolveWithdrawal`
+            # reverts UnsupportedTokenType. Sapphire defers signing to the preflight.
             logger.info(f"Withdrawal #{index}: getting signed transaction")
-            signed_tx = await self._rate_limited_call(
-                lambda: contract_reader.functions.resolveWithdrawal(index).call()
+            bridge_chain_ids = destination_chain_ids(self.settings)
+            sapphire_chain_id = self.settings.sapphire_chain_id
+            if is_bridge_asset and chain_id in bridge_chain_ids:
+                signed_tx = await self._rate_limited_call(
+                    lambda: self.accounting_service.resolve_bridge_withdrawal(index)
+                )
+            elif is_bridge_asset and chain_id == sapphire_chain_id:
+                signed_tx = b""
+            else:
+                signed_tx = await self._rate_limited_call(
+                    lambda: contract_reader.functions.resolveWithdrawal(index).call()
+                )
+
+            # Step 4: Hand the signed tx to the custody executor.
+            logger.info(f"Withdrawal #{index}: enqueueing for executor on {chain_name}")
+            tx_identifier = withdrawal_data[6]
+            if is_bridge_asset:
+                evm_nonce = int(withdrawal["dest_tx_nonce"])
+            else:
+                evm_nonce = self._decode_normal_withdrawal_nonce(tx_identifier)
+            kind = self._derive_kind(chain_id=chain_id, is_bridge_asset=is_bridge_asset)
+            await self._enqueue_for_executor(
+                chain_id=chain_id,
+                evm_nonce=evm_nonce,
+                kind=kind,
+                id=str(index),
+                signed_tx=signed_tx,
+                route_address=(withdrawal.get("route_address") if is_bridge_asset else None),
+                max_gas_cost=(int(withdrawal.get("max_gas_cost", 0)) if is_bridge_asset else None),
+                withdrawal_index=index,
+                to_address=(withdrawal_data[1] if is_bridge_asset else None),
+                amount=(int(withdrawal_data[2]) if is_bridge_asset else None),
             )
 
-            # Step 4: Broadcast to destination chain
-            logger.info(f"Withdrawal #{index}: broadcasting to {chain_name}")
-            tx_hash = await self._rate_limited_call(
-                lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
-            )
-            logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
-
-            self._chain_high_water_mark[chain_id] = max(
-                self._chain_high_water_mark.get(chain_id, -1), index
-            )
             return True
 
         except Exception as exc:
-            error_str = str(exc).lower()
             selector, error_name = decode_contract_error(exc)
-
-            if "nonce too low" in error_str or "already known" in error_str:
-                logger.info(f"Withdrawal #{index}: already broadcast to {chain_name}")
-                self._chain_high_water_mark[chain_id] = max(
-                    self._chain_high_water_mark.get(chain_id, -1), index
-                )
-                return True
-            elif selector:
+            if selector:
                 logger.error(f"Withdrawal #{index}: contract error - {error_name}")
                 return False
-            else:
-                logger.error(f"Withdrawal #{index}: failed - {exc}")
-                return False
+            logger.error(f"Withdrawal #{index}: failed - {exc}")
+            return False
 
     async def _run_processor(self):
         """Main processing loop."""
@@ -447,7 +610,6 @@ class WithdrawalProcessor:
             except asyncio.CancelledError:
                 pass
 
-        self._chain_high_water_mark.clear()
         logger.info("Withdrawal processor stopped")
 
 

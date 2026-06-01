@@ -32,6 +32,9 @@ from src.models.accounting import (
     BalanceResponse,
     BatchBalancesRequest,
     BatchBalancesResponse,
+    BridgeWithdrawQuoteRequest,
+    BridgeWithdrawQuoteResponse,
+    BridgeWithdrawSubmitRequest,
     DepositAddressRequest,
     DepositAddressResponse,
     DepositCheckRequest,
@@ -69,6 +72,8 @@ from src.services.accounting_contract import (
     SubmissionResult,
     get_accounting_contract_service,
 )
+from src.services.bridge_quote import BridgeQuoteError, get_bridge_quote_service
+from src.services.bridge_submit import BridgeSubmitError, get_bridge_submit_service
 from src.services.deposit_processor import get_deposit_processor
 
 logger = logging.getLogger(__name__)
@@ -505,6 +510,55 @@ async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissio
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
+@router.post(
+    "/bridge/withdrawals/quote",
+    response_model=BridgeWithdrawQuoteResponse,
+)
+async def bridge_withdrawal_quote(
+    payload: BridgeWithdrawQuoteRequest,
+) -> BridgeWithdrawQuoteResponse:
+    """Quote a bridge withdrawal: gross/max-gas/net + EIP-712 message to sign."""
+
+    try:
+        return await get_bridge_quote_service().build_quote(payload)
+    except BridgeQuoteError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ContractLogicError as exc:
+        logger.error("Contract revert in bridge_withdrawal_quote: %s", exc)
+        raise HTTPException(status_code=422, detail="Contract call failed") from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to build bridge withdrawal quote")
+        raise HTTPException(status_code=502, detail="Upstream RPC unavailable") from exc
+
+
+@router.post(
+    "/bridge/withdrawals/submit",
+    response_model=TransactionSubmissionResponse,
+)
+async def bridge_withdrawal_submit(
+    payload: BridgeWithdrawSubmitRequest,
+) -> TransactionSubmissionResponse:
+    """Submit a user-signed bridge withdrawal. Validates against the live quote config."""
+
+    try:
+        submission = await get_bridge_submit_service().submit(payload)
+        return _wrap_submission(submission)
+    except BridgeSubmitError as exc:
+        logger.warning("bridge_withdrawal_submit rejected for %s: %s", payload.user_address, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ContractLogicError as exc:
+        logger.error("Contract revert in bridge_withdrawal_submit: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Bridge withdrawal request reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to submit bridge withdrawal")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
 @router.get("/withdraw/pending/{user_address}", response_model=PendingWithdrawalsResponse)
 async def get_pending_withdrawals(user_address: str) -> PendingWithdrawalsResponse:
     """Get all pending (unresolved) withdrawal requests for a user."""
@@ -610,7 +664,7 @@ async def get_history(
 ) -> HistoryResponse:
     """Get one page of authenticated user history."""
     try:
-        result = await _service.get_history(offset, limit, auth.token)
+        result = await _service.get_history(offset, limit, auth.token, auth.user_address)
         return HistoryResponse(**result)
     except ContractLogicError as exc:
         logger.warning("History token validation failed: %s", exc)

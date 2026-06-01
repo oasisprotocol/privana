@@ -8,6 +8,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from eth_abi import decode as _abi_decode
+from eth_abi.exceptions import DecodingError
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from eth_account.signers.local import LocalAccount
@@ -17,10 +19,12 @@ from sapphirepy import sapphire
 from web3 import AsyncWeb3, Web3
 from web3.constants import ADDRESS_ZERO
 from web3.contract import AsyncContract
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ACCOUNTING_ABI
+from src.abi.accounting_history import ACCOUNTING_HISTORY_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient
 from src.config import (
@@ -30,9 +34,15 @@ from src.config import (
     NATIVE_TOKEN_SYMBOLS,
     load_settings,
 )
-from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_chain_type
+from src.config.tokens import get_rose_token_id as _get_rose_token_id
+from src.models.accounting import (
+    HISTORY_KIND_WIRE_NAMES,
+    HistoryKind,
+    parse_chain_type,
+)
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
+from src.utils.eth_logs import paginated_get_logs
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +55,10 @@ _HISTORY_DEPOSIT_PAYLOAD_LEN = _HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN + _HI
 _HISTORY_COUNTERPARTY_PAYLOAD_LEN = (
     _HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN + _HISTORY_ADDRESS_LEN
 )
+_HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN = _HISTORY_COUNTERPARTY_PAYLOAD_LEN + _HISTORY_ADDRESS_LEN
 _INT256_MIN = -(2**255)
 _INT256_MAX = 2**255 - 1
+_HISTORY_MODULE_ID = HexBytes(Web3.keccak(text="privana.accounting.historyModule.v1")).to_0x_hex()
 
 # Cache TTL settings (in seconds)
 _TOKEN_CONTEXT_CACHE_TTL = 3600  # 1 hour - token metadata rarely changes
@@ -61,6 +73,12 @@ _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
 # the API layer, caching could be added here for performance.
+
+BRIDGE_BURN_RESERVATION_LOOKBACK_BLOCKS = int(
+    os.getenv("BRIDGE_BURN_RESERVATION_LOOKBACK_BLOCKS", "10000")
+)
+
+_BRIDGE_BURN_LOOKBACK_UNSET: Any = object()
 
 
 def _ensure_hex(value: str) -> str:
@@ -77,6 +95,26 @@ def _to_prefixed_hex(value: Any) -> str:
     return HexBytes(value).to_0x_hex().lower()
 
 
+def _decode_bridge_tx_identifier(
+    tx_identifier: bytes,
+) -> tuple[int, int, ChecksumAddress, int]:
+    """Decode a BridgeAsset withdrawal's txIdentifier.
+
+    Returns ``(dest_chain_id, dest_tx_nonce, route_address, max_gas_cost)`` per
+    the on-chain encoding ``abi.encode(uint256, uint64, address, uint256)``.
+    ``route_address`` is returned EIP-55 checksummed.
+    """
+    dest_chain_id, dest_tx_nonce, route_address, max_gas_cost = _abi_decode(
+        ["uint256", "uint64", "address", "uint256"], tx_identifier
+    )
+    return (
+        int(dest_chain_id),
+        int(dest_tx_nonce),
+        Web3.to_checksum_address(route_address),
+        int(max_gas_cost),
+    )
+
+
 @dataclass
 class SubmissionResult:
     """Plain DTO for transaction submission results."""
@@ -90,9 +128,27 @@ class SubmissionResult:
 class TokenContext:
     """Derived metadata needed to craft withdrawal transactions."""
 
-    chain_id: int
+    chain_id: Optional[int]
     token_address: Optional[ChecksumAddress]
     is_native: bool
+    is_bridge_asset: bool = False
+
+
+@dataclass(frozen=True)
+class BridgeBurnReservation:
+    """Decoded ``BridgeBurnReserved`` event row.
+
+    Returned by the paginated event scan in ``list_bridge_burn_reservations``;
+    chain filtering happens in Python because the event indexes only
+    ``depositId``. Single-deposit lookups should read canonical state via
+    ``get_bridge_burn_nonce`` instead.
+    """
+
+    deposit_id: bytes
+    chain_id: int
+    bridge: ChecksumAddress
+    amount: int
+    nonce: int
 
 
 class AccountingContractService:
@@ -104,6 +160,7 @@ class AccountingContractService:
         self.chain_id = self.settings.sapphire_chain_id
         self.gas_limit = self.settings.accounting_gas_limit
         self.contract_address = _to_checksum(self.settings.accounting_contract_address)
+        self.history_module_address = _to_checksum(ADDRESS_ZERO)
         self.contract = self.w3.eth.contract(address=self.contract_address, abi=ACCOUNTING_ABI)
         self.sapphire_rpc_url = self.settings.sapphire_rpc_url
 
@@ -118,6 +175,8 @@ class AccountingContractService:
 
         self._confidential_reader_w3: Optional[AsyncWeb3] = None
         self._confidential_contract_reader: Optional[AsyncContract] = None
+        self._confidential_history_contract_reader: Optional[AsyncContract] = None
+        self._history_module_validated = False
         self._deposit_address: Optional[str] = None
         self._siwe_domain: Optional[str] = None
         self._siwe_auth_address: Optional[ChecksumAddress] = None
@@ -293,6 +352,33 @@ class AccountingContractService:
         )
         return self._siwe_auth_reader
 
+    def _set_history_module_address(self, module_address: ChecksumAddress) -> None:
+        self.history_module_address = module_address
+        self._confidential_history_contract_reader = None
+
+    async def _validate_history_module_address(self, module_address: ChecksumAddress) -> None:
+        if module_address == _to_checksum(ADDRESS_ZERO):
+            raise ValueError("AccountingHistoryModule is not configured")
+        if self.reader_w3 is None:
+            raise ValueError(
+                "SAPPHIRE_RPC_URL must be configured to read AccountingHistoryModule settings"
+            )
+
+        code = await self.reader_w3.eth.get_code(module_address)
+        if len(code) == 0:
+            raise ValueError("AccountingHistoryModule address has no contract code")
+
+        history_reader = self.reader_w3.eth.contract(
+            address=module_address,
+            abi=ACCOUNTING_HISTORY_ABI,
+        )
+        try:
+            module_id = HexBytes(await history_reader.functions.MODULE_ID().call()).to_0x_hex()
+        except (BadFunctionCallOutput, ContractLogicError, DecodingError) as exc:
+            raise ValueError("Could not read AccountingHistoryModule MODULE_ID") from exc
+        if module_id != _HISTORY_MODULE_ID:
+            raise ValueError("AccountingHistoryModule has unexpected module id")
+
     async def _get_confidential_reader_contract(self) -> AsyncContract:
         if self._confidential_contract_reader is not None:
             return self._confidential_contract_reader
@@ -326,6 +412,37 @@ class AccountingContractService:
             address=self.contract_address, abi=ACCOUNTING_ABI
         )
         return self._confidential_contract_reader
+
+    async def _resolve_history_module_address(self) -> ChecksumAddress:
+        contract_reader = self._get_reader_contract()
+        module_address = _to_checksum(await contract_reader.functions.historyModule().call())
+
+        if module_address != self.history_module_address:
+            await self._validate_history_module_address(module_address)
+            self._set_history_module_address(module_address)
+            self._history_module_validated = True
+            return module_address
+
+        if not getattr(self, "_history_module_validated", False):
+            await self._validate_history_module_address(module_address)
+            self._history_module_validated = True
+
+        return module_address
+
+    async def _get_confidential_history_reader_contract(self) -> AsyncContract:
+        await self._resolve_history_module_address()
+        if self._confidential_history_contract_reader is not None:
+            return self._confidential_history_contract_reader
+
+        await self._get_confidential_reader_contract()
+        if self._confidential_reader_w3 is None:
+            raise ValueError("Confidential reader is not initialized")
+
+        self._confidential_history_contract_reader = self._confidential_reader_w3.eth.contract(
+            address=self.contract_address,
+            abi=ACCOUNTING_HISTORY_ABI,
+        )
+        return self._confidential_history_contract_reader
 
     async def _get_confidential_siwe_auth_reader_contract(self) -> AsyncContract:
         if self._confidential_siwe_auth_reader is not None:
@@ -365,22 +482,6 @@ class AccountingContractService:
         self._chain_web3[chain_id] = web3
         return web3
 
-    @staticmethod
-    def _as_raw_tx_bytes(value: Any) -> bytes:
-        if isinstance(value, HexBytes):
-            return bytes(value)
-        if isinstance(value, bytes):
-            return value
-        if isinstance(value, str):
-            return bytes(HexBytes(_ensure_hex(value)))
-        raise ValueError("Unexpected raw transaction payload type")
-
-    async def _send_raw_transaction(self, chain_id: int, raw_tx: Any) -> str:
-        chain_w3 = await self._get_chain_web3(chain_id)
-        raw_bytes = self._as_raw_tx_bytes(raw_tx)
-        tx_hash = await chain_w3.eth.send_raw_transaction(raw_bytes)
-        return HexBytes(tx_hash).hex()
-
     async def _get_token_context(self, token: HexBytes) -> TokenContext:
         return await self._token_context_cache.get_or_set_async(
             token.hex(), lambda: self._fetch_token_context(token)
@@ -390,6 +491,10 @@ class AccountingContractService:
         """Fetch token context from contract (uncached)."""
         contract = self._get_reader_contract()
         token_type, token_data = await contract.functions.tokens(bytes(token)).call()
+
+        chain_id: Optional[int]
+        token_address: Optional[ChecksumAddress]
+        is_bridge_asset = False
 
         if token_type == 0:
             chain_id = int.from_bytes(token_data[:32], byteorder="big")
@@ -410,6 +515,16 @@ class AccountingContractService:
             token_address_bytes = token_data[32:52]
             token_address = _to_checksum("0x" + token_address_bytes.hex())
             is_native = False
+        elif token_type == 2:
+            # BridgeAsset (e.g. ROSE): the on-chain `data` is just the UTF-8
+            # symbol — there is no canonical chain_id or contract address. The
+            # destination chain for a bridge withdrawal is decoded from the
+            # withdrawal's `txIdentifier` at grouping time; callers must NOT
+            # use `chain_id=None` here for per-chain routing.
+            chain_id = None
+            token_address = None
+            is_native = False
+            is_bridge_asset = True
         else:
             raise ValueError(f"Unsupported token type: {token_type}")
 
@@ -417,6 +532,7 @@ class AccountingContractService:
             chain_id=chain_id,
             token_address=token_address,
             is_native=is_native,
+            is_bridge_asset=is_bridge_asset,
         )
 
     async def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
@@ -548,6 +664,14 @@ class AccountingContractService:
         ).call()
         return Web3.to_checksum_address(address)
 
+    async def get_rose_token_id(self) -> bytes:
+        """Read and cache Accounting.ROSE_TOKEN_ID via the shared token helper."""
+        return await _get_rose_token_id(self)
+
+    async def get_custody_address(self) -> str:
+        """Return the custody EOA address used by sweep destinations."""
+        return Web3.to_checksum_address(await self._get_deposit_address())
+
     async def credit_deposit(
         self,
         beneficiary: str,
@@ -621,6 +745,194 @@ class AccountingContractService:
         ).call()
         return signed_tx
 
+    async def generate_sweep_erc20_to_bridge(
+        self,
+        beneficiary: str,
+        chain_type: str,
+        version: int,
+        chain_id: int,
+        token_address: str,
+        amount: int,
+        source_chain_nonce: int,
+        gas_price: int,
+    ) -> bytes:
+        """Sign an ERC20 sweep whose recipient is the configured ROFLBridge route.
+
+        Unlike ``generate_sweep_erc20`` (which targets the custody EOA), this
+        helper routes the transfer to ``roflBridgeAddress[84532]`` so the bridge
+        contract can call ``burn`` against its own balance afterwards.
+        """
+        user = self._require_address(beneficiary, "beneficiary")
+        token_addr = self._require_address(token_address, "token_address")
+        chain_type_enum = parse_chain_type(chain_type)
+        contract = await self._get_confidential_reader_contract()
+        signed_tx = await contract.functions.generateSweepERC20TransferToBridge(
+            user,
+            chain_type_enum.value,
+            version,
+            chain_id,
+            token_addr,
+            amount,
+            source_chain_nonce,
+            gas_price,
+        ).call()
+        return signed_tx
+
+    async def reserve_bridge_burn(
+        self,
+        deposit_id: bytes,
+        chain_id: int,
+        bridge: str,
+        amount: int,
+    ) -> SubmissionResult:
+        """Reserve a custody-EOA burn nonce on Sapphire for ``deposit_id``.
+
+        Submitted through ROFL. The reservation lands in the
+        ``bridgeBurnRequests[depositId]`` mapping and emits
+        ``BridgeBurnReserved(depositId, chainId, bridge, amount, nonce)``;
+        ``get_bridge_burn_nonce`` reads the canonical mapping value via the
+        ``getBridgeBurnRequest`` view on ``BridgeModule``.
+        """
+        if len(deposit_id) != 32:
+            raise ValueError("deposit_id must be 32 bytes")
+        bridge_addr = self._require_address(bridge, "bridge")
+        amount_int = self._require_positive(amount, "amount")
+        fn = self.contract.functions.reserveBridgeBurn(
+            deposit_id, chain_id, bridge_addr, amount_int
+        )
+        return await self._submit(fn._encode_transaction_data())
+
+    async def set_rofl_bridge(self, chain_id: int, bridge: str) -> SubmissionResult:
+        """Write ``Accounting.roflBridgeAddress[chain_id] = bridge`` via ROFL.
+
+        The on-chain setter is intentionally minimal — it writes and emits
+        ``RoflBridgeUpdated``. Route-change safety (drain in-flight inbound
+        before rotating) lives off-chain in the reconciler, because the
+        ``onlyROFL`` gate already makes the TEE the only writer.
+        """
+        bridge_addr = self._require_address(bridge, "bridge")
+        fn = self.contract.functions.setRoflBridge(chain_id, bridge_addr)
+        return await self._submit(fn._encode_transaction_data())
+
+    async def get_bridge_burn_nonce(self, deposit_id: bytes) -> int:
+        """Recover the reserved EVM nonce for ``deposit_id`` from canonical state.
+
+        Reads the ``BridgeBurnRequest`` struct via the typed getter on
+        BridgeModule (routed through the Accounting proxy fallback). O(1) on
+        the contract side and unaffected by RPC log-range limits (Sapphire
+        confidential VM caps ``eth_getLogs`` at 100 blocks).
+
+        Raises ``ValueError`` if no reservation exists for ``deposit_id`` —
+        the natural signal that the reservation transaction has not been mined
+        and a bounded retry should follow.
+        """
+        if len(deposit_id) != 32:
+            raise ValueError("deposit_id must be 32 bytes")
+        contract = self._get_reader_contract()
+        _chain_id, _bridge, _amount, nonce, exists = await contract.functions.getBridgeBurnRequest(
+            deposit_id
+        ).call()
+        if not exists:
+            raise ValueError(f"No BridgeBurnRequest reservation for depositId={deposit_id.hex()}")
+        return int(nonce)
+
+    async def list_bridge_burn_reservations(
+        self,
+        chain_id: Optional[int] = None,
+        *,
+        lookback_blocks: Any = _BRIDGE_BURN_LOOKBACK_UNSET,
+    ) -> list[BridgeBurnReservation]:
+        """Return ``BridgeBurnReserved`` events, newest last; bounded by
+        ``lookback_blocks`` (defaults to the module constant; ``None`` =
+        scan from genesis).
+        """
+        contract = self._get_reader_contract()
+        if self.reader_w3 is None:
+            raise ValueError("SAPPHIRE_RPC_URL must be configured to list bridge burn reservations")
+        if lookback_blocks is _BRIDGE_BURN_LOOKBACK_UNSET:
+            lookback_blocks = BRIDGE_BURN_RESERVATION_LOOKBACK_BLOCKS
+        head = await self.reader_w3.eth.block_number
+        from_block = 0 if lookback_blocks is None else max(0, head - int(lookback_blocks))
+        events = await paginated_get_logs(
+            contract.events.BridgeBurnReserved,
+            from_block=from_block,
+            to_block=head,
+        )
+        reservations: list[BridgeBurnReservation] = []
+        for event in events:
+            args = event["args"]
+            event_chain_id = int(args["chainId"])
+            if chain_id is not None and event_chain_id != chain_id:
+                continue
+            reservations.append(
+                BridgeBurnReservation(
+                    deposit_id=bytes(args["depositId"]),
+                    chain_id=event_chain_id,
+                    bridge=Web3.to_checksum_address(args["bridge"]),
+                    amount=int(args["amount"]),
+                    nonce=int(args["nonce"]),
+                )
+            )
+        return reservations
+
+    async def generate_bridge_burn_transfer(self, deposit_id: bytes) -> bytes:
+        """Sign the ``ROFLBridge.burn(amount, depositId)`` transaction.
+
+        Reads the stored ``BridgeBurnRequest`` and reverts ``BridgeBurnNotFound``
+        until ``reserve_bridge_burn`` has been mined. The signed payload comes
+        out of the delegated ``BridgeModule.generateBridgeBurnTransfer`` and is
+        ready to be handed to the custody-tx executor.
+        """
+        if len(deposit_id) != 32:
+            raise ValueError("deposit_id must be 32 bytes")
+        contract = await self._get_confidential_reader_contract()
+        signed_tx = await contract.functions.generateBridgeBurnTransfer(deposit_id).call()
+        return signed_tx
+
+    async def resolve_bridge_withdrawal(self, index: int) -> bytes:
+        """Sign a bridge-withdrawal destination-chain tx via the delegated module.
+
+        State-idempotent: only the first call emits ``WithdrawalResolved``. The
+        signed bytes can differ between calls if ``gasPrices[destChainId]`` was
+        updated in between.
+        """
+        contract = await self._get_confidential_reader_contract()
+        signed_tx = await contract.functions.resolveBridgeWithdrawal(index).call()
+        return signed_tx
+
+    async def sign_nonce_burn(self, chain_id: int, nonce: int) -> bytes:
+        """Sign a no-op self-transfer to advance the custody EOA past a stuck nonce.
+
+        The signed payload is a custody-EOA-to-itself transfer with value 0 at the
+        given ``nonce``, used to mine through a reserved-but-un-mineable slot. The
+        contract reverts unless the owner first authorized that slot via
+        ``clearCustodyTx(..., ClearAction.BurnNonce, 0)``, and reverts
+        ``GasPriceNotSet`` if ``gasPrices[chainId] == 0``.
+        """
+        contract = await self._get_confidential_reader_contract()
+        signed_tx = await contract.functions.signNonceBurn(chain_id, nonce).call()
+        return signed_tx
+
+    async def submit_resolve_bridge_withdrawal(self, index: int) -> SubmissionResult:
+        """Submit resolveBridgeWithdrawal via ROFL (BridgeAsset variant of resolveWithdrawal)."""
+        fn = self.contract.functions.resolveBridgeWithdrawal(index)
+        return await self._submit(fn._encode_transaction_data())
+
+    async def get_gas_price(self, chain_id: int) -> int:
+        """Read ``gasPrices[chain_id]`` from the Accounting contract."""
+        contract = self._get_reader_contract()
+        return int(await contract.functions.gasPrices(chain_id).call())
+
+    async def get_clear_applied_hash(self, chain_id: int, nonce: int) -> bytes:
+        """Read the first-clear-wins coordination hash for a custody-tx clear.
+
+        Returns the bytes32 stored for the clear at ``(chain_id, nonce)``. An
+        all-zero bytes32 means no clear has been applied for that slot.
+        """
+        contract = self._get_reader_contract()
+        value = await contract.functions.clearAppliedHash(chain_id, nonce).call()
+        return bytes(value)
+
     # ------------------------------------------------------------------
     # Deposit verification helpers
     # ------------------------------------------------------------------
@@ -653,6 +965,10 @@ class AccountingContractService:
         """
         contract = self._get_reader_contract()
         return await contract.functions.processedDeposits(deposit_id).call()
+
+    async def get_rofl_bridge_address(self, chain_id: int) -> str:
+        contract = self._get_reader_contract()
+        return await contract.functions.roflBridgeAddress(chain_id).call()
 
     async def is_token_registered(self, token_id: bytes) -> bool:
         """Check if a token is registered on-chain.
@@ -913,6 +1229,30 @@ class AccountingContractService:
             submission_id=rofl_result.submission_id, status="submitted", detail=detail
         )
 
+    async def request_bridge_withdrawal(self, payload: Dict) -> SubmissionResult:
+        """Submit ``requestBridgeWithdrawal`` via ROFL."""
+        user = self._require_address(payload["user_address"], "user_address")
+        to = self._require_address(payload["to_address"], "to_address")
+        dest_chain_id = self._require_positive(payload["dest_chain_id"], "dest_chain_id")
+        route = self._require_address(payload["route_address"], "route_address")
+        amount = self._require_positive(payload["amount"], "amount")
+        max_gas_cost = self._require_positive(
+            payload["max_gas_cost"], "max_gas_cost", allow_zero=True
+        )
+        user_nonce = self._require_positive(payload["user_nonce"], "user_nonce", allow_zero=True)
+        signature = self._require_hex(payload["signature"], "signature")
+
+        fn = self.contract.functions.requestBridgeWithdrawal(
+            user, to, dest_chain_id, route, amount, max_gas_cost, user_nonce, signature
+        )
+        rofl_result = await self.rofl_client.submit_tx(
+            self._build_tx(fn._encode_transaction_data())
+        )
+        detail = f"destChainId={dest_chain_id}; routeAddress={route}"
+        return SubmissionResult(
+            submission_id=rofl_result.submission_id, status="submitted", detail=detail
+        )
+
     async def resolve_withdrawal(self, index: int) -> SubmissionResult:
         """Submit resolveWithdrawal transaction via ROFL."""
         fn = self.contract.functions.resolveWithdrawal(index)
@@ -1010,30 +1350,53 @@ class AccountingContractService:
 
                 block_number = result[3]
                 token_id_bytes = result[4]
+                tx_identifier = result[6]
 
-                # Get chain_id for this token
+                # Get chain_id for this token. BridgeAsset records intentionally
+                # carry chain_id=None on the TokenContext — the real destination
+                # chain is encoded inside the per-withdrawal txIdentifier and
+                # decoded here so per-chain grouping downstream sees a real id.
                 token_hex = HexBytes(token_id_bytes)
                 try:
                     context = await self._get_token_context(token_hex)
-                    chain_id = context.chain_id
                 except Exception as e:
                     logger.warning(
                         f"Withdrawal #{index}: unknown/invalid token 0x{token_id_bytes.hex()} - {e}"
                     )
-                    chain_id = None
+                    context = None
 
-                pending.append(
-                    {
-                        "index": index,
-                        "user_address": withdrawal_user,
-                        "to_address": result[1],
-                        "amount": str(result[2]),
-                        "token_id": "0x" + token_id_bytes.hex(),
-                        "block_number": block_number,
-                        "can_resolve": current_block - block_number >= 1,
-                        "chain_id": chain_id,
-                    }
-                )
+                record: Dict[str, Any] = {
+                    "index": index,
+                    "user_address": withdrawal_user,
+                    "to_address": result[1],
+                    "amount": str(result[2]),
+                    "token_id": "0x" + token_id_bytes.hex(),
+                    "block_number": block_number,
+                    "can_resolve": current_block - block_number >= 1,
+                    "chain_id": context.chain_id if context else None,
+                }
+
+                if context is not None and context.is_bridge_asset:
+                    try:
+                        (
+                            dest_chain_id,
+                            dest_tx_nonce,
+                            route_address,
+                            max_gas_cost,
+                        ) = _decode_bridge_tx_identifier(tx_identifier)
+                    except Exception as e:
+                        logger.warning(
+                            f"Withdrawal #{index}: malformed bridge txIdentifier "
+                            f"0x{tx_identifier.hex() if tx_identifier else ''} - {e}"
+                        )
+                        continue
+                    record["chain_id"] = dest_chain_id
+                    record["dest_tx_nonce"] = dest_tx_nonce
+                    record["route_address"] = route_address
+                    record["max_gas_cost"] = max_gas_cost
+                    record["is_bridge_asset"] = True
+
+                pending.append(record)
             except Exception as e:
                 logger.warning(f"Failed to read withdrawal {index}: {e}")
 
@@ -1211,7 +1574,9 @@ class AccountingContractService:
         }
 
     @staticmethod
-    def _decode_history_payload(kind: HistoryKind, payload: Any) -> Dict[str, Any]:
+    def _decode_history_payload(
+        kind: HistoryKind, payload: Any, owner_address: Optional[str] = None
+    ) -> Dict[str, Any]:
         payload_bytes = bytes(HexBytes(payload))
         match kind:
             case HistoryKind.Deposit:
@@ -1220,18 +1585,30 @@ class AccountingContractService:
             case (
                 HistoryKind.Withdraw
                 | HistoryKind.CreateLock
-                | HistoryKind.TransferFromLock
-                | HistoryKind.TransferBalance
+                | HistoryKind.ModifyLock
+                | HistoryKind.UnlockLock
             ):
                 expected_len = _HISTORY_COUNTERPARTY_PAYLOAD_LEN
                 tail_field = "counterparty"
+            case HistoryKind.TransferFromLock | HistoryKind.TransferBalance:
+                expected_len = None
+                tail_field = "transfer_pair"
             case _:
                 raise ValueError(f"Unsupported history kind {kind.name}")
 
-        if len(payload_bytes) != expected_len:
+        if expected_len is not None and len(payload_bytes) != expected_len:
             raise ValueError(
                 f"History payload for {kind.name} must be "
                 f"{expected_len} bytes, got {len(payload_bytes)} bytes"
+            )
+        if expected_len is None and len(payload_bytes) not in (
+            _HISTORY_COUNTERPARTY_PAYLOAD_LEN,
+            _HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN,
+        ):
+            raise ValueError(
+                f"History payload for {kind.name} must be "
+                f"{_HISTORY_COUNTERPARTY_PAYLOAD_LEN} or "
+                f"{_HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN} bytes, got {len(payload_bytes)} bytes"
             )
 
         decoded: Dict[str, Any] = {
@@ -1245,11 +1622,23 @@ class AccountingContractService:
                 )
             ),
             "counterparty": None,
+            "from_address": None,
+            "to_address": None,
             "deposit_id": None,
         }
         tail = payload_bytes[_HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN :]
         if tail_field == "deposit_id":
             decoded["deposit_id"] = _to_prefixed_hex(tail)
+        elif tail_field == "transfer_pair" and len(tail) == 2 * _HISTORY_ADDRESS_LEN:
+            from_address = Web3.to_checksum_address(tail[:_HISTORY_ADDRESS_LEN])
+            to_address = Web3.to_checksum_address(tail[_HISTORY_ADDRESS_LEN:])
+            owner = Web3.to_checksum_address(owner_address) if owner_address else None
+            decoded["from_address"] = from_address
+            decoded["to_address"] = to_address
+            if owner == to_address:
+                decoded["counterparty"] = from_address
+            elif owner == from_address:
+                decoded["counterparty"] = to_address
         else:
             decoded["counterparty"] = Web3.to_checksum_address(tail)
         return decoded
@@ -1262,16 +1651,20 @@ class AccountingContractService:
             "token_id": None,
             "amount": None,
             "counterparty": None,
+            "from_address": None,
+            "to_address": None,
             "deposit_id": None,
             "chain_id": None,
         }
 
-    async def _history_entry_to_dict(self, entry: Any) -> Dict[str, Any]:
+    async def _history_entry_to_dict(
+        self, entry: Any, owner_address: Optional[str] = None
+    ) -> Dict[str, Any]:
         kind, timestamp, payload = entry
         timestamp_int = int(timestamp)
         try:
             kind_enum = HistoryKind(int(kind))
-            decoded = self._decode_history_payload(kind_enum, payload)
+            decoded = self._decode_history_payload(kind_enum, payload, owner_address)
         except ValueError as exc:
             logger.warning("History entry decode failed (timestamp=%d): %s", timestamp_int, exc)
             return self._unknown_history_entry(timestamp_int)
@@ -1293,19 +1686,24 @@ class AccountingContractService:
             "chain_id": chain_id,
         }
 
-    async def get_history(self, offset: int, limit: int, siwe_token: bytes) -> Dict[str, Any]:
+    async def get_history(
+        self, offset: int, limit: int, siwe_token: bytes, user_address: str
+    ) -> Dict[str, Any]:
         """Fetch one page of history. Page 0 is the oldest; pass ``offset=-1`` for the newest page."""
         if offset < _INT256_MIN or offset > _INT256_MAX:
             raise ValueError("offset must fit int256")
         if limit < 0:
             raise ValueError("limit must be >= 0")
+        owner_address = self._require_address(user_address, "user_address")
 
-        contract_reader = await self._get_confidential_reader_contract()
+        contract_reader = await self._get_confidential_history_reader_contract()
         entries, total = await contract_reader.functions.getHistory(
             offset, limit, siwe_token
         ).call()
 
-        history = await asyncio.gather(*(self._history_entry_to_dict(entry) for entry in entries))
+        history = await asyncio.gather(
+            *(self._history_entry_to_dict(entry, owner_address) for entry in entries)
+        )
         return {
             "history": list(history),
             "total": int(total),
