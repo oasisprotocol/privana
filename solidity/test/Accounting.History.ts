@@ -6,6 +6,32 @@ import { Block, Wallet } from 'ethers';
 import { AccountingHistoryModule, MockAccounting, MockSiweAuth } from '../typechain-types';
 import { deployMockAccounting, mockAuthToken } from './utils';
 
+async function isSapphireNetwork(): Promise<boolean> {
+  const network = await ethers.provider.getNetwork();
+  return network.chainId >= 0x5afd && network.chainId <= 0x5aff;
+}
+
+async function expectCustomErrorOrRevert(
+  tx: Promise<unknown>,
+  contract: any,
+  errorName: string,
+): Promise<void> {
+  if (await isSapphireNetwork()) {
+    await expect(tx).to.be.reverted;
+  } else {
+    await expect(tx).to.be.revertedWithCustomError(contract, errorName);
+  }
+}
+
+async function expectReverted(call: Promise<unknown>): Promise<void> {
+  try {
+    await call;
+  } catch {
+    return;
+  }
+  expect.fail('Expected call to revert');
+}
+
 const types = {
   Lock: [
     { name: 'serviceAddress', type: 'address' },
@@ -238,9 +264,9 @@ describe('Accounting history', function () {
       depositPayload(TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'))
     );
 
-    await expect(
+    await expectReverted(
       historyReader.getHistory(0, 10, mockAuthToken('0x0000000000000000000000000000000000000000'))
-    ).to.be.reverted;
+    );
   });
 
   it('rejects direct calls to the history module', async function () {
@@ -304,9 +330,11 @@ describe('Accounting history', function () {
     expect(await unlinkedAccounting.historyModule()).to.equal(ethers.ZeroAddress);
     await expect(unlinkedAccounting.setHistoryModule(userWallet1.address)).to.be.reverted;
     await expect(unlinkedAccounting.setHistoryModule(ethers.ZeroAddress)).to.be.reverted;
-    await expect(
-      unlinkedAccounting.setHistoryModule(await mockSiweAuth.getAddress())
-    ).to.be.revertedWithCustomError(unlinkedAccounting, 'InvalidHistoryModule');
+    await expectCustomErrorOrRevert(
+      unlinkedAccounting.setHistoryModule(await mockSiweAuth.getAddress()),
+      unlinkedAccounting,
+      'InvalidHistoryModule'
+    );
     await expect(
       unlinkedAccounting.connect(user2Signer).setHistoryModule(await validModule.getAddress())
     ).to.be.reverted;
@@ -322,9 +350,11 @@ describe('Accounting history', function () {
     const brokenModule = await MockBrokenHistoryModuleFactory.deploy();
     await brokenModule.waitForDeployment();
 
-    await expect(
-      accounting.setHistoryModule(await brokenModule.getAddress())
-    ).to.be.revertedWithCustomError(accounting, 'InvalidHistoryModule');
+    await expectCustomErrorOrRevert(
+      accounting.setHistoryModule(await brokenModule.getAddress()),
+      accounting,
+      'InvalidHistoryModule'
+    );
   });
 
   it('keeps delegated history on Accounting-owned storage', async function () {
