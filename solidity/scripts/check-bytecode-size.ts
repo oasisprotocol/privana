@@ -13,13 +13,14 @@ async function checkContractSize(contractName: string, maxBytes: number): Promis
 
   if (deployedSize > maxBytes) {
     throw new Error(
-      `${contractName} exceeds EIP-170 limit by ${deployedSize - maxBytes} bytes (${deployedSize}/${maxBytes}).`
+      `${contractName} exceeds configured bytecode limit by ${deployedSize - maxBytes} bytes (${deployedSize}/${maxBytes}).`
     );
   }
 }
 
 async function main() {
   await checkContractSize('Accounting', EIP170_LIMIT_BYTES);
+  await checkContractSize('AccountingSigner', EIP170_LIMIT_BYTES);
   await checkContractSize('AccountingHistoryModule', EIP170_LIMIT_BYTES);
   console.log('Bytecode size checks passed.');
 }

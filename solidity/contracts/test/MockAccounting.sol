@@ -2,27 +2,20 @@
 pragma solidity ^0.8.20;
 
 import {Accounting} from "../Accounting.sol";
-import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
+import {HistoryKind, UnsupportedTokenType} from "../Types.sol";
+import {TokenCodec} from "../lib/TokenCodec.sol";
 
 /**
  * @title MockAccounting
  * @notice Mock version of Accounting for testing on non-Sapphire chains (e.g., Hardhat).
- * @dev Overrides the keypair generation to avoid calling Sapphire precompiles.
+ * @dev Exposes ledger/auth helpers; signer precompile mocks live in MockAccountingSigner.
  */
 contract MockAccounting is Accounting {
-    // Test keypair: #4 of "chimney theory present latin find behave ankle clock shadow earn suit reflect"
-    address private constant TEST_ADDRESS = 0xe6F321Fb3D912Db48DE460560B8bB99B57AeAcA2;
-    bytes32 private constant TEST_SECRET = bytes32(0x9147e5178b1ee427d704dcdb699f1adf9c8a3b58480a6118635a3486ad3a35ce);
-
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address siweAuthAddress) Accounting(siweAuthAddress) {}
 
     function initialize(bytes21 _roflAppID, address _owner) external override initializer {
         __Accounting_init(_roflAppID, _owner);
-    }
-
-    function _generateKeypair() internal pure override returns (address, bytes32) {
-        return (TEST_ADDRESS, TEST_SECRET);
     }
 
     /**
@@ -39,6 +32,15 @@ contract MockAccounting is Accounting {
      */
     function setBalance(address user, bytes32 tokenId, uint256 amount) external {
         balances[user][tokenId] = amount;
+    }
+
+    function decodedErc20TokenAddressWord(
+        bytes memory data
+    ) external pure returns (uint256 rawWord) {
+        (, address tokenAddress) = TokenCodec.decodeEVMErc20TokenData(data);
+        assembly ("memory-safe") {
+            rawWord := tokenAddress
+        }
     }
 
     /**
@@ -65,13 +67,11 @@ contract MockAccounting is Accounting {
     }
 
     /**
-     * @notice Test helper: set roflSignerAddress without onlyROFL check.
-     * @dev Bypasses ROFL auth for Hardhat testing; onlyROFL calls the Sapphire
-     *      roflEnsureAuthorizedOrigin precompile which doesn't exist on Hardhat.
+     * @notice Test helper: set roflSignerAddress through the linked signer.
+     * @dev Bypasses only ROFL auth; still exercises the Accounting -> signer call path.
      */
     function mockSetRoflSignerAddress(address newSigner) external {
-        if (newSigner == address(0)) revert InvalidAddress();
-        roflSignerAddress = newSigner;
+        _signer().setRoflSignerAddress(newSigner);
         emit RoflSignerUpdated(newSigner);
     }
 }

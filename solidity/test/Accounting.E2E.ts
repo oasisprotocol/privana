@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
 import { keccak256, Wallet } from 'ethers';
-import { AccountingHistoryModule, MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
+import { MockAccounting, MockAccountingSigner, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
@@ -11,7 +11,10 @@ import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } fr
 // the enum declaration order in Types.sol.
 const ChainType = { EVM: 0 } as const;
 const TokenType = { NativeEVM: 0, ERC20: 1 } as const;
-const HistoryKind = { Deposit: 0 } as const;
+
+async function accountingSigner(accounting: MockAccounting): Promise<MockAccountingSigner> {
+  return (await ethers.getContractFactory('MockAccountingSigner')).attach(await accounting.signer()) as unknown as MockAccountingSigner;
+}
 
 const types = {
   Lock: [
@@ -73,10 +76,6 @@ function parseUsdt(amount: string): bigint {
   const wholePart = BigInt(whole) * BigInt(10 ** 6);
   const fractionPart = BigInt(fraction.padEnd(6, '0'));
   return wholePart + fractionPart;
-}
-
-function amountWord(amount: bigint): string {
-  return ethers.zeroPadValue(ethers.toBeHex(amount), 32);
 }
 
 async function getBlockTimestamp(): Promise<number> {
@@ -234,6 +233,7 @@ describe('Accounting', function () {
 
     expect(tokenId).to.equal(TEST_TOKEN.tokenId);
     expect(await accounting.decodeEVMErc20TokenData(data)).to.deep.equal([TEST_TOKEN.chainId, TEST_TOKEN.address]);
+    expect(await accounting.decodedErc20TokenAddressWord(data)).to.equal(BigInt(TEST_TOKEN.address));
   });
 
   it("Set up initial balance via setBalance", async function () {
@@ -731,10 +731,31 @@ describe('Accounting', function () {
 
     it("should update roflSignerAddress and emit RoflSignerUpdated", async function () {
       const signer = userWallet1.address;
-      await expect(accounting.mockSetRoflSignerAddress(signer))
+      const signerContract = await accountingSigner(accounting);
+      const tx = await accounting.mockSetRoflSignerAddress(signer);
+      await expect(tx)
         .to.emit(accounting, "RoflSignerUpdated")
         .withArgs(signer);
+      await expect(tx)
+        .to.emit(signerContract, "RoflSignerUpdated")
+        .withArgs(signer);
       expect(await accounting.roflSignerAddress()).to.equal(signer);
+    });
+
+    it("should update gas price through Accounting and emit GasPriceSet there", async function () {
+      const chainId = 84533;
+      const gasPrice = 2000000000n;
+      await expect(accounting.setGasPrice(chainId, gasPrice))
+        .to.emit(accounting, "GasPriceSet")
+        .withArgs(chainId, gasPrice);
+      expect(await accounting.gasPrices(chainId)).to.equal(gasPrice);
+    });
+
+    it("should preserve gas limit ABI getters on Accounting", async function () {
+      expect(await accounting.gasLimitNativeSweep()).to.equal(21000n);
+      expect(await accounting.gasLimitERC20Sweep()).to.equal(65000n);
+      expect(await accounting.gasLimitNativeWithdraw()).to.equal(50000n);
+      expect(await accounting.gasLimitERC20Withdraw()).to.equal(100000n);
     });
 
     it("should reject zero address in setter", async function () {
@@ -752,8 +773,166 @@ describe('Accounting', function () {
       ).to.be.reverted;
     });
 
-    // Precondition for the parametrized cases below: roflSignerAddress was set to userWallet1
-    // in the "should update" test above; userWallet2 is a different caller.
+    it("should reject direct signer setRoflSignerAddress calls", async function () {
+      const signerContract = await accountingSigner(accounting);
+      await expect(
+        signerContract.setRoflSignerAddress(userWallet1.address)
+      ).to.be.revertedWithCustomError(signerContract, "NotAccounting");
+    });
+
+    it("should reject direct signer setGasPrice calls", async function () {
+      const signerContract = await accountingSigner(accounting);
+      await expect(
+        signerContract.setGasPrice(84534, 2000000000n)
+      ).to.be.revertedWithCustomError(signerContract, "NotAccounting");
+    });
+
+    it("should reject invalid signer addresses", async function () {
+      await expect(
+        accounting.setSigner(ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(accounting, "InvalidSigner");
+      await expect(
+        accounting.setSigner(userWallet1.address)
+      ).to.be.revertedWithCustomError(accounting, "InvalidSigner");
+    });
+
+    it("should reject a signer linked to another accounting proxy", async function () {
+      const otherAccounting = await deployMockAccounting(await mockSiweAuth.getAddress());
+      await expect(
+        accounting.setSigner(await otherAccounting.signer())
+      ).to.be.revertedWithCustomError(accounting, "InvalidSigner");
+    });
+
+    it("should reject a signer owned by a different admin", async function () {
+      const deployer = getDeployer();
+      const otherOwner = getDeployer(1);
+      const MockAccountingSignerFactory = await ethers.getContractFactory('MockAccountingSigner', deployer);
+      const signerContract = await upgrades.deployProxy(
+        MockAccountingSignerFactory,
+        [otherOwner.address, await accounting.getAddress()],
+        {
+          kind: 'uups',
+          initializer: 'initialize',
+          unsafeAllow: ['constructor', 'state-variable-immutable'],
+        }
+      ) as unknown as MockAccountingSigner;
+      await signerContract.waitForDeployment();
+
+      await expect(
+        accounting.setSigner(await signerContract.getAddress())
+      ).to.be.revertedWithCustomError(accounting, "InvalidSigner");
+    });
+
+    it("should route signer ownership through Accounting ownership transfer", async function () {
+      const otherOwner = getDeployer(1);
+      const fresh = await deployMockAccounting(await mockSiweAuth.getAddress());
+      const signerContract = await accountingSigner(fresh);
+
+      await expect(
+        signerContract.transferOwnership(otherOwner.address)
+      ).to.be.revertedWithCustomError(signerContract, "NotAccounting");
+
+      const transferTx = await fresh.transferOwnership(otherOwner.address);
+      await transferTx.wait();
+
+      expect(await signerContract.owner()).to.equal(otherOwner.address);
+      expect(await fresh.owner()).to.equal(otherOwner.address);
+    });
+
+    it("should reject invalid history module addresses", async function () {
+      await expect(
+        accounting.setHistoryModule(ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(accounting, "InvalidHistoryModule");
+      await expect(
+        accounting.setHistoryModule(userWallet1.address)
+      ).to.be.revertedWithCustomError(accounting, "InvalidHistoryModule");
+    });
+
+    it("should set history and signer links atomically", async function () {
+      const deployer = getDeployer();
+      const AccountingHistoryModuleFactory = await ethers.getContractFactory('AccountingHistoryModule');
+      const MockAccountingSignerFactory = await ethers.getContractFactory('MockAccountingSigner', deployer);
+
+      const historyModule = await AccountingHistoryModuleFactory.deploy();
+      await historyModule.waitForDeployment();
+      const signerContract = await upgrades.deployProxy(
+        MockAccountingSignerFactory,
+        [deployer.address, await accounting.getAddress()],
+        {
+          kind: 'uups',
+          initializer: 'initialize',
+          unsafeAllow: ['constructor', 'state-variable-immutable'],
+        }
+      ) as unknown as MockAccountingSigner;
+      await signerContract.waitForDeployment();
+
+      const historyAddress = await historyModule.getAddress();
+      const signerAddress = await signerContract.getAddress();
+
+      const tx = await accounting.setModules(
+        historyAddress,
+        signerAddress
+      );
+      await tx.wait();
+
+      expect(await accounting.historyModule()).to.equal(historyAddress);
+      expect(await accounting.signer()).to.equal(signerAddress);
+    });
+
+    it("should allow the ROFL signer to generate sweep and gas funding txs through Accounting", async function () {
+      await accounting.mockSetRoflSignerAddress(userWallet1.address);
+      const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+
+      const nativeSweep = await accounting.connect(userWallet1).generateSweepNativeTransfer.staticCall(
+        userWallet1.address,
+        ChainType.EVM,
+        1n,
+        84532,
+        10n,
+        0n,
+        1000000000n
+      );
+      const decodedNativeSweep = abiCoder.decode(
+        ['string', 'address', 'uint8', 'uint256', 'uint256', 'uint256', 'uint64', 'uint256'],
+        nativeSweep
+      );
+      expect(decodedNativeSweep[0]).to.equal('native-sweep');
+      expect(decodedNativeSweep[1]).to.equal(userWallet1.address);
+      expect(decodedNativeSweep[2]).to.equal(BigInt(ChainType.EVM));
+
+      const erc20Sweep = await accounting.connect(userWallet1).generateSweepERC20Transfer.staticCall(
+        userWallet1.address,
+        ChainType.EVM,
+        1n,
+        84532,
+        userWallet2.address,
+        10n,
+        0n,
+        1000000000n
+      );
+      const decodedErc20Sweep = abiCoder.decode(
+        ['string', 'address', 'uint8', 'uint256', 'uint256', 'address', 'uint256', 'uint64', 'uint256'],
+        erc20Sweep
+      );
+      expect(decodedErc20Sweep[0]).to.equal('erc20-sweep');
+      expect(decodedErc20Sweep[1]).to.equal(userWallet1.address);
+      expect(decodedErc20Sweep[5]).to.equal(userWallet2.address);
+
+      const gasFunding = await accounting.connect(userWallet1).generateGasFundingTx.staticCall(
+        userWallet2.address,
+        84532,
+        10n,
+        0n,
+        1000000000n
+      );
+      const decodedGasFunding = abiCoder.decode(
+        ['string', 'address', 'uint256', 'uint256', 'uint64', 'uint256'],
+        gasFunding
+      );
+      expect(decodedGasFunding[0]).to.equal('gas-funding');
+      expect(decodedGasFunding[1]).to.equal(userWallet2.address);
+    });
+
     const wrongSenderCases = [
       {
         name: "generateSweepNativeTransfer",
@@ -780,6 +959,7 @@ describe('Accounting', function () {
 
     wrongSenderCases.forEach(({ name, call }) => {
       it(`${name} rejects wrong sender with NotAuthorizedROFL`, async function () {
+        await accounting.mockSetRoflSignerAddress(userWallet1.address);
         await expect(call(userWallet2)).to.be.revertedWithCustomError(
           accounting, "NotAuthorizedROFL"
         );
@@ -1516,7 +1696,7 @@ describe('Upgradability', function () {
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
   });
 
-  it("Should atomically link AccountingHistoryModule when upgrading from previous layout", async function () {
+  it("treats the signer/module split as a fresh pre-mainnet layout", async function () {
     this.timeout(120000);
 
     const deployer = getDeployer();
@@ -1535,50 +1715,17 @@ describe('Upgradability', function () {
     await previous.waitForDeployment();
     const previousProxyAddress = await previous.getAddress();
 
-    const seedPayload = ethers.concat([
-      TEST_TOKEN.tokenId,
-      amountWord(parseUsdt("7")),
-      ethers.keccak256(ethers.toUtf8Bytes("previous-inline-history")),
-    ]);
-    const appendTx = await previous.mockAppendHistory(deployer.address, 0, seedPayload);
-    await appendTx.wait();
-
-    const AccountingHistoryModuleFactory = await ethers.getContractFactory(
-      'AccountingHistoryModule',
-      deployer,
-    );
-    const historyModule = await AccountingHistoryModuleFactory.deploy();
-    await historyModule.waitForDeployment();
-    const historyAddress = await historyModule.getAddress();
-
     const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
-    const upgraded = await upgrades.upgradeProxy(
-      previousProxyAddress,
-      AccountingFactory,
-      {
+    try {
+      await upgrades.upgradeProxy(previousProxyAddress, AccountingFactory, {
         kind: 'uups',
         constructorArgs: [siweAuthAddress],
         unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
-        call: { fn: "setHistoryModule", args: [historyAddress] },
-      },
-    ) as unknown as MockAccounting;
-    await waitForUpgradeTx(upgraded);
-
-    expect(await upgraded.historyModule()).to.equal(historyAddress);
-    expect(await upgraded.owner()).to.equal(deployer.address);
-
-    const historyReader = AccountingHistoryModuleFactory.attach(
-      previousProxyAddress,
-    ) as unknown as AccountingHistoryModule;
-    const [history, total] = await historyReader.getHistory(
-      0,
-      10,
-      mockAuthToken(deployer.address),
-    );
-    expect(total).to.equal(1n);
-    expect(history[0].kind).to.equal(HistoryKind.Deposit);
-    expect(history[0].timestamp).to.be.greaterThan(0n);
-    expect(history[0].payload).to.equal(seedPayload);
+      });
+      expect.fail('Expected previous inline-signing layout upgrade to be rejected');
+    } catch (e: any) {
+      expect(e.message).to.match(/deleted|inserted|layout|upgrade safe/i);
+    }
   });
 
   it("Should only allow owner to upgrade", async function () {

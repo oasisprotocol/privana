@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
-import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
+import {AccountingStorage} from "./AccountingStorage.sol";
 import {
     ChainType,
     FundLock,
     HistoryEntry,
     HistoryKind,
     TokenInfo,
-    TokenType,
     UnsupportedTokenType,
     UserInfo
 } from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
 import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.sol";
+import {IAccountingSigner} from "./interfaces/IAccountingSigner.sol";
+import {TokenCodec} from "./lib/TokenCodec.sol";
+import {Subcall} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -22,94 +23,19 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * @notice Cross-chain accounting module for managing user balances and fund operations.
  *
  * Deposits verified off-chain by ROFL TEE, credited via onlyROFL. Per-user deposit
- * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
- * and automated withdrawals via EIP-712 signatures.
+ * addresses are derived through the linked AccountingSigner. Fund locking, P2P
+ * transfers, and automated withdrawals use EIP-712 signatures.
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
+contract Accounting is AccountingStorage, UUPSUpgradeable {
+    bytes32 private constant HISTORY_MODULE_ID =
+        keccak256("privana.accounting.historyModule.v1");
+    bytes32 private constant ACCOUNTING_SIGNER_ID =
+        keccak256("privana.accounting.signer.v1");
+
+    error OwnershipRenounceDisabled();
+
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAccountingSiweAuth public immutable siweAuth;
-    /// @dev internal (not private) so MockAccounting test helper can set balances directly.
-    mapping(address user => mapping(bytes32 tokenId => uint256 balance))
-        internal balances;
-    mapping(bytes32 tokenId => TokenInfo tokenInfo) public tokens;
-    mapping(bytes32 depositId => bool processed) public processedDeposits;
-    mapping(address user => UserInfo) private userInfo;
-
-    WithdrawalRequest[] public withdrawals;
-
-    uint256 private nextLockId;
-
-    /// @dev Array of all registered token IDs for enumeration
-    bytes32[] private registeredTokenIds;
-
-    /// @dev requestId = keccak256(abi.encode(beneficiary, tokenId, version)).
-    /// Deterministic key ⇒ one pending slot per (beneficiary, token, version).
-    /// Re-requesting overwrites; no explicit cancel needed.
-    mapping(bytes32 requestId => EmergencyWithdrawRequest) public emergencyWithdrawRequests;
-    /// @dev Accounting-owned history storage. History read/write code lives in
-    ///      AccountingHistoryModule and executes here via delegatecall.
-    mapping(address user => HistoryEntry[] entries) private history;
-    address public historyModule;
-
-    struct EmergencyWithdrawRequest {
-        address toAddress;
-        uint256 blockNumber; // 0 ⇒ slot empty
-    }
-
-    error EmergencyWithdrawTooSoon();
-    error EmergencyWithdrawNotFound();
-
-    event EmergencyWithdrawRequested(bytes32 indexed requestId, bytes32 indexed tokenId);
-    event EmergencyWithdrawExecuted(bytes32 indexed requestId);
-    event HistoryModuleSet(address indexed module);
-
-    event Deposit(
-        bytes32 indexed tokenId,
-        uint256 amount,
-        bytes32 depositId
-    );
-
-    event Withdrawal(
-        address indexed userAddress,
-        bytes32 indexed tokenId,
-        uint256 amount,
-        uint256 chainId
-    );
-
-    event WithdrawalResolved(
-        uint256 indexed index,
-        address indexed userAddress,
-        bytes32 indexed tokenId,
-        address toAddress,
-        uint256 amount,
-        uint256 chainId
-    );
-
-    event TokenRegistered(bytes32 indexed tokenId, TokenType tokenType);
-
-    error InsufficientBalance();
-    error TooManyActiveLocks();
-    error InvalidLockId();
-    error LockNotExpired();
-    error InsufficientLockedAmount();
-    error AddressMismatch();
-    error InvalidExpiry();
-    error InvalidAmount();
-    error WithdrawalTooSoon();
-    error Unauthorized();
-    error DepositAlreadyProcessed();
-    error InvalidHistoryModule();
-    error InvalidSiweAuth();
-
-    struct WithdrawalRequest {
-        address userAddress;
-        address toAddress;
-        uint256 amount;
-        uint256 blockNumber;
-        bytes32 tokenId;
-        bool resolved;
-        bytes txIdentifier; // nonce, utxo identifier, or similar
-    }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
@@ -126,7 +52,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      */
     function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
-        __EVMSignerAndVerifier_init(_roflAppID, _owner);
+        if (_owner == address(0)) revert InvalidAddress();
+        __Ownable_init(_owner);
+        roflAppID = _roflAppID;
         nextLockId = 1;
     }
 
@@ -149,7 +77,26 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
-        revert();
+        revert OwnershipRenounceDisabled();
+    }
+
+    function transferOwnership(address newOwner) public override onlyOwner {
+        if (address(signer) != address(0)) {
+            signer.transferOwnership(newOwner);
+        }
+        super.transferOwnership(newOwner);
+    }
+
+    modifier onlyROFL() {
+        Subcall.roflEnsureAuthorizedOrigin(roflAppID);
+        _;
+    }
+
+    modifier onlyROFLQuery() {
+        address querySigner = _signer().roflSignerAddress();
+        if (querySigner == address(0)) revert RoflSignerNotSet();
+        if (msg.sender != querySigner) revert NotAuthorizedROFL();
+        _;
     }
 
     function _authSender(bytes memory token) internal view returns (address) {
@@ -160,6 +107,22 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     function setHistoryModule(address module) external onlyOwner {
+        _setHistoryModule(module);
+    }
+
+    function setSigner(address signerAddress) external onlyOwner {
+        _setSigner(signerAddress);
+    }
+
+    function setModules(
+        address historyModuleAddress,
+        address signerAddress
+    ) external onlyOwner {
+        _setHistoryModule(historyModuleAddress);
+        _setSigner(signerAddress);
+    }
+
+    function _setHistoryModule(address module) internal {
         if (module == address(0)) {
             revert InvalidHistoryModule();
         }
@@ -167,9 +130,176 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             revert InvalidHistoryModule();
         }
 
+        IAccountingHistoryModule moduleContract = IAccountingHistoryModule(
+            module
+        );
+        try moduleContract.MODULE_ID() returns (bytes32 moduleId) {
+            if (moduleId != HISTORY_MODULE_ID) {
+                revert InvalidHistoryModule();
+            }
+        } catch {
+            revert InvalidHistoryModule();
+        }
+
+        // Smoke-test the delegated read path before storing the pointer.
+        // Empty-token, zero-limit reads avoid auth dependencies and state copying.
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool ok, ) = module.delegatecall(
+            abi.encodeCall(
+                IAccountingHistoryModule.getHistory,
+                (int256(0), uint256(0), bytes(""))
+            )
+        );
+        if (!ok) {
+            revert InvalidHistoryModule();
+        }
+
         historyModule = module;
 
         emit HistoryModuleSet(module);
+    }
+
+    function _setSigner(address signerAddress) internal {
+        if (signerAddress == address(0)) {
+            revert InvalidSigner();
+        }
+        if (signerAddress.code.length == 0) {
+            revert InvalidSigner();
+        }
+
+        IAccountingSigner signerContract = IAccountingSigner(signerAddress);
+        try signerContract.SIGNER_ID() returns (bytes32 signerId) {
+            if (signerId != ACCOUNTING_SIGNER_ID) {
+                revert InvalidSigner();
+            }
+        } catch {
+            revert InvalidSigner();
+        }
+        try signerContract.accounting() returns (address linkedAccounting) {
+            if (linkedAccounting != address(this)) {
+                revert InvalidSigner();
+            }
+        } catch {
+            revert InvalidSigner();
+        }
+        try signerContract.owner() returns (address signerOwner) {
+            if (signerOwner != owner()) {
+                revert InvalidSigner();
+            }
+        } catch {
+            revert InvalidSigner();
+        }
+
+        signer = signerContract;
+
+        emit SignerSet(signerAddress);
+    }
+
+    function evmAddress() external view returns (address) {
+        return _signer().evmAddress();
+    }
+
+    function gasTankAddress() external view returns (address) {
+        return _signer().gasTankAddress();
+    }
+
+    function gasPrices(uint256 chainId) external view returns (uint256) {
+        return _signer().gasPrices(chainId);
+    }
+
+    function nonces(uint256 chainId) external view returns (uint64) {
+        return _signer().nonces(chainId);
+    }
+
+    function roflSignerAddress() external view returns (address) {
+        return _signer().roflSignerAddress();
+    }
+
+    function gasLimitNativeSweep() external view returns (uint64) {
+        return _signer().gasLimitNativeSweep();
+    }
+
+    function gasLimitERC20Sweep() external view returns (uint64) {
+        return _signer().gasLimitERC20Sweep();
+    }
+
+    function gasLimitNativeWithdraw() external view returns (uint64) {
+        return _signer().gasLimitNativeWithdraw();
+    }
+
+    function gasLimitERC20Withdraw() external view returns (uint64) {
+        return _signer().gasLimitERC20Withdraw();
+    }
+
+    function setGasPrice(uint256 chainId, uint256 gasPrice) external onlyOwner {
+        _signer().setGasPrice(chainId, gasPrice);
+        emit GasPriceSet(chainId, gasPrice);
+    }
+
+    function setRoflSignerAddress(address newSigner) external onlyROFL {
+        _signer().setRoflSignerAddress(newSigner);
+        emit RoflSignerUpdated(newSigner);
+    }
+
+    function generateSweepNativeTransfer(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version,
+        uint256 chainId,
+        uint256 amount,
+        uint64 sourceChainNonce,
+        uint256 gasPrice
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        return
+            _signer().generateSweepNativeTransfer(
+                beneficiary,
+                chainType,
+                version,
+                chainId,
+                amount,
+                sourceChainNonce,
+                gasPrice
+            );
+    }
+
+    function generateSweepERC20Transfer(
+        address beneficiary,
+        ChainType chainType,
+        uint256 version,
+        uint256 chainId,
+        address tokenAddress,
+        uint256 amount,
+        uint64 sourceChainNonce,
+        uint256 gasPrice
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        return
+            _signer().generateSweepERC20Transfer(
+                beneficiary,
+                chainType,
+                version,
+                chainId,
+                tokenAddress,
+                amount,
+                sourceChainNonce,
+                gasPrice
+            );
+    }
+
+    function generateGasFundingTx(
+        address toDepositAddress,
+        uint256 chainId,
+        uint256 gasAmount,
+        uint64 gasTankNonce,
+        uint256 gasPrice
+    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+        return
+            _signer().generateGasFundingTx(
+                toDepositAddress,
+                chainId,
+                gasAmount,
+                gasTankNonce,
+                gasPrice
+            );
     }
 
     function _historyModule()
@@ -194,24 +324,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             if (delegateResult.length == 0) {
                 revert InvalidHistoryModule();
             }
-            assembly {
+            assembly ("memory-safe") {
                 revert(add(delegateResult, 0x20), mload(delegateResult))
             }
         }
         return delegateResult;
-    }
-
-    function _appendHistory(
-        address user,
-        HistoryKind kind,
-        bytes memory payload
-    ) internal {
-        _delegateHistory(
-            abi.encodeCall(
-                IAccountingHistoryModule.appendHistory,
-                (user, kind, payload)
-            )
-        );
     }
 
     function getHistory(
@@ -228,41 +345,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         return abi.decode(result, (HistoryEntry[], uint256));
     }
 
-    function _appendUserCounterpartyHistory(
-        address user,
-        HistoryKind kind,
-        bytes32 tokenId,
-        uint256 amount,
-        address counterparty
-    ) internal {
-        _appendHistory(
-            user,
-            kind,
-            abi.encodePacked(tokenId, amount, counterparty)
-        );
-    }
-
-    function _appendTransferHistoryForParticipants(
-        address fromAddress,
-        address toAddress,
-        HistoryKind kind,
-        bytes32 tokenId,
-        uint256 amount
-    ) internal {
-        bytes memory payload = abi.encodePacked(
-            tokenId,
-            amount,
-            fromAddress,
-            toAddress
-        );
-        _delegateHistory(
-            abi.encodeCall(
-                IAccountingHistoryModule.appendTransferHistory,
-                (fromAddress, toAddress, kind, payload)
-            )
-        );
-    }
-
     /**
      * @notice Get the deposit address for an authenticated user.
      * @param chainType The chain family (see ChainType enum)
@@ -276,7 +358,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         bytes calldata siweToken
     ) external view returns (address depositAddr) {
         address beneficiary = _authSender(siweToken);
-        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
+        depositAddr = _signer().getDepositAddress(beneficiary, chainType, version);
     }
 
     /**
@@ -387,38 +469,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (block.number - req.blockNumber < 1) revert EmergencyWithdrawTooSoon();
 
         TokenInfo memory tInfo = tokens[tokenId];
-
-        // Dispatch on tokenType; the else-revert is the single exhaustiveness guard.
-        // When a non-EVM TokenType is added, add a branch here with its ChainType.
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            signedTx = generateDepositAddressTransfer(
-                beneficiary,
-                ChainType.EVM,
-                version,
-                chainId,
-                req.toAddress,
-                amount,
-                sourceChainNonce,
-                gasPrice
-            );
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
-                .decodeEVMErc20TokenData(tInfo.data);
-            signedTx = generateDepositAddressERC20Transfer(
-                beneficiary,
-                ChainType.EVM,
-                version,
-                chainId,
-                req.toAddress,
-                tokenAddress,
-                amount,
-                sourceChainNonce,
-                gasPrice
-            );
-        } else {
-            revert UnsupportedTokenType();
-        }
+        signedTx = _signer().generateDepositAddressTokenTransfer(
+            beneficiary,
+            ChainType.EVM,
+            version,
+            tInfo.tokenType,
+            tInfo.data,
+            req.toAddress,
+            amount,
+            sourceChainNonce,
+            gasPrice
+        );
 
         emit EmergencyWithdrawExecuted(requestId);
     }
@@ -466,7 +527,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (expiry <= block.timestamp) revert InvalidExpiry();
         if (amount == 0) revert InvalidAmount();
 
-        address userAddress = EIP712SignatureVerifier.verifyLockSignature(
+        address userAddress = verifyLockSignature(
             serviceAddress,
             tokenId,
             amount,
@@ -475,8 +536,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             signature
         );
 
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
+        FundLock[] storage locks = userInfo[userAddress].activeLocks;
 
         if (locks.length >= 10) revert TooManyActiveLocks();
 
@@ -525,24 +585,11 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     ) internal {
         TokenInfo memory tInfo = tokens[tokenId];
 
-        bytes memory txIdentifier;
-        uint256 chainId;
-
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            (chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
-                tInfo.data
-            );
-            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
-
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
-        } else {
-            revert UnsupportedTokenType();
-        }
+        (uint256 chainId, uint64 nonce) = _signer().reserveTokenWithdrawalNonce(
+            tInfo.tokenType,
+            tInfo.data
+        );
+        bytes memory txIdentifier = abi.encode(nonce);
 
         withdrawals.push(
             WithdrawalRequest({
@@ -576,7 +623,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 nonce,
         bytes calldata signature
     ) public {
-        address userAddress = EIP712SignatureVerifier.verifyModifyLockSignature(
+        address userAddress = verifyModifyLockSignature(
             lockId,
             amount,
             newExpiry,
@@ -584,8 +631,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             signature
         );
 
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
+        FundLock[] storage locks = userInfo[userAddress].activeLocks;
 
         uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
@@ -640,8 +686,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * @param lockId The unique identifier of the lock to unlock
      */
     function unlockSingleLock(address userAddress, uint256 lockId) public {
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
+        FundLock[] storage locks = userInfo[userAddress].activeLocks;
 
         uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock memory lock = locks[lockIndex];
@@ -678,10 +723,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     function unlockAllExpiredLocks(
         address userAddress
     ) external returns (uint256 unlockedCount) {
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
+        FundLock[] storage locks = userInfo[userAddress].activeLocks;
 
-        unlockedCount = 0;
         uint256 i = locks.length;
 
         while (i > 0) {
@@ -703,8 +746,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
                 unlockedCount++;
             }
         }
-
-        return unlockedCount;
     }
 
     /**
@@ -750,13 +791,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
+        FundLock[] storage locks = userInfo[userAddress].activeLocks;
 
         uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
 
-        EIP712SignatureVerifier.verifyTransferLockedSignature(
+        verifyTransferLockedSignature(
             lock.serviceId,
             userAddress,
             toAddress,
@@ -809,13 +849,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (amount == 0) revert InvalidAmount();
         if (toAddress == address(0)) revert AddressMismatch();
 
-        UserInfo storage uInfo = userInfo[userAddress];
-        FundLock[] storage locks = uInfo.activeLocks;
+        FundLock[] storage locks = userInfo[userAddress].activeLocks;
 
         uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
 
-        EIP712SignatureVerifier.verifyWithdrawFromLockSignature(
+        verifyWithdrawFromLockSignature(
             lock.serviceId,
             userAddress,
             toAddress,
@@ -881,7 +920,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        address userAddress = EIP712SignatureVerifier.verifyTransferSignature(
+        address userAddress = verifyTransferSignature(
             toAddress,
             tokenId,
             amount,
@@ -930,7 +969,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        address userAddress = EIP712SignatureVerifier.verifyWithdrawSignature(
+        address userAddress = verifyWithdrawSignature(
             tokenId,
             amount,
             nonce,
@@ -991,32 +1030,15 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         bytes32 tokenId = withdrawalRequest.tokenId;
         uint256 amount = withdrawalRequest.amount;
         TokenInfo memory tInfo = tokens[tokenId];
+        uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
         uint256 chainId;
-
-        if (tInfo.tokenType == TokenType.NativeEVM) {
-            chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
-            signedTx = EVMSignerAndVerifier.generateNativeTransfer(
-                chainId,
-                toAddress,
-                amount,
-                nonce
-            );
-        } else if (tInfo.tokenType == TokenType.ERC20) {
-            address tokenAddress;
-            (chainId, tokenAddress) = EVMSignerAndVerifier
-                .decodeEVMErc20TokenData(tInfo.data);
-            uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
-            signedTx = EVMSignerAndVerifier.generateERC20Transfer(
-                chainId,
-                toAddress,
-                tokenAddress,
-                amount,
-                nonce
-            );
-        } else {
-            revert UnsupportedTokenType();
-        }
+        (chainId, signedTx) = _signer().generateTokenWithdrawalTransfer(
+            tInfo.tokenType,
+            tInfo.data,
+            toAddress,
+            amount,
+            nonce
+        );
 
         // Only mark resolved and emit event if not already resolved
         if (!withdrawalRequest.resolved) {
@@ -1049,6 +1071,31 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      */
     function getTokenId(TokenInfo calldata info) public pure returns (bytes32) {
         return keccak256(abi.encode(info.tokenType, info.data));
+    }
+
+    function encodeEVMNativeTokenData(
+        uint256 chainId
+    ) public pure returns (bytes memory data) {
+        return TokenCodec.encodeEVMNativeTokenData(chainId);
+    }
+
+    function decodeEVMNativeTokenData(
+        bytes memory data
+    ) public pure returns (uint256 chainId) {
+        return TokenCodec.decodeEVMNativeTokenData(data);
+    }
+
+    function encodeEVMErc20TokenData(
+        uint256 chainId,
+        address tokenAddress
+    ) public pure returns (bytes memory data) {
+        return TokenCodec.encodeEVMErc20TokenData(chainId, tokenAddress);
+    }
+
+    function decodeEVMErc20TokenData(
+        bytes memory data
+    ) public pure returns (uint256 chainId, address tokenAddress) {
+        return TokenCodec.decodeEVMErc20TokenData(data);
     }
 
     /**
@@ -1160,10 +1207,4 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         if (user == address(0)) revert Unauthorized();
         return balances[user][tokenId];
     }
-
-    /**
-     * @dev Reserved storage gap for future upgrades.
-     * This allows adding new state variables without shifting storage layout.
-     */
-    uint256[39] private __gap;
 }

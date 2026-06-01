@@ -55,9 +55,9 @@ contract MockAccountingPrevious is EIP712SignatureVerifier, EVMSignerAndVerifier
         siweAuth = IAccountingSiweAuth(siweAuthAddress);
     }
 
-    function initialize(bytes21 _roflAppID, address _owner) external initializer {
+    function initialize(bytes21, address _owner) external initializer {
         __EIP712SignatureVerifier_init();
-        __EVMSignerAndVerifier_init(_roflAppID, _owner);
+        __EVMSignerAndVerifier_init(_owner);
         nextLockId = 1;
     }
 

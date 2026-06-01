@@ -6,8 +6,17 @@ type HistoryModuleReader = {
   historyModule(): Promise<string>;
 };
 
-type HistoryModuleLinker = HistoryModuleReader & {
-  setHistoryModule(module: string): Promise<{ wait(): Promise<unknown> }>;
+type SignerReader = {
+  signer(): Promise<string>;
+};
+
+type ModuleLinksReader = HistoryModuleReader & SignerReader;
+
+type ModuleLinksLinker = ModuleLinksReader & {
+  setModules(
+    history: string,
+    signer: string
+  ): Promise<{ wait(): Promise<unknown> }>;
 };
 
 type UpgradeOptions = {
@@ -34,7 +43,7 @@ function isEmptyCallResult(value: unknown): boolean {
   return [result.data, result.result, result.value].some(isEmptyCallResult);
 }
 
-function isMissingHistoryModuleGetter(error: unknown): boolean {
+function isMissingAddressGetterResult(error: unknown): boolean {
   const code = (error as { code?: string })?.code;
   return (
     (code === "BAD_DATA" || code === "CALL_EXCEPTION") &&
@@ -47,6 +56,26 @@ async function deployHistoryModule(hre: HardhatRuntimeEnvironment) {
   const history = await AccountingHistoryModule.deploy({ gasLimit: 5000000 });
   await history.waitForDeployment();
   return history;
+}
+
+async function deployAccountingSigner(
+  hre: HardhatRuntimeEnvironment,
+  owner: string,
+  accountingAddress: string
+) {
+  const AccountingSigner = await hre.ethers.getContractFactory("AccountingSigner");
+  const signer = await hre.upgrades.deployProxy(
+    AccountingSigner,
+    [owner, accountingAddress],
+    {
+      kind: 'uups',
+      initializer: 'initialize',
+      unsafeAllow: ['constructor', 'state-variable-immutable'],
+      txOverrides: { gasLimit: 15000000 }
+    }
+  );
+  await signer.waitForDeployment();
+  return signer;
 }
 
 async function validateHistoryModule(hre: HardhatRuntimeEnvironment, historyAddress: string) {
@@ -69,6 +98,59 @@ async function validateHistoryModule(hre: HardhatRuntimeEnvironment, historyAddr
   return history;
 }
 
+async function validateAccountingSigner(
+  hre: HardhatRuntimeEnvironment,
+  signerAddress: string,
+  accountingAddress: string,
+  expectedOwnerAddress: string
+) {
+  if (!hre.ethers.isAddress(signerAddress) || signerAddress === hre.ethers.ZeroAddress) {
+    throw new Error(`Invalid AccountingSigner address: ${signerAddress}`);
+  }
+
+  const code = await hre.ethers.provider.getCode(signerAddress);
+  if (code === "0x") {
+    throw new Error(`AccountingSigner address has no contract code: ${signerAddress}`);
+  }
+
+  const signer = await hre.ethers.getContractAt("AccountingSigner", signerAddress);
+  const signerId = await signer.SIGNER_ID();
+  const expectedSignerId = hre.ethers.id("privana.accounting.signer.v1");
+  if (signerId !== expectedSignerId) {
+    throw new Error(`AccountingSigner has unexpected signer id: ${signerId}`);
+  }
+
+  const linkedAccounting = await signer.accounting();
+  if (normalizeAddress(linkedAccounting) !== normalizeAddress(accountingAddress)) {
+    throw new Error(
+      `AccountingSigner accounting mismatch: ${linkedAccounting}, expected ${accountingAddress}`
+    );
+  }
+
+  const signerOwner = await signer.owner();
+  if (normalizeAddress(signerOwner) !== normalizeAddress(expectedOwnerAddress)) {
+    throw new Error(
+      `AccountingSigner owner mismatch: ${signerOwner}, expected ${expectedOwnerAddress}`
+    );
+  }
+
+  return signer;
+}
+
+async function assertSplitAccountingLayoutForUpgrade(accounting: ModuleLinksReader) {
+  try {
+    await accounting.historyModule();
+    await accounting.signer();
+  } catch (error) {
+    if (!isMissingAddressGetterResult(error)) {
+      throw error;
+    }
+    throw new Error(
+      "This upgrade task only supports Accounting proxies that already expose historyModule() and signer(). The pre-split inline-signing layout is intentionally incompatible; redeploy fresh before launch or write an explicit migration."
+    );
+  }
+}
+
 async function readLinkedHistoryModule(
   hre: HardhatRuntimeEnvironment,
   accounting: HistoryModuleReader
@@ -76,10 +158,24 @@ async function readLinkedHistoryModule(
   try {
     return await accounting.historyModule();
   } catch (error) {
-    if (!isMissingHistoryModuleGetter(error)) {
+    if (!isMissingAddressGetterResult(error)) {
       throw error;
     }
     // Pre-AccountingHistoryModule implementations do not expose this getter.
+    return hre.ethers.ZeroAddress;
+  }
+}
+
+async function readLinkedSigner(
+  hre: HardhatRuntimeEnvironment,
+  accounting: SignerReader
+): Promise<string> {
+  try {
+    return await accounting.signer();
+  } catch (error) {
+    if (!isMissingAddressGetterResult(error)) {
+      throw error;
+    }
     return hre.ethers.ZeroAddress;
   }
 }
@@ -110,20 +206,90 @@ async function resolveHistoryModule(
   return historyAddress;
 }
 
-async function ensureHistoryModule(
+async function resolveAccountingSigner(
   hre: HardhatRuntimeEnvironment,
-  accounting: HistoryModuleLinker,
-  requestedHistoryAddress?: string
+  accounting: SignerReader,
+  owner: string,
+  accountingAddress: string,
+  requestedSignerAddress?: string
 ) {
-  const historyAddress = await resolveHistoryModule(hre, accounting, requestedHistoryAddress);
-  const linkedHistoryAddress = await readLinkedHistoryModule(hre, accounting);
-  if (normalizeAddress(linkedHistoryAddress) !== normalizeAddress(historyAddress)) {
-    const tx = await accounting.setHistoryModule(historyAddress);
-    await tx.wait();
-    console.log(`Accounting linked to AccountingHistoryModule: ${historyAddress}`);
+  let signerAddress = requestedSignerAddress;
+
+  if (signerAddress) {
+    await validateAccountingSigner(hre, signerAddress, accountingAddress, owner);
+  } else {
+    signerAddress = await readLinkedSigner(hre, accounting);
+
+    if (signerAddress === hre.ethers.ZeroAddress) {
+      const signer = await deployAccountingSigner(
+        hre,
+        owner,
+        accountingAddress
+      );
+      signerAddress = await signer.getAddress();
+      console.log(`AccountingSigner address: ${signerAddress}`);
+      await validateAccountingSigner(hre, signerAddress, accountingAddress, owner);
+    } else {
+      await validateAccountingSigner(hre, signerAddress, accountingAddress, owner);
+      console.log(`Existing AccountingSigner address: ${signerAddress}`);
+    }
   }
 
-  return historyAddress;
+  return signerAddress;
+}
+
+async function assertAccountingModuleLinks(
+  hre: HardhatRuntimeEnvironment,
+  accounting: ModuleLinksReader,
+  historyAddress: string,
+  signerAddress: string
+) {
+  const linkedHistoryAddress = await readLinkedHistoryModule(hre, accounting);
+  if (normalizeAddress(linkedHistoryAddress) !== normalizeAddress(historyAddress)) {
+    throw new Error(
+      `AccountingHistoryModule link mismatch: ${linkedHistoryAddress}, expected ${historyAddress}`
+    );
+  }
+
+  const linkedSignerAddress = await readLinkedSigner(hre, accounting);
+  if (
+    normalizeAddress(linkedSignerAddress) !== normalizeAddress(signerAddress)
+  ) {
+    throw new Error(
+      `AccountingSigner link mismatch: ${linkedSignerAddress}, expected ${signerAddress}`
+    );
+  }
+}
+
+async function linkAccountingModules(
+  hre: HardhatRuntimeEnvironment,
+  accounting: ModuleLinksLinker,
+  historyAddress: string,
+  signerAddress: string
+) {
+  const linkedHistoryAddress = await readLinkedHistoryModule(hre, accounting);
+  const linkedSignerAddress = await readLinkedSigner(hre, accounting);
+  const alreadyLinked =
+    normalizeAddress(linkedHistoryAddress) === normalizeAddress(historyAddress) &&
+    normalizeAddress(linkedSignerAddress) === normalizeAddress(signerAddress);
+
+  if (!alreadyLinked) {
+    const tx = await accounting.setModules(
+      historyAddress,
+      signerAddress
+    );
+    await tx.wait();
+    console.log(`Accounting linked to modules:`);
+    console.log(`  AccountingHistoryModule: ${historyAddress}`);
+    console.log(`  AccountingSigner: ${signerAddress}`);
+  }
+
+  await assertAccountingModuleLinks(
+    hre,
+    accounting,
+    historyAddress,
+    signerAddress
+  );
 }
 
 task("deploy-proveth-verifier")
@@ -138,8 +304,13 @@ task("deploy-proveth-verifier")
 
 task("deploy")
   .addParam("roflappid", "The ROFL app ID (hex 0x... or bech32 rofl1...)")
+  .addOptionalParam("owner", "Owner for Accounting and AccountingSigner. Defaults to deployer.")
   .setAction(async (args, hre) => {
     const [deployer] = await hre.ethers.getSigners();
+    const finalOwnerAddress = args.owner
+      ? hre.ethers.getAddress(args.owner)
+      : deployer.address;
+    const linkOwnerAddress = deployer.address;
 
     // Parse ROFL app ID (supports hex and bech32 formats)
     const roflAppIdHex = parseRoflAppId(args.roflappid);
@@ -156,7 +327,7 @@ task("deploy")
     const Accounting = await hre.ethers.getContractFactory("Accounting");
     const proxy = await hre.upgrades.deployProxy(
       Accounting,
-      [roflAppIdHex, deployer.address],
+      [roflAppIdHex, linkOwnerAddress],
       {
         kind: 'uups',
         initializer: 'initialize',
@@ -169,15 +340,43 @@ task("deploy")
     await proxy.waitForDeployment();
 
     const proxyAddress = await proxy.getAddress();
-    const historyAddress = await ensureHistoryModule(hre, proxy);
+    const historyAddress = await resolveHistoryModule(hre, proxy);
+    const signerAddress = await resolveAccountingSigner(
+      hre,
+      proxy,
+      linkOwnerAddress,
+      proxyAddress
+    );
+    await linkAccountingModules(
+      hre,
+      proxy,
+      historyAddress,
+      signerAddress
+    );
+
+    if (normalizeAddress(finalOwnerAddress) !== normalizeAddress(linkOwnerAddress)) {
+      const accountingTransferTx = await proxy.transferOwnership(finalOwnerAddress);
+      await accountingTransferTx.wait();
+      await validateAccountingSigner(
+        hre,
+        signerAddress,
+        proxyAddress,
+        finalOwnerAddress
+      );
+      console.log(`Transferred AccountingSigner and Accounting ownership to: ${finalOwnerAddress}`);
+    }
+
     const implAddress = await hre.upgrades.erc1967.getImplementationAddress(proxyAddress);
 
     console.log(`AccountingSiweAuth address: ${siweAuthAddress}`);
     console.log(`Proxy address: ${proxyAddress}`);
+    console.log(`AccountingSigner address: ${signerAddress}`);
     console.log(`AccountingHistoryModule address: ${historyAddress}`);
     console.log(`Implementation address: ${implAddress}`);
     console.log(`EVM signing address: ${await proxy.evmAddress()}`);
     console.log(`Owner: ${await proxy.owner()}`);
+    const signer = await hre.ethers.getContractAt("AccountingSigner", signerAddress);
+    console.log(`AccountingSigner owner: ${await signer.owner()}`);
 
     return proxyAddress;
   });
@@ -210,6 +409,7 @@ task("force-import")
     // Get current siweAuth from proxy
     const current = await hre.ethers.getContractAt("Accounting", args.proxy);
     const siweAuthAddress = await current.siweAuth();
+    await assertSplitAccountingLayoutForUpgrade(current);
     console.log(`Current siweAuth: ${siweAuthAddress}`);
 
     await hre.upgrades.forceImport(args.proxy, Accounting, {
@@ -230,6 +430,10 @@ task("upgrade")
   .addOptionalParam(
     "history",
     "Existing AccountingHistoryModule to attach. If omitted and none is set, deploy one.",
+  )
+  .addOptionalParam(
+    "signer",
+    "Existing AccountingSigner proxy to attach. If omitted and none is set, deploy one.",
   )
   .setDescription("Upgrade the Accounting proxy to a new implementation")
   .setAction(async (args, hre) => {
@@ -255,8 +459,17 @@ task("upgrade")
     // Get current implementation for comparison
     const currentImpl = await hre.upgrades.erc1967.getImplementationAddress(args.proxy);
     console.log(`Current implementation: ${currentImpl}`);
+    await assertSplitAccountingLayoutForUpgrade(current);
 
+    const ownerAddress = await current.owner();
     const historyAddress = await resolveHistoryModule(hre, current, args.history);
+    const signerAddress = await resolveAccountingSigner(
+      hre,
+      current,
+      ownerAddress,
+      args.proxy,
+      args.signer
+    );
     const upgradeOptions: UpgradeOptions = {
       kind: 'uups',
       constructorArgs: [siweAuthAddress],
@@ -264,8 +477,8 @@ task("upgrade")
       redeployImplementation: 'always',
       txOverrides: { gasLimit: 15000000 },
       call: {
-        fn: "setHistoryModule",
-        args: [historyAddress],
+        fn: "setModules",
+        args: [historyAddress, signerAddress],
       },
     };
 
@@ -282,7 +495,17 @@ task("upgrade")
         `AccountingHistoryModule link mismatch after upgrade: ${linkedHistoryAddress}, expected ${historyAddress}`
       );
     }
+    const linkedSignerAddress = await upgraded.signer();
+    if (normalizeAddress(linkedSignerAddress) !== normalizeAddress(signerAddress)) {
+      throw new Error(
+        `AccountingSigner link mismatch after upgrade: ${linkedSignerAddress}, expected ${signerAddress}`
+      );
+    }
     await validateHistoryModule(hre, historyAddress);
+    await validateAccountingSigner(hre, signerAddress, args.proxy, ownerAddress);
+    console.log(`AccountingSigner address: ${signerAddress}`);
+    const signer = await hre.ethers.getContractAt("AccountingSigner", signerAddress);
+    console.log(`AccountingSigner owner: ${await signer.owner()}`);
     console.log(`AccountingHistoryModule address: ${historyAddress}`);
 
     if (currentImpl === newImplAddress) {

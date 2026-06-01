@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {HistoryEntry, HistoryKind} from "./Types.sol";
+import {HistoryEntry} from "./Types.sol";
+import {AccountingStorage} from "./AccountingStorage.sol";
 import {IAccountingForHistoryModule} from "./interfaces/IAccountingForHistoryModule.sol";
 import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.sol";
 
@@ -11,38 +12,17 @@ import {IAccountingHistoryModule} from "./interfaces/IAccountingHistoryModule.so
  * @dev This contract is never called as storage owner. Accounting delegatecalls
  *      into it so the history mapping remains in the Accounting proxy layout.
  */
-contract AccountingHistoryModule is IAccountingHistoryModule {
+contract AccountingHistoryModule is AccountingStorage, IAccountingHistoryModule {
     /// @dev Used by deploy/backend validation to reject linking the wrong code.
     bytes32 public constant MODULE_ID =
         keccak256("privana.accounting.historyModule.v1");
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
-    /// @dev Must equal Accounting.history's storage slot. Storage-layout tests
-    ///      pin this slot across the pre-module and current Accounting layouts.
-    uint256 public constant HISTORY_SLOT = 108;
-
     address private immutable SELF = address(this);
 
-    struct HistoryStorage {
-        mapping(address user => HistoryEntry[] entries) history;
-    }
-
     error NotDelegated();
-    error Unauthorized();
-
     modifier onlyDelegateCall() {
         if (address(this) == SELF) revert NotDelegated();
         _;
-    }
-
-    function _historyStorage()
-        internal
-        pure
-        returns (HistoryStorage storage historyStorage)
-    {
-        uint256 slot = HISTORY_SLOT;
-        assembly {
-            historyStorage.slot := slot
-        }
     }
 
     function _authSender(bytes memory token) internal view returns (address) {
@@ -53,40 +33,6 @@ contract AccountingHistoryModule is IAccountingHistoryModule {
                     .authSender(token);
         }
         return msg.sender;
-    }
-
-    function appendHistory(
-        address user,
-        HistoryKind kind,
-        bytes calldata payload
-    ) external onlyDelegateCall {
-        _append(user, kind, payload);
-    }
-
-    function _append(
-        address user,
-        HistoryKind kind,
-        bytes calldata payload
-    ) internal {
-        _historyStorage().history[user].push(
-            HistoryEntry({
-                kind: kind,
-                timestamp: uint64(block.timestamp),
-                payload: payload
-            })
-        );
-    }
-
-    function appendTransferHistory(
-        address fromAddress,
-        address toAddress,
-        HistoryKind kind,
-        bytes calldata payload
-    ) external onlyDelegateCall {
-        _append(fromAddress, kind, payload);
-        if (toAddress != address(0) && toAddress != fromAddress) {
-            _append(toAddress, kind, payload);
-        }
     }
 
     function getHistory(
@@ -109,7 +55,7 @@ contract AccountingHistoryModule is IAccountingHistoryModule {
         int256 offset,
         uint256 limit
     ) internal view returns (HistoryEntry[] memory page, uint256 total) {
-        HistoryEntry[] storage all = _historyStorage().history[user];
+        HistoryEntry[] storage all = history[user];
         total = all.length;
 
         uint256 pageSize = limit > MAX_HISTORY_PAGE_SIZE

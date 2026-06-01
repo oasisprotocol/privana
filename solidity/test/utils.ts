@@ -3,7 +3,7 @@ import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HttpNetworkConfig } from "hardhat/types/config";
 import { config, ethers, network, upgrades } from 'hardhat';
 import { JsonRpcProvider } from 'ethers';
-import { MockAccounting } from "../typechain-types";
+import { MockAccounting, MockAccountingSigner } from "../typechain-types";
 
 export const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
 
@@ -36,41 +36,45 @@ export function mockAuthToken(address: string) {
 }
 
 /**
- * Helper to deploy the mock accounting contract with an unencrypted transaction and with workarounds for flaky UUPS wrapper errors.
+ * Helper to deploy the mock accounting contract with linked signer/history modules.
  * @param mockSiweAuthAddress SIWE auth contract to initialize Accounting with
  */
 export async function deployMockAccounting(mockSiweAuthAddress: string) {
 	const deployer = getDeployer();
 	const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+	const AccountingSignerFactory = await ethers.getContractFactory('MockAccountingSigner', deployer);
 	const AccountingHistoryModuleFactory = await ethers.getContractFactory('AccountingHistoryModule', deployer);
-	let accounting: MockAccounting;
 
-	let deploymentSucceeded = false;
-	while (!deploymentSucceeded) {
-		try {
-			// Deploy as UUPS proxy
-			accounting = await upgrades.deployProxy(
-				AccountingFactory,
-				[MOCK_ROFL_APP_ID, deployer.address],
-				{
-					kind: 'uups',
-					initializer: 'initialize',
-					constructorArgs: [mockSiweAuthAddress],
-					unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
-				}
-			) as unknown as MockAccounting;
-			await accounting.waitForDeployment();
-			accounting = (await ethers.getContractFactory('MockAccounting')).attach(await accounting.getAddress()) as unknown as MockAccounting;
-			const historyModule = await AccountingHistoryModuleFactory.deploy();
-			await historyModule.waitForDeployment();
-			const linkHistoryTx = await accounting.setHistoryModule(await historyModule.getAddress());
-			await linkHistoryTx.wait();
-			//accounting = accounting.connect((await getSigners())[0]); // Use wrapped signer for sending txes.
-			deploymentSucceeded = true;
-		} catch (error) {
-			console.log('Deployment failed, retrying...', error);
-			await new Promise(resolve => setTimeout(resolve, 1000));
+	// Deploy as UUPS proxy
+	let accounting = await upgrades.deployProxy(
+		AccountingFactory,
+		[MOCK_ROFL_APP_ID, deployer.address],
+		{
+			kind: 'uups',
+			initializer: 'initialize',
+			constructorArgs: [mockSiweAuthAddress],
+			unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
 		}
-	}
-	return accounting!;
+	) as unknown as MockAccounting;
+	await accounting.waitForDeployment();
+	accounting = (await ethers.getContractFactory('MockAccounting')).attach(await accounting.getAddress()) as unknown as MockAccounting;
+	const accountingSigner = await upgrades.deployProxy(
+		AccountingSignerFactory,
+		[deployer.address, await accounting.getAddress()],
+		{
+			kind: 'uups',
+			initializer: 'initialize',
+			unsafeAllow: ['constructor', 'state-variable-immutable'],
+		}
+	) as unknown as MockAccountingSigner;
+	await accountingSigner.waitForDeployment();
+	const historyModule = await AccountingHistoryModuleFactory.deploy();
+	await historyModule.waitForDeployment();
+	const linkModulesTx = await accounting.setModules(
+		await historyModule.getAddress(),
+		await accountingSigner.getAddress()
+	);
+	await linkModulesTx.wait();
+	//accounting = accounting.connect((await getSigners())[0]); // Use wrapped signer for sending txes.
+	return accounting;
 }

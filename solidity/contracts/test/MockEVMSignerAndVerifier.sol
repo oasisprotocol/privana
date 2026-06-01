@@ -15,8 +15,8 @@ contract MockEVMSignerAndVerifier is EVMSignerAndVerifier, UUPSUpgradeable {
         _disableInitializers();
     }
 
-    function initialize(bytes21 _roflAppID) external initializer {
-        __EVMSignerAndVerifier_init(_roflAppID, msg.sender);
+    function initialize() external initializer {
+        __EVMSignerAndVerifier_init(msg.sender);
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}

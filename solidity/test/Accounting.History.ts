@@ -154,19 +154,6 @@ describe('Accounting history', function () {
   let user2Signer: HardhatEthersSigner;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
 
-  async function isSapphireNetwork(): Promise<boolean> {
-    const network = await ethers.provider.getNetwork();
-    return 0x5afd <= network.chainId && network.chainId <= 0x5aff;
-  }
-
-  async function expectInvalidHistoryModuleRevert(action: () => Promise<unknown>): Promise<void> {
-    if (await isSapphireNetwork()) {
-      await expect(action()).to.be.reverted;
-      return;
-    }
-    await expect(action()).to.be.revertedWithCustomError(accounting, 'InvalidHistoryModule');
-  }
-
   beforeEach(async () => {
     [deployer] = await ethers.getSigners();
     const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
@@ -221,12 +208,15 @@ describe('Accounting history', function () {
     const depositTx2 = await accounting.mockCreditDeposit(userWallet2.address, TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'));
     await depositTx2.wait();
 
-    const [callerHistory, callerTotal] = await historyReader.getHistory(0, 10, mockAuthToken(userWallet1.address));
+    const [callerHistory, callerTotal] = await historyReader.connect(user1Signer).getHistory(0, 10, '0x');
+    const [emptyTokenUser2History, emptyTokenUser2Total] = await historyReader.connect(user2Signer).getHistory(0, 10, '0x');
     const [tokenHistory, tokenTotal] = await historyReader.getHistory(0, 10, mockAuthToken(userWallet2.address));
 
     expect(callerTotal).to.equal(1n);
+    expect(emptyTokenUser2Total).to.equal(1n);
     expect(tokenTotal).to.equal(1n);
     expect(callerHistory[0].kind).to.equal(0n);
+    expect(emptyTokenUser2History[0].kind).to.equal(0n);
 
     // Sapphire has the timestamp equal to the pre-last block. Other (non-L2) chains have the timestamp of the last block.
     const network = await ethers.provider.getNetwork();
@@ -244,6 +234,9 @@ describe('Accounting history', function () {
     expect(tokenHistory[0].payload).to.equal(
       depositPayload(TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'))
     );
+    expect(emptyTokenUser2History[0].payload).to.equal(
+      depositPayload(TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'))
+    );
 
     await expect(
       historyReader.getHistory(0, 10, mockAuthToken('0x0000000000000000000000000000000000000000'))
@@ -251,10 +244,6 @@ describe('Accounting history', function () {
   });
 
   it('rejects direct calls to the history module', async function () {
-    await expect(historyModuleContract.appendHistory(userWallet1.address, 0, '0x')).to.be.reverted;
-    await expect(
-      historyModuleContract.appendTransferHistory(userWallet1.address, userWallet2.address, 4, '0x')
-    ).to.be.reverted;
     await expect(historyModuleContract.getHistory(0, 10, mockAuthToken(userWallet1.address))).to.be.reverted;
   });
 
@@ -316,6 +305,9 @@ describe('Accounting history', function () {
     await expect(unlinkedAccounting.setHistoryModule(userWallet1.address)).to.be.reverted;
     await expect(unlinkedAccounting.setHistoryModule(ethers.ZeroAddress)).to.be.reverted;
     await expect(
+      unlinkedAccounting.setHistoryModule(await mockSiweAuth.getAddress())
+    ).to.be.revertedWithCustomError(unlinkedAccounting, 'InvalidHistoryModule');
+    await expect(
       unlinkedAccounting.connect(user2Signer).setHistoryModule(await validModule.getAddress())
     ).to.be.reverted;
     expect(await unlinkedAccounting.historyModule()).to.equal(ethers.ZeroAddress);
@@ -325,51 +317,36 @@ describe('Accounting history', function () {
     expect(await unlinkedAccounting.historyModule()).to.equal(await validModule.getAddress());
   });
 
-  it('maps empty delegated history failures to InvalidHistoryModule', async function () {
+  it('rejects history modules that fail the delegated read smoke test', async function () {
     const MockBrokenHistoryModuleFactory = await ethers.getContractFactory('MockBrokenHistoryModule');
     const brokenModule = await MockBrokenHistoryModuleFactory.deploy();
     await brokenModule.waitForDeployment();
 
-    const linkTx = await accounting.setHistoryModule(await brokenModule.getAddress());
-    await linkTx.wait();
-
-    await expectInvalidHistoryModuleRevert(() =>
-      accounting.mockCreditDeposit(
-        userWallet1.address,
-        TEST_TOKEN.tokenId,
-        parseUsdt('1'),
-        depositKey('broken-module-empty-revert')
-      )
-    );
+    await expect(
+      accounting.setHistoryModule(await brokenModule.getAddress())
+    ).to.be.revertedWithCustomError(accounting, 'InvalidHistoryModule');
   });
 
-  it('maps empty delegated history read failures to InvalidHistoryModule', async function () {
-    const MockBrokenHistoryModuleFactory = await ethers.getContractFactory('MockBrokenHistoryModule');
-    const brokenModule = await MockBrokenHistoryModuleFactory.deploy();
-    await brokenModule.waitForDeployment();
-
-    const linkTx = await accounting.setHistoryModule(await brokenModule.getAddress());
-    await linkTx.wait();
-
-    await expectInvalidHistoryModuleRevert(() =>
-      historyReader.getHistory(0, 10, mockAuthToken(userWallet1.address))
-    );
-  });
-
-  it('keeps delegated history on the previous inline storage slot', async function () {
-    const previousHistory = await storageEntry('contracts/test/MockAccountingPrevious.sol', 'MockAccountingPrevious', 'history');
+  it('keeps delegated history on Accounting-owned storage', async function () {
     const currentHistory = await storageEntry('contracts/Accounting.sol', 'Accounting', 'history');
     const currentHistoryModule = await storageEntry('contracts/Accounting.sol', 'Accounting', 'historyModule');
+    const currentSigner = await storageEntry('contracts/Accounting.sol', 'Accounting', 'signer');
     const currentGap = await storageEntry('contracts/Accounting.sol', 'Accounting', '__gap', '39_storage');
 
-    expect(previousHistory.slot).to.equal('108');
-    expect(currentHistory.slot).to.equal('108');
-    expect(currentHistoryModule.slot).to.equal('109');
-    expect(await historyModuleContract.HISTORY_SLOT()).to.equal(BigInt(currentHistory.slot));
-    expect(currentGap.slot).to.equal('110');
+    expect(currentHistory.slot).to.equal('58');
+    expect(currentHistoryModule.slot).to.equal('59');
+    expect(currentSigner.slot).to.equal('60');
+    expect(currentGap.slot).to.equal('62');
   });
 
   it('exposes getHistory through the Accounting ABI', async function () {
+    await accounting.mockCreditDeposit(
+      userWallet1.address,
+      TEST_TOKEN.tokenId,
+      parseUsdt('1'),
+      depositKey('accounting-abi')
+    );
+
     const accountingArtifact = await artifacts.readArtifact('Accounting');
     const selectors = new Set(
       accountingArtifact.abi
@@ -381,6 +358,16 @@ describe('Accounting history', function () {
     );
 
     expect(selectors.has(ethers.id('getHistory(int256,uint256,bytes)').slice(0, 10))).to.equal(true);
+
+    const [page, total] = await accounting.getHistory.staticCall(
+      0,
+      10,
+      mockAuthToken(userWallet1.address)
+    );
+    expect(total).to.equal(1n);
+    expect(page[0].payload).to.equal(
+      depositPayload(TEST_TOKEN.tokenId, parseUsdt('1'), depositKey('accounting-abi'))
+    );
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {

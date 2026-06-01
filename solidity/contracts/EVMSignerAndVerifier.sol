@@ -2,22 +2,12 @@
 /* solhint-disable no-console */
 pragma solidity ^0.8.20;
 
-import {ChainType, TokenInfo, EVMKeypair} from "./Types.sol";
+import {ChainType} from "./Types.sol";
 
-import {RLPReader} from "solidity-rlp/contracts/RLPReader.sol";
-import {
-    RLPWriter
-} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.sol";
-
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {
     EIP155Signer
 } from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
-import {
-    Subcall
-} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
 
-import {SliceBytes} from "./lib/SliceBytes.sol";
 import {
     Sapphire
 } from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
@@ -37,7 +27,6 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     mapping(uint256 chainId => uint64) public nonces;
     mapping(uint256 chainId => uint256) public gasPrices;
 
-    bytes21 public roflAppID;
     /// @notice Address of the ROFL-derived secp256k1 key used to authenticate signed queries.
     /// @dev Published by the service at startup via setRoflSignerAddress. Enables msg.sender-based
     ///      auth on view functions (roflEnsureAuthorizedOrigin is tx-only and doesn't work in eth_call).
@@ -52,49 +41,23 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
 
     error GasPriceNotSet(uint256 chainId);
     error InvalidGasPrice();
-    error InvalidNativeTokenDataLength();
-    error InvalidERC20TokenDataLength();
     error InvalidAddress();
     error UnsupportedChainType();
-    error NotAuthorizedROFL();
-    error RoflSignerNotSet();
 
     event GasPriceSet(uint256 indexed chainId, uint256 gasPrice);
     event RoflSignerUpdated(address indexed newSigner);
 
-    modifier onlyROFL() {
-        Subcall.roflEnsureAuthorizedOrigin(roflAppID);
-        _;
-    }
-
-    /// @notice Gate for functions called as signed view queries by ROFL.
-    /// @dev Cannot use roflEnsureAuthorizedOrigin in view context — no tx origin inside eth_call.
-    ///      Relies on sapphirepy signed queries setting msg.sender to the ROFL-derived key.
-    modifier onlyROFLQuery() {
-        if (roflSignerAddress == address(0)) revert RoflSignerNotSet();
-        if (msg.sender != roflSignerAddress) revert NotAuthorizedROFL();
-        _;
-    }
-
-    using RLPReader for RLPReader.RLPItem;
-    using RLPReader for RLPReader.Iterator;
-    using RLPReader for bytes;
-    using SliceBytes for bytes;
-
     /**
      * @notice Initializes the EVMSignerAndVerifier contract.
-     * @param _roflAppID The ROFL app identifier (stable across redeployments)
      * @param _owner The address that will own this contract
      */
     function __EVMSignerAndVerifier_init(
-        bytes21 _roflAppID,
         address _owner
     ) internal onlyInitializing {
         if (_owner == address(0)) revert InvalidAddress();
         __Ownable_init(_owner);
         (evmAddress, secretKey) = _generateKeypair();
         (gasTankAddress, gasTankSecret) = _generateKeypair();
-        roflAppID = _roflAppID;
     }
 
     /**
@@ -135,32 +98,18 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
             abi.encodePacked(seed)
         );
         depositAddr = EthereumUtils.k256PubkeyToEthereumAddress(pk);
-        assembly {
+        assembly ("memory-safe") {
             depositSecret := mload(add(sk, 32))
         }
     }
 
-    /**
-     * @notice Sets the gas price for a specific EVM chain ID.
-     *
-     * @dev This function allows updating the gas price used in transaction generation.
-     *      Only callable by the contract owner to prevent unauthorized manipulation.
-     *      Gas price must be greater than 0 to prevent transaction failures.
-     *
-     * @param chainId The EVM chain ID to set the gas price for.
-     * @param gasPrice The gas price in wei to set for the specified chain ID.
-     */
-    function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
+    function _setGasPrice(uint256 chainId, uint256 gasPrice) internal {
         if (gasPrice == 0) revert InvalidGasPrice();
         gasPrices[chainId] = gasPrice;
         emit GasPriceSet(chainId, gasPrice);
     }
 
-    /// @notice Publish the ROFL-derived signer address on-chain.
-    /// @dev Called by the service at startup. Gated by onlyROFL so only an authenticated ROFL
-    ///      transaction can update it. The address becomes the msg.sender that onlyROFLQuery
-    ///      functions will check against for signed view queries.
-    function setRoflSignerAddress(address newSigner) external onlyROFL {
+    function _setRoflSignerAddress(address newSigner) internal {
         if (newSigner == address(0)) revert InvalidAddress();
         roflSignerAddress = newSigner;
         emit RoflSignerUpdated(newSigner);
@@ -184,7 +133,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @param nonce The sender's transaction nonce on the target chain
      * @return output The RLP-encoded signed transaction ready for broadcast to the target chain
      */
-    function generateNativeTransfer(
+    function _generateNativeTransfer(
         uint256 chainId,
         address userAddress,
         uint256 amount,
@@ -232,7 +181,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @param nonce The sender's transaction nonce on the target chain
      * @return output The RLP-encoded signed transaction ready for broadcast to the target chain
      */
-    function generateERC20Transfer(
+    function _generateERC20Transfer(
         uint256 chainId,
         address userAddress,
         address tokenAddress,
@@ -262,7 +211,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
             );
     }
 
-    // ─── Sweep & Gas Funding (onlyROFL) ───────────────────────────────
+    // ─── Sweep & Gas Funding ─────────────────────────────────────────
 
     /**
      * @notice Sign a native token sweep: depositAddress → evmAddress.
@@ -270,7 +219,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      *      ROFL broadcasts the returned signedTx on the source chain.
      *      ROFL supplies amount (typically balance - 21000*gasPrice) from source chain query.
      */
-    function generateSweepNativeTransfer(
+    function _generateSweepNativeTransfer(
         address beneficiary,
         ChainType chainType,
         uint256 version,
@@ -278,7 +227,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         uint256 amount,
         uint64 sourceChainNonce,
         uint256 gasPrice
-    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+    ) internal view virtual returns (bytes memory signedTx) {
         (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
             beneficiary, chainType, version
         );
@@ -301,7 +250,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @notice Sign an ERC20 sweep: token.transfer(evmAddress, amount) from deposit address.
      * @dev Same derivation + signing pattern. ROFL supplies amount from source chain query.
      */
-    function generateSweepERC20Transfer(
+    function _generateSweepERC20Transfer(
         address beneficiary,
         ChainType chainType,
         uint256 version,
@@ -310,7 +259,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         uint256 amount,
         uint64 sourceChainNonce,
         uint256 gasPrice
-    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+    ) internal view virtual returns (bytes memory signedTx) {
         (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
             beneficiary, chainType, version
         );
@@ -338,7 +287,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @notice Sign a native transfer from a deposit address to an arbitrary destination.
      * @dev Used by emergency withdraw — caller supplies all source-chain state.
      */
-    function generateDepositAddressTransfer(
+    function _generateDepositAddressTransfer(
         address beneficiary,
         ChainType chainType,
         uint256 version,
@@ -371,7 +320,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @dev Used by emergency withdraw for ERC20 tokens — caller supplies all source-chain state.
      *      Signs token.transfer(toAddress, amount) from the derived deposit keypair.
      */
-    function generateDepositAddressERC20Transfer(
+    function _generateDepositAddressERC20Transfer(
         address beneficiary,
         ChainType chainType,
         uint256 version,
@@ -409,13 +358,13 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @notice Sign a gas funding tx: gasTankAddress → depositAddress (native tokens for ERC20 sweep gas).
      * @dev Uses gasTankSecret internally. ROFL supplies nonce/gasPrice from source chain.
      */
-    function generateGasFundingTx(
+    function _generateGasFundingTx(
         address toDepositAddress,
         uint256 chainId,
         uint256 gasAmount,
         uint64 gasTankNonce,
         uint256 gasPrice
-    ) external view onlyROFLQuery returns (bytes memory signedTx) {
+    ) internal view virtual returns (bytes memory signedTx) {
         signedTx = EIP155Signer.sign(
             gasTankAddress,
             gasTankSecret,
@@ -431,128 +380,6 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         );
     }
 
-    // ─── Token Data Encoding/Decoding ─────────────────────────────────
-
-    /**
-     * @notice Decodes EVM native token metadata to extract the chain ID.
-     *
-     * This function decodes the metadata stored for native EVM tokens (like ETH, MATIC, BNB).
-     * Native tokens are identified solely by their chain ID, as they don't have a specific
-     * contract address - they are the blockchain's native currency.
-     *
-     * Data structure (32 bytes total):
-     *   [0..32): chainId (uint256) - The EVM chain where this native token exists
-     *
-     * The function uses assembly for efficient memory access to extract the chain ID
-     * from the packed byte data. Since abi.encodePacked(chainId) creates exactly 32 bytes,
-     * we can directly load the chain ID using mload.
-     *
-     * @dev Uses assembly for gas-efficient decoding of the 32-byte chain ID.
-     *      Expects data created by encodeEVMNativeTokenData().
-     *
-     * @param data The packed metadata bytes containing the chain ID (must be 32 bytes)
-     * @return chainId The EVM chain ID where this native token exists
-     */
-    function decodeEVMNativeTokenData(
-        bytes memory data
-    ) public pure returns (uint256 chainId) {
-        if (data.length != 32) revert InvalidNativeTokenDataLength();
-        assembly {
-            chainId := mload(add(data, 32))
-        }
-    }
-
-    /**
-     * @notice Encodes EVM native token metadata for storage in the token registry.
-     *
-     * This function creates the metadata representation for native EVM tokens (like ETH, MATIC, BNB).
-     * Native tokens only require a chain ID for identification, as they are the inherent currency
-     * of their respective blockchains and don't have contract addresses.
-     *
-     * The encoded data structure is:
-     *   [0..32): chainId (uint256) - The EVM chain where this native token exists
-     *
-     * This creates a compact 32-byte representation that can be stored in the TokenInfo.data
-     * field and later decoded using decodeEVMNativeTokenData().
-     *
-     * @dev Uses abi.encodePacked for gas-efficient encoding without padding.
-     *      The result is exactly 32 bytes and can be decoded with decodeEVMNativeTokenData().
-     *
-     * @param chainId The EVM chain ID where this native token exists (e.g., 1 for Ethereum mainnet)
-     * @return data The packed metadata bytes (32 bytes) ready for storage
-     */
-    function encodeEVMNativeTokenData(
-        uint256 chainId
-    ) public pure returns (bytes memory data) {
-        return abi.encodePacked(chainId);
-    }
-
-    /**
-     * @notice Decodes EVM ERC20 token metadata to extract the chain ID and contract address.
-     *
-     * This function decodes the metadata stored for ERC20 tokens on EVM chains.
-     * ERC20 tokens require both a chain ID (to identify which blockchain) and a contract
-     * address (to identify the specific token contract).
-     *
-     * Data structure (52 bytes total):
-     *   [0..32):  chainId (uint256) - The EVM chain where this token contract exists
-     *   [32..52): tokenAddress (address) - The ERC20 contract address (20 bytes)
-     *
-     * The function uses assembly for efficient memory access to extract both values.
-     * Note: The address is stored in the last 20 bytes of a 32-byte word (right-aligned)
-     * when using abi.encodePacked, so we read at offset 52 to get the full 32-byte word
-     * containing the address.
-     *
-     * @dev Uses assembly for gas-efficient decoding. The address extraction reads a full
-     *      32-byte word at offset 52, where the address is right-aligned.
-     *      Expects data created by encodeEVMErc20TokenData().
-     *
-     * @param data The packed metadata bytes containing chain ID and token address (must be 52 bytes)
-     * @return chainId The EVM chain ID where this token contract exists
-     * @return tokenAddress The ERC20 contract address on the specified chain
-     */
-    function decodeEVMErc20TokenData(
-        bytes memory data
-    ) public pure returns (uint256 chainId, address tokenAddress) {
-        if (data.length != 52) revert InvalidERC20TokenDataLength();
-        assembly {
-            chainId := mload(add(data, 32))
-            tokenAddress := mload(add(data, 52))
-        }
-    }
-
-    /**
-     * @notice Encodes EVM ERC20 token metadata for storage in the token registry.
-     *
-     * This function creates the metadata representation for ERC20 tokens on EVM chains.
-     * ERC20 tokens require both a chain ID (to specify which blockchain) and a contract
-     * address (to identify the specific token contract on that chain).
-     *
-     * The encoded data structure is:
-     *   [0..32):  chainId (uint256) - The EVM chain where this token contract exists
-     *   [32..52): tokenAddress (address) - The ERC20 contract address (20 bytes)
-     *
-     * This creates a compact 52-byte representation that can be stored in the TokenInfo.data
-     * field and later decoded using decodeEVMErc20TokenData().
-     *
-     * The encoding uses abi.encodePacked which concatenates the values without padding,
-     * resulting in exactly 52 bytes (32 for chainId + 20 for address).
-     *
-     * @dev Uses abi.encodePacked for gas-efficient encoding without padding.
-     *      The result is exactly 52 bytes and can be decoded with decodeEVMErc20TokenData().
-     *      The address will be right-aligned in memory when decoded.
-     *
-     * @param chainId The EVM chain ID where this token contract exists (e.g., 1 for Ethereum mainnet)
-     * @param tokenAddress The ERC20 contract address on the specified chain
-     * @return data The packed metadata bytes (52 bytes) ready for storage
-     */
-    function encodeEVMErc20TokenData(
-        uint256 chainId,
-        address tokenAddress
-    ) public pure returns (bytes memory data) {
-        return abi.encodePacked(chainId, tokenAddress);
-    }
-
     function getEVMNonceAndIncrement(
         uint256 chainId
     ) internal returns (uint64 nonce) {
@@ -563,5 +390,5 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[42] private __gap;
+    uint256[43] private __gap;
 }
