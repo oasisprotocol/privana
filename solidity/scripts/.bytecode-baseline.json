@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "contracts": {
+    "Accounting": {
+      "size": 21614
+    },
+    "BridgeModule": {
+      "size": 14835
+    },
+    "BridgeLib": {
+      "size": 5113
+    },
+    "XRose": {
+      "size": 5770
+    },
+    "ROFLBridge": {
+      "size": 2356
+    },
+    "AccountingHistoryModule": {
+      "size": 2968
+    },
+    "LockModule": {
+      "size": 16893
+    }
+  },
+  "headroomFloor": {
+    "Accounting": 200
+  }
+}

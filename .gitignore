@@ -83,3 +83,4 @@ temp/
 tmp/
 *.orc
 accounting-module
+solidity/.openzeppelin/

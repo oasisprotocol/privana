@@ -182,3 +182,22 @@ task("addEVMErc20Token")
     });
     console.log(`Token ID: ${tokenId}`);
   });
+
+// BridgeAsset registration (tokenType = 2). The bridge-side ROSE lives at a
+// different tokenId from the EVMNative ROSE registered by addEVMNativeToken;
+// both can coexist (different purposes) and the bridge reverts BridgeAssetNotSupported
+// against tokenType != 2.
+task("addBridgeAssetToken")
+  .addParam("address", "The address of the Accounting contract")
+  .addParam("symbol", "BridgeAsset symbol, e.g. ROSE")
+  .setAction(async (args, hre) => {
+    const accounting = await hre.ethers.getContractAt("Accounting", args.address);
+    const tokenType = 2;
+    const data = await accounting.encodeBridgeAssetTokenData(args.symbol);
+    const tx = await accounting.setTokenInfo({ tokenType, data });
+    console.log(`Transaction hash: ${tx.hash}`);
+    const receipt = await tx.wait();
+    console.log(`Transaction confirmed in block ${receipt?.blockNumber}`);
+    const tokenId = await accounting.getTokenId({ tokenType, data });
+    console.log(`Token ID: ${tokenId}`);
+  });

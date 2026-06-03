@@ -9,15 +9,21 @@ the ROFL HTTP proxy timeout (~30s). Clients poll GET /deposits/status/{key}.
 
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from web3 import Web3
 
 from src.config import load_settings
 from src.config.chain_config import MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
+from src.models.types import Settings
 from src.services.accounting_contract import get_accounting_contract_service
+from src.services.custody_tx_executor import get_custody_tx_executor
 from src.services.deposit_verifier import DepositVerifier
 from src.services.sweep_engine import (
+    BASE_SEPOLIA_CHAIN_ID,
+    FLOW_NATIVE_ROSE_BRIDGE_IN,
+    FLOW_STANDARD,
+    FLOW_XROSE_BRIDGE_IN,
     DepositAccountingProtocol,
     SweepCreditPendingError,
     SweepEngine,
@@ -54,12 +60,18 @@ class DepositProcessor:
         verifier: DepositVerifier,
         sweep_engine: SweepEngine,
         accounting_service: DepositAccountingProtocol,
+        settings: Optional[Settings] = None,
     ):
         self._verifier = verifier
         self._sweep = sweep_engine
         self._accounting = accounting_service
+        self._settings = settings if settings is not None else load_settings()
         # Strong refs — asyncio.create_task returns can be GC'd without one.
         self._background_tasks: set[asyncio.Task] = set()
+
+    @property
+    def sweep_engine(self) -> SweepEngine:
+        return self._sweep
 
     async def resume_incomplete_sweeps(self) -> None:
         """Resume incomplete sweeps after TEE restart."""
@@ -163,7 +175,21 @@ class DepositProcessor:
         if min_amount > 0 and verified.amount < min_amount:
             raise ValueError("Deposit does not meet minimum requirements")
 
-        token_id = await self._get_token_id(chain_id, verified.token_address)
+        flow_type = FLOW_STANDARD
+        xrose_addr = self._settings.xrose_address
+        if chain_id == self._settings.sapphire_chain_id and verified.is_native:
+            token_id = await self._accounting.get_rose_token_id()
+            flow_type = FLOW_NATIVE_ROSE_BRIDGE_IN
+        elif (
+            chain_id == BASE_SEPOLIA_CHAIN_ID
+            and verified.token_address is not None
+            and xrose_addr
+            and verified.token_address.lower() == xrose_addr.lower()
+        ):
+            token_id = await self._accounting.get_rose_token_id()
+            flow_type = FLOW_XROSE_BRIDGE_IN
+        else:
+            token_id = await self._get_token_id(chain_id, verified.token_address)
 
         if not await self._accounting.is_token_registered(token_id):
             raise ValueError("Token not supported")
@@ -178,10 +204,14 @@ class DepositProcessor:
                 "credited", deposit_id_hex, verified.amount, verified.token_address
             )
 
-        # If a sweep is already in progress for this deposit, return pending
+        # If a sweep is already in progress for this deposit, return pending.
+        # An errored record may be discarded ONLY when no sweep tx has been
+        # broadcast yet: post-broadcast records carry in-flight funds and must
+        # be left to recovery, otherwise a retry would destroy state needed to
+        # drive credit after the burn confirms on Base.
         existing = self._sweep.get_record_by_deposit_id(deposit_id_hex)
         if existing is not None:
-            if existing.error:
+            if existing.error and not existing.sweep_tx_hash:
                 self._sweep.cleanup_record(deposit_id_hex)
             else:
                 return self._deposit_response(
@@ -201,6 +231,7 @@ class DepositProcessor:
                 amount=verified.amount,
                 deposit_id=deposit_id,
                 is_native=verified.is_native,
+                flow_type=flow_type,
             )
         )
         self._background_tasks.add(task)
@@ -222,11 +253,40 @@ class DepositProcessor:
         amount: int,
         deposit_id: bytes,
         is_native: bool,
+        flow_type: str = FLOW_STANDARD,
     ) -> None:
         """Run sweep + credit in background. Errors are persisted to the record."""
         deposit_id_hex = _to_hex(deposit_id)
         try:
-            if is_native:
+            if flow_type == FLOW_NATIVE_ROSE_BRIDGE_IN:
+                await self._sweep.sweep_native_rose_bridge(
+                    deposit_address=deposit_address,
+                    beneficiary=beneficiary,
+                    chain_type=chain_type,
+                    version=version,
+                    chain_id=chain_id,
+                    token_id=token_id,
+                    amount=amount,
+                    deposit_id=deposit_id,
+                )
+            elif flow_type == FLOW_XROSE_BRIDGE_IN:
+                if token_address is None:
+                    raise ValueError(
+                        "xrose_bridge_in flow requires a token_address from the verified deposit"
+                    )
+                await self._sweep.sweep_xrose_bridge(
+                    deposit_address=deposit_address,
+                    beneficiary=beneficiary,
+                    chain_type=chain_type,
+                    version=version,
+                    chain_id=chain_id,
+                    token_id=token_id,
+                    token_address=token_address,
+                    bridge_address=self._settings.rofl_bridge_address,
+                    amount=amount,
+                    deposit_id=deposit_id,
+                )
+            elif is_native:
                 await self._sweep.sweep_native(
                     deposit_address=deposit_address,
                     beneficiary=beneficiary,
@@ -298,10 +358,12 @@ def get_deposit_processor() -> DepositProcessor:
         sweep = SweepEngine(
             accounting_service=accounting,
             chain_rpc_urls=dict(settings.chain_rpc_urls),
+            executor=get_custody_tx_executor(accounting),
         )
         _processor_instance = DepositProcessor(
             verifier=verifier,
             sweep_engine=sweep,
             accounting_service=accounting,
+            settings=settings,
         )
     return _processor_instance

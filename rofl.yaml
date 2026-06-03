@@ -17,6 +17,76 @@ artifacts:
     runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.6/rofl-containers#5aa26a3c5a7e1d284e217959d89b7a620ea7b7fc5079909e25042124ffb384e8
     compose: compose.yaml
 deployments:
+  bridge:
+    app_id: rofl1qz97xzz5ntclyf0hzqw2q4v690uutux9gqezkrvh
+    network: testnet
+    paratime: sapphire
+    admin: easy
+    oci_repository: rofl.sh/1f20f355-6041-475e-84c5-ebd05b0edf87:1779965711
+    trust_root:
+      height: 32284590
+      hash: e5b5ccb112cff1655dc5d4f45bbde2e8db9007295c435abd5cc109736b6057e6
+    policy:
+      quotes:
+        pcs:
+          tcb_validity_period: 30
+          min_tcb_evaluation_data_number: 18
+          tdx: {}
+      enclaves:
+        - id: fU/wxvuKvfiV3V2RmrcwQpIxoMvs5U4p3i8bqYoIGngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: FbsK15vgwnR964Nb63jOex6QVAXxGzENr33Gl7jj570AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+      endorsements:
+        - any: {}
+      fees: endorsing_node
+      max_expiration: 3
+    secrets:
+      - name: ACCOUNTING_CONTRACT_ADDRESS
+        value: pGJwa1gg0wKlK3qOW+ej9g/zxqW94qa+aKcKibIqa1OgvNpWiG1kbmFtZVgrKFRLuEETs7EFts0RozC9/GJH2TzwezSKKtqLAcVom/r+goG2PRclRtPjB2Vub25jZU/HYpV7hcTHqvKKCq8cGlNldmFsdWVYOk5rnVPYUW8TkXOP5ktsUIN5yvzbvt4XaA6OkCPshPwqXPdxVKNs2rWZVQr9jETTnM40h3gsu9Gh78k=
+      - name: ACCOUNTING_GAS_LIMIT
+        value: pGJwa1ggeshEWdI12Hm1vWdQfs0+lwp3dB+eyM0hO67zNvrKIVpkbmFtZVgkOGl/Y9t73MKO0MfG1xnKgP3IQ3tVt6ybehb01o/wHvpV1W2QZW5vbmNlT7vmsiSWFpszY1Z4ZrvZF2V2YWx1ZVbNwx95J8o7CaK2LCjNzF2si6JHqaEw
+      - name: ALCHEMY_API_KEY
+        value: pGJwa1ggfPw2NzT+arcA0TJV5YxR/dhAMp66+MnA63LDRr98uHJkbmFtZVgf9bixChUS7/R3gADmNMB+BA6UIG0O/THachNaAIZhtGVub25jZU/5J2LeviFaz7lcoF1a88BldmFsdWVYJbD82K6fGt1djTZaWi15tdtr+GA54OJBUxTVH0fTAB6fAzwDyQM=
+      - name: API_HOST
+        value: pGJwa1ggPgvmdt2vVavB2aRpk45kJ+mgIOT4F8XELr6yhb4CqyJkbmFtZVgYz9vOT1/CHQ2kqe0jxARsn41vsQnTrJ0+ZW5vbmNlT9tfWiA2gr1dYZ17oM2KAGV2YWx1ZVcysjszzuDhSeyKfoE8eSVN6STczeAQNQ==
+      - name: API_PORT
+        value: pGJwa1ggjriV2CE04S16tRy51+q+mVZlJDpf/w5tCm0aHrlV1BhkbmFtZVgYjJj66+qk+4l6SLwr3t0hNty7ziF0X7CNZW5vbmNlTyntKIeabl/ydl9/C1KEiWV2YWx1ZVTONVlbs29qkjTj6pJmMPzNFqfyhg==
+      - name: AUTH_CLIENTS
+        value: pGJwa1ggWhaFQY7wLmPJmxF+QbuvzeIDRrQyNLetgzSAXnlUyzBkbmFtZVgcMHIm/fV8I3JN5Zr+x+l/5W2XS3hpgvDJGZHtuWVub25jZU+/YbXnJnsx9GwcanI69fJldmFsdWVYh5XGDOckNRR92qS+CQg28SL9gXaBUcR/wRIuR1R9s+w1ORPVAeECSLCkX6jLskOFJ6v/2qiKOdetFnUxvhCVclhPD4Jg4VYTW/7/oF273p8KNjzh4ccABH0GKofeLKRBpIUrFnnHkdE1NV5RcEGnHVoKHdu1SUO7flNNfEl5xOD4AQSEYKaxvg==
+      - name: BRIDGE_BURN_LIMIT_WEI
+        value: pGJwa1ggNjB+DhuKQVi4IBi0Adh5y4wp1Egabr/Gb6lkT59b1B9kbmFtZVglz7TjfRnorRLOx1Dev4aekCb/zObxmFcP1lGVtB6W8smlazz8CmVub25jZU8q/Z39jZPfxF0ENl6/QT1ldmFsdWVYKPTxtugdcZloVOzM5IuVZCzYrJMne6MQ13HHJB7GdVrrSIWoU9QOQIY=
+      - name: BRIDGE_MINT_LIMIT_WEI
+        value: pGJwa1ggnqjZlqq+aazPp80B6+AuI6r/jRrxahP5N4f/cykdan9kbmFtZVgldnaoKeMhjjk4vMcYERcSWPDiSBsDplM8EL51BO036wGdFUGgKGVub25jZU+/0a8StgE07PKcWXcfgh9ldmFsdWVYKKS/b1bduvELsd9L3E9sQ8hBM9c5RhokopyU/LA0LX704RxTJkljuCg=
+      - name: BRIDGE_QUOTE_TTL_SECONDS
+        value: pGJwa1ggcwcuCF5xtKLqWi7B86D/CVjx/u1XRXmzXd/PBikg71hkbmFtZVgosCmqKgHg8invpB18AM9kolD/nAEG0H9v9wwrDN+L4qzP8G3+nmH6ymVub25jZU90WjEOeGUobS1tu8AUZiBldmFsdWVTya9yxCxv0ofolTwemPAvizj0mw==
+      - name: BRIDGE_ROUTE_RECONCILE_INTERVAL
+        value: pGJwa1ggh55cFEpv3hvOw4B8FCosvnTC/DNlHF5rbruz5oiGYGFkbmFtZVgvMD39YurwfN0+euff458PvxZnBJTcuYdin41lGDmkn42YS3ObBTQ2NYv4G1q2CdRlbm9uY2VP9wBbceoeZipReoYaC5FUZXZhbHVlUilHEOT8E7GbnI1chUrhmgdJiw==
+      - name: ENVIRONMENT
+        value: pGJwa1ggBqfWKX8c2yI7dFzL6NIT+Us5Z8PypNAUlRo0zFa+v29kbmFtZVgbRmcwd4eO8vImeudV++zfvaC0DwsBs5bx2oAHZW5vbmNlTxmzNoBFvlZ0Qqc8pfQ3fGV2YWx1ZVgaz2cYQovkgokO+jRvXRiBo1wDtbFMEH7xzJg=
+      - name: LOG_LEVEL
+        value: pGJwa1ggzc7XVclIGabNGzqNHcSUKMpjGW5qXemAFNw9AQpcsmxkbmFtZVgZjmj16pjHFWjHvAmyv2KEgRuBO48tBlCwDmVub25jZU+5d4cHkXdyCczh7Dn9/zBldmFsdWVVtY6LcgqLk2jjo4KyOF6epnFIXcmN
+      - name: MAX_SAPPHIRE_RELEASE_RESERVE_WEI
+        value: pGJwa1ggAJsHoyc5im/GLEzod5hiOSa4kHbBlWA9f1yaUvS+4VVkbmFtZVgwKcrRFKrJjsDKgt4gSEOh4KcQ+P0f6V6Sd5G2NGW9HelubOB3lfkqUSXO/pZtM9PEZW5vbmNlT6vnA6p5IxNrothBwHxvkmV2YWx1ZVghmw9DlYHh6x9mAUZUpU/Ld/XpnNRkI6nn26+/MdgnawMH
+      - name: ROFL_BRIDGE_ADDRESS
+        value: pGJwa1ggoh8MNyqvnm/tj+X2mRcLOTYUaKWL1MyTHAOmJneBKnZkbmFtZVgj+3jH3WBNamMAxuWnNvbBsxYcfZAPEJOpPmSJx+PgYWAdwvNlbm9uY2VPmY+9m5HyxrPqxFmcgo+KZXZhbHVlWDpt7OICpITZDJJuK/Z3wh7/4TrMmgySxHleKJXNja9GYY7Ax+pgJvTVv3ipaYU8ShvAFgzFuFQ1o5tt
+      - name: SAPPHIRE_CHAIN_ID
+        value: pGJwa1gg9zooTwSbNZwMVXM45lgGwX5au10PLCePGPvNm3s4GDpkbmFtZVghO8B18LWHJ+HDkKmOoEDW6Dl/4FrYvoOvDuoIaojFRQtIZW5vbmNlT0l63KjB7ovI/KFi+xmmyGV2YWx1ZVX6T4O1qaaYiQrbIddim44CoAjhiDs=
+      - name: SAPPHIRE_RELEASE_GAS_LIMIT
+        value: pGJwa1ggCXIK29gEm7+g1Dtm/xzw9LGiywi8TtR8Roq1E9uhanxkbmFtZVgqbx99+wjVOHhjtWvjIgoP2RqSvAHPoOGR7i0+uTqH2h9DnzLCAwcu5goIZW5vbmNlT0emRFfuYG5oGZn1Ee52hWV2YWx1ZVU7Feq64FuD8tqKEOhKm2eB8JG6HVs=
+      - name: SAPPHIRE_RELEASE_GAS_SAFETY_MARGIN_BPS
+        value: pGJwa1gg+4Tywos4f/35b8EO1yrMIn+aNQ9xJY4QiceMi3aRj3hkbmFtZVg2tCwGyerYFOtn6R8nn5phKJ1abwZBrIkWPbHWA0HAjyGKw4Sn4hIQcYxTTMkCcxnWDzztspLjZW5vbmNlT4n9ghAH9DLKvkCbrL8ioGV2YWx1ZVW9Fq3jp2fX6Ox8blHtC77SINmfDWA=
+      - name: SAPPHIRE_RPC_URL
+        value: pGJwa1ggJwCB8n80s7IsF3P+8kK4oWLwNuxPdQwv25eNWeTtzj1kbmFtZVgg8kPhSGcUzrUZ5WgXcJvIrvz5jxiX3E81b1yoUF0e8DFlbm9uY2VPAKd4cp1n2Q2HWMFy0nD6ZXZhbHVlWDFrJYMK2WDkdw0+8VJWJEHNjDt+Zzdq6xqEI6tZph111Jr+8JcEj9yFSKwuBnTxzLyS
+      - name: SIWE_DOMAINS
+        value: pGJwa1gg7fG4zJDktDwjrNXFbQHkulZyqWieHi+KWMAPSIUKr0VkbmFtZVgcPr9R6LtKUpSUO22fhBTEtK3pE0335qMXOq4dNGVub25jZU8aRvaItr+BivML80WPXc5ldmFsdWVYKx7/hlSgYubb0x0iQv9BNh5UUIDM4vW8RW9qccVX0pDH76F28gAfsrZ/aNE=
+      - name: WITHDRAWAL_POLL_INTERVAL
+        value: pGJwa1ggaqulEcjxI0iCnfkZ/BK5Bg3ArFbmcv1pCdKsox7Axj9kbmFtZVgohVlJm2RzeqNreVpYo44wGZZ4HriYWR+k1vhnCLriqpweakpkWFuabWVub25jZU8zkNCmydcFUC0yUMwpFGtldmFsdWVSN9At3mBT+hzlltU39nEnwWGh
+      - name: XROSE_ADDRESS
+        value: pGJwa1ggR5+F+jbT7m779nbrIXzja6zj9OzNODgGN/X8eOF4MQxkbmFtZVgd9envo9V4f2tTq0b8QjQ80Css6ITHwkneYCdQk0Jlbm9uY2VPaPOX8hXP/4IBymA/PrnmZXZhbHVlWDpFCuyaNIYJan78YtNjeN2z+Xo+SEAOF9Zx3/7vfM/8KCvL/VuMy7EAshtHxF8zEyeNF8+dh782/XXk
+    machines:
+      default:
+        provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
+        offer: playground_short
+        id: "0000000000000612"
   default:
     app_id: rofl1qrp55hemyhu2g2n6k3jyquu4x92ttmzz0vpad9q6
     network: testnet
@@ -74,8 +144,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: DSzaY8WjOj9PNow/2AMw3DmQn8UwLar57cDswKmwdykAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: M+WEzvMPifBVSvgWHJXuGRZCl6czfQM0NcJpX4IH3PwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: C8NU3CwKgeXKYXDtkEfWrlC8tfxH8sqpn6h6UNwcR3kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: JiZvSR5gom6zufHatVmZErxJ/0L/smAkb8moQMQc+zYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -139,4 +209,4 @@ deployments:
         offer: playground_short
         id: 00000000000005cc
 tooling:
-  version: 0.18.6
+  version: 0.19.0

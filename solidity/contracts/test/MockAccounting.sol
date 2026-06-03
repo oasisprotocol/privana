@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Accounting} from "../Accounting.sol";
-import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
+import {FundLock, InvalidAddress} from "../Types.sol";
 
 /**
  * @title MockAccounting
@@ -10,9 +10,13 @@ import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
  * @dev Overrides the keypair generation to avoid calling Sapphire precompiles.
  */
 contract MockAccounting is Accounting {
-    // Test keypair: #4 of "chimney theory present latin find behave ankle clock shadow earn suit reflect"
-    address private constant TEST_ADDRESS = 0xe6F321Fb3D912Db48DE460560B8bB99B57AeAcA2;
-    bytes32 private constant TEST_SECRET = bytes32(0x9147e5178b1ee427d704dcdb699f1adf9c8a3b58480a6118635a3486ad3a35ce);
+    // Real keypair from Hardhat default accounts[0]. TEST_SECRET is the actual
+    // secp256k1 private key matching TEST_ADDRESS so EIP155Signer.sign produces a
+    // tx whose recovered signer equals evmAddress() — required for bridge-mint
+    // signer-recovery tests on Sapphire. Public well-known test value, not a credential.
+    address private constant TEST_ADDRESS = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
+    // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret
+    bytes32 private constant TEST_SECRET = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address siweAuthAddress) Accounting(siweAuthAddress) {}
@@ -43,7 +47,8 @@ contract MockAccounting is Accounting {
 
     /**
      * @notice Test helper: creditDeposit without onlyROFL check.
-     * @dev Bypasses ROFL auth for Hardhat testing.
+     * @dev Bypasses ROFL auth for Hardhat testing. Delegates to the real
+     *      `_creditDeposit` so test and production paths cannot drift.
      */
     function mockCreditDeposit(
         address beneficiary,
@@ -51,17 +56,7 @@ contract MockAccounting is Accounting {
         uint256 amount,
         bytes32 depositId
     ) external {
-        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
-        if (amount == 0) revert InvalidAmount();
-        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
-        processedDeposits[depositId] = true;
-        balances[beneficiary][tokenId] += amount;
-        _appendHistory(
-            beneficiary,
-            HistoryKind.Deposit,
-            abi.encodePacked(tokenId, amount, depositId)
-        );
-        emit Deposit(tokenId, amount, depositId);
+        _creditDeposit(beneficiary, tokenId, amount, depositId);
     }
 
     /**
@@ -73,5 +68,42 @@ contract MockAccounting is Accounting {
         if (newSigner == address(0)) revert InvalidAddress();
         roflSignerAddress = newSigner;
         emit RoflSignerUpdated(newSigner);
+    }
+
+    /**
+     * @notice Test helper: bump the per-chain custody-EOA nonce counter.
+     * @dev `clearCustodyTx` requires `nonce < nonces[chainId]`, and `nonces`
+     *      defaults to zero, so the clear surface is unreachable until the
+     *      counter is advanced. `nonces` is an inherited public mapping writable
+     *      from this derived mock. Only for testing — NOT for production use.
+     */
+    function mockSetNonce(uint256 chainId, uint64 value) external {
+        nonces[chainId] = value;
+    }
+
+    /**
+     * @notice Test helper: append a FundLock directly to a user's activeLocks,
+     *         bypassing createLock entirely.
+     * @dev Required to test downstream lock-path guards (modifyLock /
+     *      withdrawFromLock) once createLock itself begins rejecting BridgeAsset.
+     *      Only for testing — NOT for production use.
+     */
+    function mockForceLock(
+        address userAddress,
+        uint256 lockId,
+        address serviceId,
+        bytes32 tokenId,
+        uint256 amount,
+        uint256 expiry
+    ) external {
+        userInfo[userAddress].activeLocks.push(
+            FundLock({
+                lockId: lockId,
+                serviceId: serviceId,
+                tokenId: tokenId,
+                amount: amount,
+                expiry: expiry
+            })
+        );
     }
 }

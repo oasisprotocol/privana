@@ -1,7 +1,7 @@
 services:
   accounting-module:
     build: .
-    image: "docker.io/ptrusr/accounting-module:staging"
+    image: "ghcr.io/rube-de/flexvaults:v31"
     platform: linux/amd64
     environment:
       - API_HOST=${API_HOST:-0.0.0.0}
@@ -18,6 +18,12 @@ services:
       - WITHDRAWAL_POLL_INTERVAL=${WITHDRAWAL_POLL_INTERVAL:-12}
       - WITHDRAWAL_RESOLUTION_TIMEOUT=${WITHDRAWAL_RESOLUTION_TIMEOUT:-60}
       - MIN_WITHDRAWAL_GAS_BALANCE=${MIN_WITHDRAWAL_GAS_BALANCE:-10000000000000}
+      - BRIDGE_ROUTE_RECONCILE_INTERVAL=${BRIDGE_ROUTE_RECONCILE_INTERVAL:-30}
+      # Bridge — destination (chain-agnostic via CREATE3)
+      - ROFL_BRIDGE_ADDRESS=${ROFL_BRIDGE_ADDRESS}
+      - XROSE_ADDRESS=${XROSE_ADDRESS}
+      - BRIDGE_MINT_LIMIT_WEI=${BRIDGE_MINT_LIMIT_WEI}
+      - BRIDGE_BURN_LIMIT_WEI=${BRIDGE_BURN_LIMIT_WEI}
       # JWT Authentication configuration
       - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-12}
       - JWT_REFRESH_EXPIRY_DAYS=${JWT_REFRESH_EXPIRY_DAYS:-7}
@@ -35,14 +41,19 @@ services:
       - AUTH_CLIENTS=${AUTH_CLIENTS:-[]}
       # Sweep engine state
       - SWEEP_STATE_DIR=/data/sweep-engine
+      # Custody-tx executor state — durable per-chain queue for every tx
+      # signed by Accounting.evmAddress() (bridge mint/burn, sapphire release,
+      # normal withdrawals). Persistence is fail-closed: tmpfs is not a usable
+      # default, the executor refuses to drain without a real disk-backed mount.
+      - CUSTODY_TX_STATE_DIR=${CUSTODY_TX_STATE_DIR:-/data/custody-tx-executor}
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
       - sweep-engine-data:/data/sweep-engine
+      - custody-tx-executor-data:/data/custody-tx-executor
     ports:
       - "8000:8000"
-    annotations:
-      net.oasis.proxy.ports.8000.custom_domain: testnet.privana.finance
     restart: on-failure
 
 volumes:
   sweep-engine-data:
+  custody-tx-executor-data:

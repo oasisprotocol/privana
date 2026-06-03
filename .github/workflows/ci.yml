@@ -87,6 +87,14 @@ jobs:
         run: |
           test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json || (echo "Solidity artifacts not found!" && exit 1)
 
+      - name: Storage layout invariants (delegatecall safety)
+        # Pre-flight the Accounting<->module delegatecall invariants (storage
+        # layout, fallback dispatcher, signer/secret isolation) with --bail, so a
+        # slot mismatch fails fast instead of being masked by the full suite below.
+        run: cd solidity && bun run test:hardhat -- --bail --grep "storage|fallback dispatcher|setBridgeModule|signer isolation"
+        env:
+          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+
       - name: Run Solidity tests
         run: make solidity-test
 

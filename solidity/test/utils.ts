@@ -3,7 +3,8 @@ import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HttpNetworkConfig } from "hardhat/types/config";
 import { config, ethers, network, upgrades } from 'hardhat';
 import { JsonRpcProvider } from 'ethers';
-import { MockAccounting } from "../typechain-types";
+import { LockModule, MockAccounting } from "../typechain-types";
+import { getCombinedAccountingAt } from "./util/links";
 
 export const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
 
@@ -36,12 +37,24 @@ export function mockAuthToken(address: string) {
 }
 
 /**
+ * Combined-ABI handle bound to the Accounting proxy: the union of
+ * `MockAccounting` (resident selectors) and `LockModule` (lock selectors routed
+ * through the proxy fallback via delegatecall). Cast call sites to this type so
+ * `accounting.createLock(...)` etc. keep their static typing now that the lock
+ * subsystem lives in the delegated module.
+ */
+export type CombinedMockAccounting = MockAccounting & LockModule;
+
+/**
  * Helper to deploy the mock accounting contract with an unencrypted transaction and with workarounds for flaky UUPS wrapper errors.
+ * Wires the delegated history and lock modules, then returns a combined-ABI
+ * handle so both resident and lock selectors are callable at the proxy address.
  * @param mockSiweAuthAddress SIWE auth contract to initialize Accounting with
  */
-export async function deployMockAccounting(mockSiweAuthAddress: string) {
+export async function deployMockAccounting(mockSiweAuthAddress: string): Promise<CombinedMockAccounting> {
 	const deployer = getDeployer();
 	const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+	const AccountingHistoryModuleFactory = await ethers.getContractFactory('AccountingHistoryModule', deployer);
 	let accounting: MockAccounting;
 
 	let deploymentSucceeded = false;
@@ -51,16 +64,32 @@ export async function deployMockAccounting(mockSiweAuthAddress: string) {
 			accounting = await upgrades.deployProxy(
 				AccountingFactory,
 				[MOCK_ROFL_APP_ID, deployer.address],
-				{ kind: 'uups', initializer: 'initialize', constructorArgs: [mockSiweAuthAddress] }
+				{
+					kind: 'uups',
+					initializer: 'initialize',
+					constructorArgs: [mockSiweAuthAddress],
+					unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
+				}
 			) as unknown as MockAccounting;
 			await accounting.waitForDeployment();
 			accounting = (await ethers.getContractFactory('MockAccounting')).attach(await accounting.getAddress()) as unknown as MockAccounting;
-			//accounting = accounting.connect((await getSigners())[0]); // Use wrapped signer for sending txes.
+			const historyModule = await AccountingHistoryModuleFactory.deploy();
+			await historyModule.waitForDeployment();
+			const linkHistoryTx = await accounting.setHistoryModule(await historyModule.getAddress());
+			await linkHistoryTx.wait();
+			// Wire the delegated lock module so createLock / modifyLock / ... route
+			// through the proxy fallback to LockModule via delegatecall.
+			const LockModuleFactory = await ethers.getContractFactory('LockModule', deployer);
+			const lockModule = await LockModuleFactory.deploy();
+			await lockModule.waitForDeployment();
+			const linkLockTx = await accounting.setLockModule(await lockModule.getAddress());
+			await linkLockTx.wait();
 			deploymentSucceeded = true;
 		} catch (error) {
 			console.log('Deployment failed, retrying...', error);
 			await new Promise(resolve => setTimeout(resolve, 1000));
 		}
 	}
-	return accounting!;
+	const proxyAddr = await accounting!.getAddress();
+	return (await getCombinedAccountingAt(proxyAddr, deployer, ['MockAccounting', 'LockModule'])) as unknown as CombinedMockAccounting;
 }

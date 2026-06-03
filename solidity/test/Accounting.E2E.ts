@@ -1,16 +1,17 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
 import { keccak256, Wallet } from 'ethers';
-import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
+import { AccountingHistoryModule, MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
+import { CombinedMockAccounting, deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
 // the enum declaration order in Types.sol.
 const ChainType = { EVM: 0 } as const;
 const TokenType = { NativeEVM: 0, ERC20: 1 } as const;
+const HistoryKind = { Deposit: 0 } as const;
 
 const types = {
   Lock: [
@@ -74,16 +75,36 @@ function parseUsdt(amount: string): bigint {
   return wholePart + fractionPart;
 }
 
+function amountWord(amount: bigint): string {
+  return ethers.zeroPadValue(ethers.toBeHex(amount), 32);
+}
+
 async function getBlockTimestamp(): Promise<number> {
   const block = await ethers.provider.getBlock('latest');
   return block!.timestamp;
 }
 
+type UpgradeDeployment = {
+  deploymentTransaction?: () => { wait(): Promise<unknown> } | null;
+  deployTransaction?: { wait(): Promise<unknown> };
+};
+
+async function waitForUpgradeTx(contract: UpgradeDeployment): Promise<void> {
+  const deploymentTx =
+    typeof contract.deploymentTransaction === "function"
+      ? contract.deploymentTransaction()
+      : undefined;
+  const tx = deploymentTx ?? contract.deployTransaction;
+  if (tx) {
+    await tx.wait();
+  }
+}
+
 describe('Accounting', function () {
-  let accounting: MockAccounting;
+  let accounting: CombinedMockAccounting;
   let mockSiweAuth: MockSiweAuth;
-  let accountingUser1: MockAccounting;
-  let accountingUser2: MockAccounting;
+  let accountingUser1: CombinedMockAccounting;
+  let accountingUser2: CombinedMockAccounting;
   let user1: HardhatEthersSigner;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
@@ -99,10 +120,10 @@ describe('Accounting', function () {
     await mockSiweAuth.waitForDeployment();
 
     accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
-    accountingUser1 = accounting.connect(user1) as MockAccounting;
-    accountingUser2 = accounting.connect(user2) as MockAccounting;
+    accountingUser1 = accounting.connect(user1) as CombinedMockAccounting;
+    accountingUser2 = accounting.connect(user2) as CombinedMockAccounting;
 
-    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
+    const hdNodeWallet = ethers.HDNodeWallet.fromPhrase(
       (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
     );
 
@@ -769,7 +790,7 @@ describe('Accounting', function () {
 });
 
 describe('WithdrawFromLock', function () {
-  let accounting: MockAccounting;
+  let accounting: CombinedMockAccounting;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
@@ -981,10 +1002,10 @@ describe('WithdrawFromLock', function () {
 });
 
 describe('ModifyLock', function () {
-  let accounting: MockAccounting;
+  let accounting: CombinedMockAccounting;
   let mockSiweAuth: MockSiweAuth;
-  let accountingUser1: MockAccounting;
-  let accountingUser2: MockAccounting;
+  let accountingUser1: CombinedMockAccounting;
+  let accountingUser2: CombinedMockAccounting;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
   let userWallet1: Wallet;
   let userWallet2: Wallet;
@@ -1013,8 +1034,8 @@ describe('ModifyLock', function () {
       undefined,
       "m/44'/60'/0'/0/1",
     ).connect(provider) as any;
-    accountingUser1 = accounting.connect(userWallet1) as MockAccounting;
-    accountingUser2 = accounting.connect(userWallet2) as MockAccounting;
+    accountingUser1 = accounting.connect(userWallet1) as CombinedMockAccounting;
+    accountingUser2 = accounting.connect(userWallet2) as CombinedMockAccounting;
 
     const domainTuple = await accounting.eip712Domain();
     domain = {
@@ -1462,8 +1483,10 @@ describe('Upgradability', function () {
     const AccountingV2Factory = await ethers.getContractFactory('MockAccounting');
     const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
-      constructorArgs: [await mockSiweAuth.getAddress()]
+      constructorArgs: [await mockSiweAuth.getAddress()],
+      unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
     }) as unknown as MockAccounting;
+    await waitForUpgradeTx(upgraded);
 
     // Verify state is preserved after upgrade
     const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
@@ -1493,6 +1516,88 @@ describe('Upgradability', function () {
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
   });
 
+  it("Should atomically link AccountingHistoryModule when upgrading from the deployed bridge layout", async function () {
+    this.timeout(120000);
+
+    const deployer = getDeployer();
+    const siweAuthAddress = await mockSiweAuth.getAddress();
+    const PreviousFactory = await ethers.getContractFactory('MockAccountingPrevious', deployer);
+    const previous = await upgrades.deployProxy(
+      PreviousFactory,
+      [MOCK_ROFL_APP_ID, deployer.address],
+      {
+        kind: 'uups',
+        initializer: 'initialize',
+        constructorArgs: [siweAuthAddress],
+        unsafeAllow: ['constructor', 'state-variable-immutable'],
+      },
+    );
+    await previous.waitForDeployment();
+    const previousProxyAddress = await previous.getAddress();
+
+    // Seed bridge-slot state (slot 108) so we can prove it survives the upgrade
+    // that adds `history` (111) and `historyModule` (112) in the reserved gap.
+    const ledgerSeed = parseUsdt("7");
+    await (await previous.mockSetLedgerTotal(TEST_TOKEN.tokenId, ledgerSeed)).wait();
+
+    const AccountingHistoryModuleFactory = await ethers.getContractFactory(
+      'AccountingHistoryModule',
+      deployer,
+    );
+    const historyModule = await AccountingHistoryModuleFactory.deploy();
+    await historyModule.waitForDeployment();
+    const historyAddress = await historyModule.getAddress();
+
+    const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+    const upgraded = await upgrades.upgradeProxy(
+      previousProxyAddress,
+      AccountingFactory,
+      {
+        kind: 'uups',
+        constructorArgs: [siweAuthAddress],
+        unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
+        call: { fn: "setHistoryModule", args: [historyAddress] },
+      },
+    ) as unknown as MockAccounting;
+    await waitForUpgradeTx(upgraded);
+
+    // Module linked atomically with the upgrade; owner and the seeded bridge
+    // slot (108) are preserved — `history`/`historyModule` consumed only
+    // reserved gap space, moving no deployed variable.
+    expect(await upgraded.historyModule()).to.equal(historyAddress);
+    expect(await upgraded.owner()).to.equal(deployer.address);
+    expect(await upgraded.ledgerTotalOf(TEST_TOKEN.tokenId)).to.equal(ledgerSeed);
+
+    // History storage occupies what was gap slot 111 in the bridge layout: it
+    // starts empty and is fully functional through the delegated module.
+    const historyReader = AccountingHistoryModuleFactory.attach(
+      previousProxyAddress,
+    ) as unknown as AccountingHistoryModule;
+    const [, totalBefore] = await historyReader.getHistory(
+      0,
+      10,
+      mockAuthToken(deployer.address),
+    );
+    expect(totalBefore).to.equal(0n);
+
+    const tokenData = ethers.concat([
+      ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+      ethers.zeroPadValue(TEST_TOKEN.address, 20),
+    ]);
+    await (await upgraded.setTokenInfo({ tokenType: TEST_TOKEN.tokenType, data: tokenData })).wait();
+    const depositId = ethers.keccak256(ethers.toUtf8Bytes("post-upgrade-history"));
+    await (await upgraded.mockCreditDeposit(deployer.address, TEST_TOKEN.tokenId, parseUsdt("3"), depositId)).wait();
+
+    const [history, total] = await historyReader.getHistory(
+      0,
+      10,
+      mockAuthToken(deployer.address),
+    );
+    expect(total).to.equal(1n);
+    expect(history[0].kind).to.equal(HistoryKind.Deposit);
+    expect(history[0].timestamp).to.be.greaterThan(0n);
+  });
+
   it("Should only allow owner to upgrade", async function () {
     const attacker = getDeployer(1);
 
@@ -1503,7 +1608,8 @@ describe('Upgradability', function () {
     if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
       const upgradeFactory = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
         kind: 'uups',
-        constructorArgs: [await mockSiweAuth.getAddress()]
+        constructorArgs: [await mockSiweAuth.getAddress()],
+        unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
       });
 
       let receipt = await ethers.provider.getTransactionReceipt(upgradeFactory.deployTransaction!.hash);
@@ -1516,7 +1622,8 @@ describe('Upgradability', function () {
       await expect(
         upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
           kind: 'uups',
-          constructorArgs: [await mockSiweAuth.getAddress()]
+          constructorArgs: [await mockSiweAuth.getAddress()],
+          unsafeAllow: ['constructor', 'state-variable-immutable', 'delegatecall'],
         })
       ).to.be.revertedWithCustomError(accounting, "OwnableUnauthorizedAccount");
     }
@@ -1561,23 +1668,16 @@ describe('Upgradability', function () {
   });
 
   it("Should support V2 upgrade with new state variables and reinitializer", async function () {
-    const deployer = getDeployer();
-    const user = (await ethers.getSigners())[1];
-
-    // Set up initial state
-    const initialBalance = parseUsdt("50");
-    await accounting.setBalance(user.address, TEST_TOKEN.tokenId, initialBalance);
-
-    const balanceBefore = await accounting.getBalance(user.address, TEST_TOKEN.tokenId);
-    expect(balanceBefore).to.equal(initialBalance);
+    const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
 
     // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
     const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
     const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
-      unsafeAllow: ['missing-initializer'],
+      unsafeAllow: ['missing-initializer', 'constructor', 'state-variable-immutable', 'delegatecall'],
       constructorArgs: [await mockSiweAuth.getAddress()],
     }) as unknown as MockAccountingV2;
+    await waitForUpgradeTx(upgraded);
 
     // Call reinitializer
     await upgraded.initializeV2(42);
@@ -1586,8 +1686,9 @@ describe('Upgradability', function () {
     expect(await upgraded.newStateVar()).to.equal(42);
 
     // Verify existing state is preserved
-    const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
-    expect(balanceAfter).to.equal(initialBalance, "Balance should survive V2 upgrade");
+    const tokenInfoAfter = await upgraded.tokens(TEST_TOKEN.tokenId);
+    expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should survive V2 upgrade");
+    expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should survive V2 upgrade");
 
     // Reinitializer should not be callable again
     await expect(

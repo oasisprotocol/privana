@@ -8,3 +8,6 @@ import "./transfer";
 import "./deposits";
 import "./emergencyWithdraw";
 import "./directWithdraw";
+import "./verify-createx-parity";
+import "./deploy-bridge";
+import "./bridge";

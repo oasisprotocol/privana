@@ -1,0 +1,2 @@
+solidity/contracts/XERC20.sol	solidity/contracts/bridge/XRose.sol	7a9b9a0e4cf1679a3bf853df69c1ee58bd863b19a91c22a4ce71ae35220e62e2
+solidity/interfaces/IXERC20.sol	solidity/contracts/bridge/IXERC20.sol	2c2b7cdc5ef4c51812bc422b24e3f4adf1247c08220d96fc162463b17993adba
