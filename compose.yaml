@@ -25,7 +25,6 @@ services:
       - JWT_AUDIENCE=${JWT_AUDIENCE:-flexvaults}
       # SIWE configuration
       - SIWE_DOMAINS=${SIWE_DOMAINS}
-      - SIWE_ALLOWED_CHAIN_IDS=${SIWE_ALLOWED_CHAIN_IDS:-}
       # Auth token storage configuration
       - AUTH_TOKEN_STORAGE_DIR=${AUTH_TOKEN_STORAGE_DIR:-.auth_tokens}
       - SIWE_NONCE_EXPIRY_SECONDS=${SIWE_NONCE_EXPIRY_SECONDS:-300}

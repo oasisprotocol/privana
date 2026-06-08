@@ -16,7 +16,7 @@ from src.auth.pkce import verify_pkce
 from src.auth.rate_limiter import get_auth_rate_limiter, request_identity
 from src.auth.siwe_config import get_siwe_config, get_siwe_configs
 from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
-from src.config import DEFAULT_SIWE_ALLOWED_CHAIN_IDS, load_settings
+from src.config import load_settings
 from src.models.authorize import (
     AuthorizeCodeRequest,
     AuthorizeCodeResponse,
@@ -32,17 +32,6 @@ _ERROR_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "a
 _AUTH_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "static" / "auth.js"
 _AUTH_STYLESHEET_PATH = Path(__file__).resolve().parent.parent / "static" / "auth.css"
 _VALID_RESPONSE_MODES = {"web_message", "redirect"}
-
-
-def _allowed_siwe_chains() -> set[int]:
-    settings = load_settings()
-    if settings.siwe_allowed_chain_ids:
-        return set(settings.siwe_allowed_chain_ids)
-    return (
-        DEFAULT_SIWE_ALLOWED_CHAIN_IDS
-        | set(settings.chain_rpc_urls.keys())
-        | {settings.sapphire_chain_id}
-    )
 
 
 def _headers_for_origin(origin: Optional[str]) -> dict[str, str]:
@@ -125,7 +114,6 @@ async def authorize_page(
     state: str = Query(..., min_length=1),
     response_mode: str = Query(default="web_message"),
     code_challenge_method: str = Query(default="S256"),
-    chain_id: int = Query(..., ge=1),
 ) -> HTMLResponse:
     """Serve the Flexvaults auth page for popup/redirect SIWE login."""
     registry = get_client_registry()
@@ -137,7 +125,6 @@ async def authorize_page(
         state=state,
         response_mode=response_mode,
         code_challenge_method=code_challenge_method,
-        chain_id=chain_id,
     )
 
     try:
@@ -160,11 +147,6 @@ async def authorize_page(
         return _render_error_page("Unsupported PKCE", "Only S256 PKCE is supported.")
     if payload.response_mode not in _VALID_RESPONSE_MODES:
         return _render_error_page("Unsupported Response Mode", "Unsupported response_mode.")
-    if payload.chain_id not in _allowed_siwe_chains():
-        return _render_error_page(
-            "Unsupported Chain",
-            f"Chain ID {payload.chain_id} is not supported for hosted sign-in.",
-        )
 
     normalized_redirect_uri = ClientRegistry.normalize_redirect_uri(payload.redirect_uri)
     redirect_origin = ClientRegistry.redirect_origin(normalized_redirect_uri)
@@ -177,13 +159,12 @@ async def authorize_page(
         "codeChallengeMethod": payload.code_challenge_method,
         "state": payload.state,
         "responseMode": payload.response_mode,
-        "preferredChainId": payload.chain_id,
-        "supportedChainIds": sorted(_allowed_siwe_chains()),
         "siweDomain": siwe_config.domain,
         "siweOrigin": siwe_config.origin,
         "authTokenValiditySeconds": settings.auth_token_validity_seconds,
         "nonceEndpoint": _root_path_aware_path(request, "get_siwe_nonce"),
         "authorizeEndpoint": _root_path_aware_path(request, "authorize_code"),
+        "sapphireChainId": settings.sapphire_chain_id,
     }
 
     template = _AUTH_TEMPLATE_PATH.read_text(encoding="utf-8")

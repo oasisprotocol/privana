@@ -112,7 +112,7 @@ async function siweLogin(params: SiweLoginParams): Promise<JsonObject> {
     address: params.userAddress,
     chainId: params.chainId,
     uri: params.apiBaseUrl,
-    statement: "Sign in to view private Accounting balances.",
+    statement: `Sign in to Privana on chain ${params.chainId}`,
     nonce,
     issuedAt,
     expirationTime,

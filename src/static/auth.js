@@ -31,11 +31,11 @@ function setBusy(isBusy) {
   cancelButton.disabled = isBusy;
 }
 
-function buildSiweMessage({ domain, address, uri, chainId, nonce, issuedAt, expirationTime }) {
+function buildSiweMessage({ domain, address, uri, chainId, nonce, issuedAt, expirationTime, destinationChainId }) {
   return `${domain} wants you to sign in with your Ethereum account:
 ${address}
 
-Sign in to Flexvaults
+Sign in to Privana on chain ${destinationChainId}
 
 URI: ${uri}
 Version: 1
@@ -55,40 +55,9 @@ function buildRedirectUrl(params) {
   return url.toString();
 }
 
-function toChainHex(chainId) {
-  return `0x${Number(chainId).toString(16)}`;
-}
-
-function isSupportedChain(chainId) {
-  return context.supportedChainIds.includes(chainId);
-}
-
 async function getCurrentChainId() {
   const chainIdHex = await window.ethereum.request({ method: "eth_chainId" });
   return Number.parseInt(chainIdHex, 16);
-}
-
-async function switchToChain(targetChainId) {
-  await window.ethereum.request({
-    method: "wallet_switchEthereumChain",
-    params: [{ chainId: toChainHex(targetChainId) }],
-  });
-
-  const nextChainId = await getCurrentChainId();
-  if (nextChainId !== targetChainId) {
-    throw new Error(`Unable to switch wallet to chain ${targetChainId}.`);
-  }
-
-  return nextChainId;
-}
-
-async function resolveSigningChain() {
-  const currentChainId = await getCurrentChainId();
-  if (isSupportedChain(currentChainId)) {
-    return currentChainId;
-  }
-
-  return switchToChain(context.preferredChainId);
 }
 
 function deliverSuccess(code) {
@@ -178,7 +147,7 @@ async function startLogin() {
     walletAddressElement.textContent = address;
 
     showStatus("Preparing sign-in message…");
-    const chainId = await resolveSigningChain();
+    const chainId = await getCurrentChainId();
     const nonceResponse = await fetchJson(
       `${context.nonceEndpoint}?address=${encodeURIComponent(address)}`,
       { method: "GET", headers: {} },
@@ -198,6 +167,7 @@ async function startLogin() {
       nonce: nonceResponse.nonce,
       issuedAt,
       expirationTime,
+      destinationChainId: context.sapphireChainId,
     });
 
     showStatus("Requesting wallet signature…");

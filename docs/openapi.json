@@ -2086,16 +2086,6 @@
               "title": "Code Challenge Method",
               "type": "string"
             }
-          },
-          {
-            "in": "query",
-            "name": "chain_id",
-            "required": true,
-            "schema": {
-              "minimum": 1,
-              "title": "Chain Id",
-              "type": "integer"
-            }
           }
         ],
         "responses": {

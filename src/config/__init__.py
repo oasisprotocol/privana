@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Tuple
 
 from src.models.types import Settings
 
@@ -40,15 +40,6 @@ NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
     11155111: 18,
 }
 
-DEFAULT_SIWE_ALLOWED_CHAIN_IDS: Set[int] = {
-    1,  # Ethereum Mainnet
-    8453,  # Base Mainnet
-    84532,  # Base Sepolia
-    23294,  # Sapphire Mainnet
-    23295,  # Sapphire Testnet
-    11155111,  # Ethereum Sepolia
-}
-
 
 def _get_int(name: str, default: int) -> int:
     value = os.getenv(name)
@@ -58,13 +49,6 @@ def _get_int(name: str, default: int) -> int:
         return int(value, 0)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
-
-
-def _parse_chain_ids(value: Optional[str]) -> Set[int]:
-    """Parse comma-separated chain IDs (supports hex like 0x5afe)."""
-    if not value:
-        return set()
-    return {int(x.strip(), 0) for x in value.split(",") if x.strip()}
 
 
 def _parse_siwe_domains(value: Optional[str]) -> Tuple[str, ...]:
@@ -146,7 +130,6 @@ def load_settings(refresh: bool = False) -> Settings:
                 "AUTH_TOKEN_VALIDITY_SECONDS", _defaults.auth_token_validity_seconds
             ),
             siwe_domains=_parse_siwe_domains(os.getenv("SIWE_DOMAINS")),
-            siwe_allowed_chain_ids=_parse_chain_ids(os.getenv("SIWE_ALLOWED_CHAIN_IDS")),
             auth_token_storage_dir=os.getenv(
                 "AUTH_TOKEN_STORAGE_DIR", _defaults.auth_token_storage_dir
             ),
@@ -200,5 +183,4 @@ __all__ = [
     "load_settings",
     "CHAIN_NAMES",
     "NATIVE_TOKEN_SYMBOLS",
-    "DEFAULT_SIWE_ALLOWED_CHAIN_IDS",
 ]
