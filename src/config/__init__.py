@@ -17,22 +17,27 @@ _defaults = Settings()
 
 ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
     84532: "base-sepolia",
+    11155111: "eth-sepolia",
 }
 
 CHAIN_NAMES: Dict[int, str] = {
     84532: "Base Sepolia",
+    11155111: "Ethereum Sepolia",
 }
 
 NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     84532: "ETH",
+    11155111: "ETH",
 }
 
 NATIVE_TOKEN_NAMES: Dict[int, str] = {
     84532: "Ether",
+    11155111: "Ether",
 }
 
 NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
     84532: 18,
+    11155111: 18,
 }
 
 DEFAULT_SIWE_ALLOWED_CHAIN_IDS: Set[int] = {
@@ -68,6 +73,12 @@ def _parse_siwe_domains(value: Optional[str]) -> Tuple[str, ...]:
     Order is preserved; canonical-form dedupe is handled downstream in
     ``siwe_config``.
     """
+    if not value:
+        return ()
+    return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
+
+
+def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
     if not value:
         return ()
     return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
@@ -163,6 +174,23 @@ def load_settings(refresh: bool = False) -> Settings:
             ),
             trust_x_forwarded_for=_get_bool(
                 "TRUST_X_FORWARDED_FOR", _defaults.trust_x_forwarded_for
+            ),
+            moonpay_api_key=os.getenv("MOONPAY_API_KEY", _defaults.moonpay_api_key),
+            moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY", _defaults.moonpay_secret_key),
+            moonpay_webhook_secret_key=os.getenv(
+                "MOONPAY_WEBHOOK_SECRET_KEY", _defaults.moonpay_webhook_secret_key
+            ),
+            moonpay_allowed_hosts=(
+                _parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_HOSTS"))
+                or _defaults.moonpay_allowed_hosts
+            ),
+            moonpay_allowed_currency_codes=(
+                _parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_CURRENCY_CODES"))
+                or _defaults.moonpay_allowed_currency_codes
+            ),
+            moonpay_webhook_tolerance_seconds=_get_int(
+                "MOONPAY_WEBHOOK_TOLERANCE_SECONDS",
+                _defaults.moonpay_webhook_tolerance_seconds,
             ),
         )
     return _settings

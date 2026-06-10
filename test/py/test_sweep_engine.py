@@ -461,3 +461,46 @@ async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=True)
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
     assert call_kwargs.kwargs["gas_amount"] == 200_000_000_000_000 + l1_fee
+
+
+def test_persist_error_skips_record_with_broadcast_sweep_tx(engine):
+    """A broadcast sweep tx must never be flagged as terminally errored."""
+    deposit_id_hex = "0x" + "dd" * 32
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        deposit_id_hex=deposit_id_hex,
+        sweep_tx_hash="0x" + "cc" * 32,
+    )
+    engine._save_record(record)
+
+    engine.persist_error(deposit_id_hex, "receipt polling timed out")
+
+    stored = engine.get_record_by_deposit_id(deposit_id_hex)
+    assert stored is not None
+    assert stored.error is None
+    assert stored.sweep_tx_hash == "0x" + "cc" * 32
+
+
+def test_persist_error_marks_record_without_sweep_tx(engine):
+    deposit_id_hex = "0x" + "ee" * 32
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.PENDING,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        deposit_id_hex=deposit_id_hex,
+    )
+    engine._save_record(record)
+
+    engine.persist_error(deposit_id_hex, "gas funding failed")
+
+    stored = engine.get_record_by_deposit_id(deposit_id_hex)
+    assert stored is not None
+    assert stored.error == "gas funding failed"

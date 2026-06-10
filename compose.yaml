@@ -35,6 +35,13 @@ services:
       - AUTH_CLIENTS=${AUTH_CLIENTS:-[]}
       # Sweep engine state
       - SWEEP_STATE_DIR=/data/sweep-engine
+      # MoonPay on-ramp configuration
+      - MOONPAY_API_KEY=${MOONPAY_API_KEY:-}
+      - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY:-}
+      - MOONPAY_WEBHOOK_SECRET_KEY=${MOONPAY_WEBHOOK_SECRET_KEY:-}
+      - MOONPAY_ALLOWED_HOSTS=${MOONPAY_ALLOWED_HOSTS:-}
+      - MOONPAY_ALLOWED_CURRENCY_CODES=${MOONPAY_ALLOWED_CURRENCY_CODES:-}
+      - MOONPAY_WEBHOOK_TOLERANCE_SECONDS=${MOONPAY_WEBHOOK_TOLERANCE_SECONDS:-300}
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
       - sweep-engine-data:/data/sweep-engine
