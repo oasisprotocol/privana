@@ -51,7 +51,7 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         chain_id=11155111,
         finality_depth=32,  # Ethereum Sepolia (2 epochs)
         min_deposit_native_wei=50_000_000_000_000_000,  # 0.05 ETH
-        min_deposit_erc20_wei=50_000_000,  # 50 USDC (6 decimals)
+        min_deposit_erc20_wei=50_000_000,  # ERC-20 base-unit floor (token decimals vary)
         gas_funding_amount_wei=2_000_000_000_000_000,  # 0.002 ETH (~65k gas * 30 gwei)
     ),
 }

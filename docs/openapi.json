@@ -143,6 +143,63 @@
         "title": "BatchBalancesResponse",
         "type": "object"
       },
+      "CreateOnRampIntentRequest": {
+        "description": "Authenticated Privana intent created before opening MoonPay.",
+        "properties": {
+          "base_currency_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency Amount"
+          },
+          "base_currency_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency Code"
+          },
+          "chain_id": {
+            "title": "Chain Id",
+            "type": "integer"
+          },
+          "moonpay_currency_code": {
+            "title": "Moonpay Currency Code",
+            "type": "string"
+          },
+          "token_id": {
+            "title": "Token Id",
+            "type": "string"
+          },
+          "wallet_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wallet Address"
+          }
+        },
+        "required": [
+          "token_id",
+          "chain_id",
+          "moonpay_currency_code"
+        ],
+        "title": "CreateOnRampIntentRequest",
+        "type": "object"
+      },
       "DepositAddressRequest": {
         "description": "Request to get a per-user deposit address.",
         "properties": {
@@ -730,6 +787,212 @@
         "title": "ModifyLockRequest",
         "type": "object"
       },
+      "OnRampRecord": {
+        "description": "Persisted MoonPay on-ramp transaction visible to the SDK.",
+        "properties": {
+          "base_currency_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency Amount"
+          },
+          "base_currency_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency Code"
+          },
+          "chain_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Id"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "credited_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credited At"
+          },
+          "deposit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Id"
+          },
+          "deposit_triggered_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Triggered At"
+          },
+          "deposit_tx_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Tx Hash"
+          },
+          "external_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Transaction Id"
+          },
+          "moonpay_currency_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moonpay Currency Code"
+          },
+          "moonpay_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moonpay Transaction Id"
+          },
+          "on_chain_tx_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Chain Tx Hash"
+          },
+          "quote_currency_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote Currency Amount"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "token_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Id"
+          },
+          "transaction_id": {
+            "title": "Transaction Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "wallet_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wallet Address"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OnRampRecord",
+        "type": "object"
+      },
+      "PendingOnRampsResponse": {
+        "description": "Completed MoonPay transactions that still need Privana deposit verification.",
+        "properties": {
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/OnRampRecord"
+            },
+            "title": "Pending",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pending"
+        ],
+        "title": "PendingOnRampsResponse",
+        "type": "object"
+      },
       "PendingWithdrawalsResponse": {
         "description": "Response containing pending withdrawals for a user.",
         "properties": {
@@ -798,6 +1061,35 @@
           "refresh_expires_in"
         ],
         "title": "RefreshResponse",
+        "type": "object"
+      },
+      "SignOnRampUrlRequest": {
+        "description": "Request to sign a MoonPay on-ramp widget URL.",
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "SignOnRampUrlRequest",
+        "type": "object"
+      },
+      "SignOnRampUrlResponse": {
+        "description": "MoonPay URL signature response.",
+        "properties": {
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature"
+        ],
+        "title": "SignOnRampUrlResponse",
         "type": "object"
       },
       "SiweDomainResponse": {
@@ -1356,6 +1648,112 @@
           "lock_id"
         ],
         "title": "UnlockFundsRequest",
+        "type": "object"
+      },
+      "UpdateOnRampRequest": {
+        "description": "Client-side on-ramp transaction metadata update.",
+        "properties": {
+          "base_currency_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency Amount"
+          },
+          "base_currency_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency Code"
+          },
+          "chain_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Id"
+          },
+          "deposit_tx_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Tx Hash"
+          },
+          "moonpay_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moonpay Transaction Id"
+          },
+          "on_chain_tx_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Chain Tx Hash"
+          },
+          "quote_currency_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote Currency Amount"
+          },
+          "token_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Id"
+          },
+          "wallet_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wallet Address"
+          }
+        },
+        "title": "UpdateOnRampRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -3293,6 +3691,328 @@
           }
         ],
         "summary": "Get History",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/onramp/intent": {
+      "post": {
+        "description": "Create the Privana-side MoonPay correlation record before opening the widget.",
+        "operationId": "create_onramp_intent_v1_accounting_onramp_intent_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOnRampIntentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnRampRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Onramp Intent",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/onramp/pending": {
+      "get": {
+        "description": "Return completed MoonPay purchases that still need deposit verification.",
+        "operationId": "get_pending_onramps_v1_accounting_onramp_pending_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingOnRampsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Pending Onramps",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/onramp/sign-url": {
+      "post": {
+        "description": "Sign a validated MoonPay widget URL for the caller's Privana deposit address.",
+        "operationId": "sign_onramp_url_v1_accounting_onramp_sign_url_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignOnRampUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignOnRampUrlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Sign Onramp Url",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/onramp/webhook": {
+      "post": {
+        "description": "Persist verified MoonPay buy webhooks.\n\nThe webhook never credits balances directly. It only records MoonPay's\ntransaction state and on-chain tx hash; existing deposit verification still\nperforms the credit.",
+        "operationId": "moonpay_onramp_webhook_v1_accounting_onramp_webhook_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Moonpay-Signature-V2",
+            "required": true,
+            "schema": {
+              "title": "Moonpay-Signature-V2",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Moonpay Onramp Webhook V1 Accounting Onramp Webhook Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Moonpay Onramp Webhook",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/onramp/{transaction_id}": {
+      "post": {
+        "description": "Upsert caller-owned MoonPay transaction metadata.",
+        "operationId": "update_onramp_v1_accounting_onramp__transaction_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "title": "Transaction Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOnRampRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnRampRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Onramp",
         "tags": [
           "Accounting"
         ]

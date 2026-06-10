@@ -428,3 +428,50 @@ async def test_errored_record_allows_retry(
 
     assert result["status"] == "pending"
     mock_sweep_engine.cleanup_record.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_errored_record_with_sweep_tx_hash_preserves_record(
+    processor, mock_verifier, mock_sweep_engine
+):
+    """Once a sweep tx is broadcast, retry must not delete its recovery pointer."""
+    errored_record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        error="receipt polling timed out",
+        sweep_tx_hash="0x" + "dd" * 32,
+    )
+    mock_sweep_engine.get_record_by_deposit_id = MagicMock(return_value=errored_record)
+
+    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
+        chain_id=84532,
+        tx_hash="0x" + "cc" * 32,
+        amount=ONE_ETH,
+        is_native=True,
+        token_address=None,
+        deposit_index=0,
+        block_number=100,
+    )
+
+    result = await processor.process_deposit(
+        chain_type="evm",
+        chain_id=84532,
+        tx_hash="0x" + "cc" * 32,
+        amount=ONE_ETH,
+        log_index=0,
+        version=0,
+        siwe_token=b"\x00" * 65,
+        beneficiary="0x" + "bb" * 20,
+    )
+
+    assert result["status"] == "pending"
+    status = processor.get_deposit_status(result["deposit_id"], "0x" + "bb" * 20)
+    assert status is not None
+    assert status["status"] == "pending"
+    assert "detail" not in status
+    mock_sweep_engine.cleanup_record.assert_not_called()
+    mock_sweep_engine.sweep_native.assert_not_called()

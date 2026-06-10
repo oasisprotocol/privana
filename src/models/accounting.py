@@ -7,6 +7,7 @@ from enum import IntEnum
 from typing import ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+from web3 import Web3
 
 
 class ChainType(IntEnum):
@@ -68,6 +69,24 @@ def _normalise_hex(value: str) -> str:
     if not value.startswith("0x"):
         value = "0x" + value
     return value
+
+
+def _normalise_fixed_hex(value: str, *, byte_length: int, field_name: str) -> str:
+    value = _normalise_hex(value)
+    body = value[2:]
+    if len(body) != byte_length * 2:
+        raise ValueError(f"{field_name} must be {byte_length} bytes")
+    try:
+        int(body, 16)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be hex") from exc
+    return value
+
+
+def _normalise_currency_code(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip().lower()
 
 
 def _parse_int_amount(value: int | str | float) -> int:
@@ -549,3 +568,109 @@ class DepositCheckResponse(BaseModel):
     amount: str | None = None
     token_address: str | None = None
     detail: str | None = None
+
+
+class SignOnRampUrlRequest(BaseModel):
+    """Request to sign a MoonPay on-ramp widget URL."""
+
+    url: str = Field(..., min_length=1)
+
+
+class SignOnRampUrlResponse(BaseModel):
+    """MoonPay URL signature response."""
+
+    signature: str
+
+
+class CreateOnRampIntentRequest(BaseModel):
+    """Authenticated Privana intent created before opening MoonPay."""
+
+    wallet_address: str | None = None
+    token_id: str
+    chain_id: int
+    moonpay_currency_code: str
+    base_currency_code: str | None = None
+    base_currency_amount: str | None = None
+
+    @field_validator("wallet_address")
+    def _normalise_wallet_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not Web3.is_address(value):
+            raise ValueError("Invalid wallet_address")
+        return Web3.to_checksum_address(value)
+
+    @field_validator("token_id")
+    def _normalise_token_id(cls, value: str) -> str:
+        return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
+
+    @field_validator("moonpay_currency_code", "base_currency_code")
+    def _normalise_currency_codes(cls, value: str | None) -> str | None:
+        return _normalise_currency_code(value)
+
+
+class UpdateOnRampRequest(BaseModel):
+    """Client-side on-ramp transaction metadata update."""
+
+    wallet_address: str | None = None
+    token_id: str | None = None
+    chain_id: int | None = None
+    moonpay_transaction_id: str | None = None
+    base_currency_code: str | None = None
+    base_currency_amount: str | None = None
+    quote_currency_amount: str | None = None
+    on_chain_tx_hash: str | None = None
+    deposit_tx_hash: str | None = None
+
+    @field_validator("wallet_address")
+    def _normalise_wallet_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not Web3.is_address(value):
+            raise ValueError("Invalid wallet_address")
+        return Web3.to_checksum_address(value)
+
+    @field_validator("token_id")
+    def _normalise_optional_token_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
+
+    @field_validator("on_chain_tx_hash", "deposit_tx_hash")
+    def _normalise_optional_tx_hash(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalise_fixed_hex(value, byte_length=32, field_name="tx_hash")
+
+    @field_validator("base_currency_code")
+    def _normalise_optional_currency_code(cls, value: str | None) -> str | None:
+        return _normalise_currency_code(value)
+
+
+class OnRampRecord(BaseModel):
+    """Persisted MoonPay on-ramp transaction visible to the SDK."""
+
+    transaction_id: str
+    external_transaction_id: str | None = None
+    moonpay_transaction_id: str | None = None
+    status: Literal["pending", "completed", "failed", "cancelled"]
+    wallet_address: str | None = None
+    token_id: str | None = None
+    chain_id: int | None = None
+    moonpay_currency_code: str | None = None
+    base_currency_code: str | None = None
+    base_currency_amount: str | None = None
+    quote_currency_amount: str | None = None
+    on_chain_tx_hash: str | None = None
+    deposit_id: str | None = None
+    deposit_tx_hash: str | None = None
+    deposit_triggered_at: int | None = None
+    credited_at: int | None = None
+    created_at: int
+    updated_at: int
+
+
+class PendingOnRampsResponse(BaseModel):
+    """Completed MoonPay transactions that still need Privana deposit verification."""
+
+    pending: list[OnRampRecord]

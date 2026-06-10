@@ -85,6 +85,11 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /funds/locked/total/{token_id}` | required | same |
 | `GET /funds/expired` | required | same |
 | `GET /history` | required | same |
+| `POST /onramp/intent` | required | same |
+| `POST /onramp/sign-url` | required | same |
+| `GET /onramp/pending` | required | same |
+| `POST /onramp/{transaction_id}` | required | same |
+| `POST /onramp/webhook` | MoonPay webhook signature | `Moonpay-Signature-V2` |
 | `POST /auth/jwt/siwe-token` | required | `Authorization: Bearer …` |
 | `POST /auth/jwt/logout`, `GET /auth/jwt/me` | required | `Authorization: Bearer …` |
 | Everything else | none (signature-gated where applicable) | — |
@@ -124,6 +129,44 @@ Behaviour notes:
 - Sweeps run as background tasks. The processor returns within ~2-3s. Don't block on the response — poll `GET /deposits/status/{deposit_id}`.
 - The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
 - The `min_deposit` field of the address response is a per-chain map — clients should use it to gate the UI.
+
+## On-Ramp Flow (MoonPay)
+
+The fiat on-ramp reuses the deposit path: MoonPay delivers tokens straight to the user's per-user deposit address, and the existing verify → sweep → credit pipeline performs the actual credit. The on-ramp endpoints only **correlate** MoonPay purchase state with Privana deposits — the webhook never credits balances.
+
+```
+1. POST /onramp/intent             → create a Privana-owned correlation record;
+                                     its transaction_id doubles as the MoonPay
+                                     externalTransactionId
+2. POST /onramp/sign-url           → validate + sign the MoonPay widget URL
+3. user completes the purchase in the MoonPay widget
+4. POST /onramp/webhook            → MoonPay reports status + on-chain tx hash
+                                     (HMAC-verified)
+5. GET  /onramp/pending            → completed purchases that still need
+                                     deposit verification
+6. POST /deposits/check            → normal deposit verification using the
+                                     webhook's tx hash; links deposit_id to the
+                                     on-ramp record
+7. GET  /deposits/status/{id}      → poll until status="credited"; the record
+                                     is marked credited server-side and leaves
+                                     /onramp/pending
+```
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /onramp/intent` | required | Create an intent pinning `user_address`, deposit `wallet_address`, `token_id`, `chain_id`, and MoonPay currency before the widget opens. |
+| `POST /onramp/sign-url` | required | Validate an unsigned MoonPay widget URL (allow-listed host, expected `apiKey`, `walletAddress` = caller's deposit address, `externalCustomerId` = caller, `externalTransactionId` = known intent owned by the caller, allow-listed `currencyCode` matching the intent) and return its HMAC signature. |
+| `GET /onramp/pending` | required | The caller's completed, uncredited purchases that carry enough data (`token_id`, `chain_id`, `on_chain_tx_hash`) to run `/deposits/check`. |
+| `POST /onramp/{transaction_id}` | required | Upsert caller-owned purchase metadata (e.g. a late `moonpay_transaction_id` binding that merges a matching orphan webhook record). Cannot change `status`; locked fields (`token_id`, `chain_id`) must match. |
+| `POST /onramp/webhook` | MoonPay HMAC (`Moonpay-Signature-V2`) | Persist MoonPay transaction state updates. |
+
+Behaviour notes:
+
+- **Intent fields win.** `user_address`, `wallet_address`, `token_id`, `chain_id`, and currency fields set at intent creation are never overwritten by webhook or client updates — conflicting incoming values are dropped and logged.
+- **Webhook joining.** A webhook without `externalTransactionId` is joined to a known record by `moonpay_transaction_id`, else to exactly one open intent matching the delivery wallet (and currency) created within the last 24 hours. Ambiguous matches stay orphaned rather than guessed.
+- **Status is webhook-owned.** Clients cannot set `status`; only verified webhooks mark a purchase `completed`, and a completed record ignores stale non-completed webhook replays while still accepting late metadata.
+- **Credit closes server-side.** `POST /deposits/check` stamps the backend `deposit_id` onto the matching on-ramp record (matched by user, chain and source tx hash); `GET /deposits/status/{deposit_id}` marks the record credited once the backend proves credit. Clients do not need to write back to `/onramp/{transaction_id}` to close the loop.
+- **Fail-closed configuration.** `POST /onramp/sign-url` and `POST /onramp/webhook` return `503` until the `MOONPAY_*` keys are configured.
 
 ## Withdrawal Flow
 
@@ -223,11 +266,15 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `200 OK` | Synchronous success — the response body has the result. |
 | `202 Accepted` | Work continues in the background. Currently only `POST /deposits/check` when a sweep is in flight. Poll the corresponding status endpoint. |
 | `400 Bad Request` | Pydantic validation, malformed hex/address, business rule violation (e.g. modify-lock no-op). |
-| `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once. |
+| `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a MoonPay webhook signature that fails verification. |
+| `403 Forbidden` | On-ramp record belongs to a different user or deposit address. |
 | `404 Not Found` | Status check for an unknown deposit. |
+| `409 Conflict` | Orphan on-ramp record without a recorded owner or wallet cannot be claimed. |
+| `413 Payload Too Large` | MoonPay webhook body exceeds the 1 MiB cap. |
 | `422 Unprocessable Entity` | Contract revert (transaction submitted but the chain rejected it). The response `detail` carries the revert reason when available. |
 | `429 Too Many Requests` | Auth rate-limiter tripped. Honour the `Retry-After` header. |
 | `500 Internal Server Error` | Unexpected failure in the service layer. Errors are logged with stack traces — file an issue with the request id. |
+| `503 Service Unavailable` | MoonPay on-ramp is not configured — URL-signing or webhook keys are missing. |
 
 ## Schemas
 

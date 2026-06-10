@@ -40,3 +40,17 @@ class Settings:
     auth_authorize_rate_limit: int = 10
     auth_token_rate_limit: int = 20
     trust_x_forwarded_for: bool = False
+
+    moonpay_api_key: str = ""
+    moonpay_secret_key: str = ""
+    moonpay_webhook_secret_key: str = ""
+    moonpay_allowed_hosts: Tuple[str, ...] = (
+        "buy.moonpay.com",
+        "buy-sandbox.moonpay.com",
+    )
+    moonpay_allowed_currency_codes: Tuple[str, ...] = (
+        "usdc",
+        "usdc_base",
+        "usdc_base_sepolia",
+    )
+    moonpay_webhook_tolerance_seconds: int = 300

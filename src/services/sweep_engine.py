@@ -294,11 +294,25 @@ class SweepEngine:
         self._delete_record(*location)
 
     def persist_error(self, deposit_id_hex: str, error: str) -> None:
-        """Mark a sweep record as failed (public API for DepositProcessor)."""
+        """Mark a sweep record as failed (public API for DepositProcessor).
+
+        Skip if a sweep tx was already broadcast: the record is still
+        recoverable (reconciliation promotes a mined tx to SWEPT), so it
+        must not be flagged as terminally errored.
+        """
         record = self.get_record_by_deposit_id(deposit_id_hex)
-        if record is not None:
-            record.error = error
-            self._save_record(record)
+        if record is None:
+            return
+        if record.sweep_tx_hash:
+            logger.warning(
+                "Skipping error persist after sweep tx broadcast: deposit_id=%s sweep_tx=%s error=%s",
+                deposit_id_hex,
+                record.sweep_tx_hash,
+                error,
+            )
+            return
+        record.error = error
+        self._save_record(record)
 
     async def sweep_native(
         self,

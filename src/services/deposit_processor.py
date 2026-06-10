@@ -182,6 +182,16 @@ class DepositProcessor:
         existing = self._sweep.get_record_by_deposit_id(deposit_id_hex)
         if existing is not None:
             if existing.error:
+                if existing.sweep_tx_hash:
+                    logger.warning(
+                        "Sweep record has error after sweep tx broadcast; preserving record: "
+                        "deposit_id=%s sweep_tx=%s",
+                        deposit_id_hex,
+                        existing.sweep_tx_hash,
+                    )
+                    return self._deposit_response(
+                        "pending", deposit_id_hex, verified.amount, verified.token_address
+                    )
                 self._sweep.cleanup_record(deposit_id_hex)
             else:
                 return self._deposit_response(
@@ -276,6 +286,16 @@ class DepositProcessor:
             return None
 
         if record.error:
+            if record.sweep_tx_hash:
+                logger.warning(
+                    "Sweep record has error after sweep tx broadcast; returning pending status: "
+                    "deposit_id=%s sweep_tx=%s",
+                    deposit_id_hex,
+                    record.sweep_tx_hash,
+                )
+                return self._deposit_response(
+                    "pending", deposit_id_hex, record.amount, record.token_address
+                )
             return self._deposit_response(
                 "error", deposit_id_hex, record.amount, record.token_address, detail=record.error
             )
