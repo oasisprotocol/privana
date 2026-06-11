@@ -39,6 +39,10 @@ const config: HardhatUserConfig = {
     },
     hardhat: {
       accounts: TEST_HDWALLET,
+      // Accounting may exceed the EIP-170 24576-byte cap; Sapphire allows 64 KiB
+      // (see scripts/check-bytecode-size.ts), so lift the cap on the in-process
+      // test network too.
+      allowUnlimitedContractSize: true,
     }
   },
   sourcify: {
@@ -50,7 +54,8 @@ const config: HardhatUserConfig = {
       evmVersion: 'paris',
       optimizer: {
         enabled: true,
-        // Keep bytecode size below EIP-170 limits; large "runs" can bloat size significantly.
+        // Keep bytecode size within the Sapphire 64 KiB budget enforced by
+        // scripts/check-bytecode-size.ts; large "runs" values bloat size significantly.
         runs: 20,
       },
       viaIR: true,

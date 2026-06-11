@@ -34,6 +34,8 @@ class HistoryKind(IntEnum):
     CreateLock = 2
     TransferFromLock = 3
     TransferBalance = 4
+    ModifyLock = 5
+    UnlockLock = 6
 
 
 HISTORY_KIND_WIRE_NAMES: dict[HistoryKind, str] = {
@@ -42,6 +44,8 @@ HISTORY_KIND_WIRE_NAMES: dict[HistoryKind, str] = {
     HistoryKind.CreateLock: "createLock",
     HistoryKind.TransferFromLock: "transferFromLock",
     HistoryKind.TransferBalance: "transferBalance",
+    HistoryKind.ModifyLock: "modifyLock",
+    HistoryKind.UnlockLock: "unlockLock",
 }
 
 
@@ -345,12 +349,16 @@ class HistoryEntry(BaseModel):
         "createLock",
         "transferFromLock",
         "transferBalance",
+        "modifyLock",
+        "unlockLock",
         "unknown",
     ]
     timestamp: int
     token_id: Optional[str] = None
     amount: Optional[str] = None
     counterparty: Optional[str] = None
+    from_address: Optional[str] = None
+    to_address: Optional[str] = None
     deposit_id: Optional[str] = None
     chain_id: Optional[int] = None
 

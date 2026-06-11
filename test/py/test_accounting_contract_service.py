@@ -93,6 +93,8 @@ async def test_get_pending_withdrawals_includes_to_address() -> None:
 
 
 USER_A = "0x1234567890123456789012345678901234567890"
+USER_B = "0x9876543210987654321098765432109876543210"
+USER_C = "0x5555555555555555555555555555555555555555"
 
 
 def _history_amount(value: int) -> bytes:
@@ -101,6 +103,17 @@ def _history_amount(value: int) -> bytes:
 
 def _history_payload(token_id: bytes, amount: int, tail: bytes) -> bytes:
     return token_id + _history_amount(amount) + tail
+
+
+def _history_pair_payload(
+    token_id: bytes, amount: int, from_address: str, to_address: str
+) -> bytes:
+    return (
+        token_id
+        + _history_amount(amount)
+        + bytes(HexBytes(from_address))
+        + bytes(HexBytes(to_address))
+    )
 
 
 @pytest.mark.asyncio
@@ -130,7 +143,7 @@ async def test_get_history_parses_contract_entries() -> None:
     service._get_confidential_reader_contract = AsyncMock(return_value=reader)
     service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
 
-    parsed = await service.get_history(2, 5, b"\x12\x34")
+    parsed = await service.get_history(2, 5, b"\x12\x34", USER_A)
 
     assert parsed["total"] == 9
     assert parsed["history"][0] == {
@@ -139,6 +152,8 @@ async def test_get_history_parses_contract_entries() -> None:
         "token_id": "0x" + ("33" * 32),
         "amount": "123",
         "counterparty": None,
+        "from_address": None,
+        "to_address": None,
         "deposit_id": "0x" + ("dd" * 32),
         "chain_id": 84532,
     }
@@ -148,6 +163,8 @@ async def test_get_history_parses_contract_entries() -> None:
         "token_id": "0x" + ("44" * 32),
         "amount": "456",
         "counterparty": Web3.to_checksum_address("0x" + ("12" * 20)),
+        "from_address": None,
+        "to_address": None,
         "deposit_id": None,
         "chain_id": 84532,
     }
@@ -161,6 +178,8 @@ async def test_get_history_parses_contract_entries() -> None:
         (2, "createLock"),
         (3, "transferFromLock"),
         (4, "transferBalance"),
+        (5, "modifyLock"),
+        (6, "unlockLock"),
     ],
 )
 async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name: str) -> None:
@@ -172,7 +191,8 @@ async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name:
             kind,
             1710000002,
             _history_payload(bytes.fromhex("55" * 32), 789, bytes.fromhex("ab" * 20)),
-        )
+        ),
+        USER_A,
     )
 
     assert parsed == {
@@ -181,9 +201,73 @@ async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name:
         "token_id": "0x" + ("55" * 32),
         "amount": "789",
         "counterparty": Web3.to_checksum_address("0x" + ("ab" * 20)),
+        "from_address": None,
+        "to_address": None,
         "deposit_id": None,
         "chain_id": 84532,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "kind_name"),
+    [
+        (3, "transferFromLock"),
+        (4, "transferBalance"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("owner", "expected_counterparty"),
+    [
+        (USER_A, USER_B),
+        (USER_B, USER_A),
+    ],
+)
+async def test_history_entry_decodes_paired_transfer_payload_relative_to_owner(
+    kind: int, kind_name: str, owner: str, expected_counterparty: str
+) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
+
+    parsed = await service._history_entry_to_dict(
+        (
+            kind,
+            1710000004,
+            _history_pair_payload(bytes.fromhex("99" * 32), 654, USER_A, USER_B),
+        ),
+        owner,
+    )
+
+    assert parsed == {
+        "kind": kind_name,
+        "timestamp": 1710000004,
+        "token_id": "0x" + ("99" * 32),
+        "amount": "654",
+        "counterparty": Web3.to_checksum_address(expected_counterparty),
+        "from_address": Web3.to_checksum_address(USER_A),
+        "to_address": Web3.to_checksum_address(USER_B),
+        "deposit_id": None,
+        "chain_id": 84532,
+    }
+
+
+@pytest.mark.asyncio
+async def test_history_entry_keeps_unknown_counterparty_when_owner_is_not_in_pair() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
+
+    parsed = await service._history_entry_to_dict(
+        (
+            4,
+            1710000004,
+            _history_pair_payload(bytes.fromhex("99" * 32), 654, USER_A, USER_B),
+        ),
+        USER_C,
+    )
+
+    assert parsed["counterparty"] is None
+    assert parsed["from_address"] == Web3.to_checksum_address(USER_A)
+    assert parsed["to_address"] == Web3.to_checksum_address(USER_B)
 
 
 @pytest.mark.parametrize(
@@ -195,13 +279,18 @@ async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name:
             bytes.fromhex("77" * 32) + _history_amount(1) + bytes.fromhex("cd" * 19),
             "must be 84 bytes",
         ),
+        (
+            HistoryKind.TransferBalance,
+            bytes.fromhex("77" * 32) + _history_amount(1) + bytes.fromhex("cd" * 21),
+            "must be 84 or 104 bytes",
+        ),
     ],
 )
 def test_decode_history_payload_rejects_invalid_shapes(
     kind: HistoryKind, payload: bytes, match: str
 ) -> None:
     with pytest.raises(ValueError, match=match):
-        AccountingContractService._decode_history_payload(kind, payload)
+        AccountingContractService._decode_history_payload(kind, payload, USER_A)
 
 
 @pytest.mark.asyncio
@@ -220,7 +309,7 @@ async def test_history_entry_degrades_for_invalid_payload(entry: tuple) -> None:
     service = AccountingContractService.__new__(AccountingContractService)
     service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
 
-    parsed = await service._history_entry_to_dict(entry)
+    parsed = await service._history_entry_to_dict(entry, USER_A)
 
     assert parsed == {
         "kind": "unknown",
@@ -228,6 +317,8 @@ async def test_history_entry_degrades_for_invalid_payload(entry: tuple) -> None:
         "token_id": None,
         "amount": None,
         "counterparty": None,
+        "from_address": None,
+        "to_address": None,
         "deposit_id": None,
         "chain_id": None,
     }
@@ -237,7 +328,7 @@ async def test_history_entry_degrades_for_invalid_payload(entry: tuple) -> None:
 async def test_history_entry_degrades_for_unknown_kind() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
 
-    parsed = await service._history_entry_to_dict((99, 1710000002, b""))
+    parsed = await service._history_entry_to_dict((99, 1710000002, b""), USER_A)
 
     assert parsed["kind"] == "unknown"
     assert parsed["timestamp"] == 1710000002
@@ -266,7 +357,7 @@ async def test_get_history_preserves_page_when_one_entry_is_unknown() -> None:
     service._get_confidential_reader_contract = AsyncMock(return_value=reader)
     service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=84532))
 
-    parsed = await service.get_history(0, 10, b"\x12\x34")
+    parsed = await service.get_history(0, 10, b"\x12\x34", USER_A)
 
     assert parsed["total"] == 2
     assert parsed["history"][0]["kind"] == "deposit"
@@ -283,7 +374,8 @@ async def test_history_entry_preserves_decoded_payload_without_token_context() -
             1,
             1710000003,
             _history_payload(bytes.fromhex("66" * 32), 321, bytes.fromhex("12" * 20)),
-        )
+        ),
+        USER_A,
     )
 
     assert parsed == {
@@ -292,6 +384,8 @@ async def test_history_entry_preserves_decoded_payload_without_token_context() -
         "token_id": "0x" + ("66" * 32),
         "amount": "321",
         "counterparty": Web3.to_checksum_address("0x" + ("12" * 20)),
+        "from_address": None,
+        "to_address": None,
         "deposit_id": None,
         "chain_id": None,
     }
@@ -305,7 +399,7 @@ async def test_get_history_accepts_negative_offset() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
     service._get_confidential_reader_contract = AsyncMock(return_value=reader)
 
-    parsed = await service.get_history(-1, 10, b"\x12")
+    parsed = await service.get_history(-1, 10, b"\x12", USER_A)
 
     assert parsed == {"history": [], "total": 9}
     reader.functions.getHistory.assert_called_once_with(-1, 10, b"\x12")
@@ -316,10 +410,10 @@ async def test_get_history_rejects_offset_outside_int256() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
 
     with pytest.raises(ValueError, match="offset must fit int256"):
-        await service.get_history(-(2**255) - 1, 10, b"\x12")
+        await service.get_history(-(2**255) - 1, 10, b"\x12", USER_A)
 
     with pytest.raises(ValueError, match="offset must fit int256"):
-        await service.get_history(2**255, 10, b"\x12")
+        await service.get_history(2**255, 10, b"\x12", USER_A)
 
 
 @pytest.mark.asyncio
@@ -327,7 +421,7 @@ async def test_get_history_rejects_negative_limit() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
 
     with pytest.raises(ValueError, match="limit must be >= 0"):
-        await service.get_history(0, -1, b"\x12")
+        await service.get_history(0, -1, b"\x12", USER_A)
 
 
 @pytest.mark.asyncio
@@ -338,7 +432,7 @@ async def test_get_history_preserves_empty_pages_and_total() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
     service._get_confidential_reader_contract = AsyncMock(return_value=reader)
 
-    parsed = await service.get_history(9, 0, b"\x12\x34")
+    parsed = await service.get_history(9, 0, b"\x12\x34", USER_A)
 
     assert parsed == {"history": [], "total": 9}
     reader.functions.getHistory.assert_called_once_with(9, 0, b"\x12\x34")

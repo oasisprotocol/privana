@@ -5,7 +5,9 @@ import {MockAccounting} from "./MockAccounting.sol";
 
 /**
  * @title MockAccountingHelper
- * @notice Helpers that should have been part of MockAccounting contract, but would exceed the contract code size limitation (EIP-170).
+ * @notice Helpers that should have been part of MockAccounting contract, but would
+ *         exceed the 24,576-byte code size limit enforced by Sapphire runtimes
+ *         below 1.3.0-testnet.
  */
 contract MockAccountingHelper {
     MockAccounting public mockAccounting;

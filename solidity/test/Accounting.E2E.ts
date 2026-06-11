@@ -1,10 +1,10 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
 import { keccak256, Wallet } from 'ethers';
-import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
+import { MockAccounting, MockAccountingPrevious, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
+import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken, skipUnlessMockAccountingDeployable, waitForImplementationChange } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
@@ -90,7 +90,8 @@ describe('Accounting', function () {
   let userWallet2: Wallet;
   let tokenId: string;
 
-  before(async () => {
+  before(async function () {
+    await skipUnlessMockAccountingDeployable(this);
     const [user1, user2, service] = (await ethers.getSigners()).slice(1, 4);
     const deployer = getDeployer();
 
@@ -792,7 +793,8 @@ describe('WithdrawFromLock', function () {
       .connect(provider) as any;
   });
 
-  beforeEach(async () => {
+  beforeEach(async function () {
+    await skipUnlessMockAccountingDeployable(this);
     const [deployer] = await ethers.getSigners();
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
@@ -991,7 +993,8 @@ describe('ModifyLock', function () {
 
   const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
-  before(async () => {
+  before(async function () {
+    await skipUnlessMockAccountingDeployable(this);
     const provider = ethers.provider;
     const [user1, user2] = (await ethers.getSigners()).slice(1,3);
     const deployer = getDeployer();
@@ -1410,7 +1413,8 @@ describe('Upgradability', function () {
 
   const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
-  before(async () => {
+  before(async function () {
+    await skipUnlessMockAccountingDeployable(this);
     const deployer = getDeployer();
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
@@ -1493,6 +1497,74 @@ describe('Upgradability', function () {
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
   });
 
+  it("Should keep history written before an upgrade readable afterwards", async function () {
+    this.timeout(120000);
+
+    const deployer = getDeployer();
+    const siweAuthAddress = await mockSiweAuth.getAddress();
+    const PreviousFactory = await ethers.getContractFactory('MockAccountingPrevious', deployer);
+    // Proxy deploys hit the same flaky UUPS wrapper errors deployMockAccounting
+    // retries for, so retry a few times and surface the real error if it persists.
+    let previous: MockAccountingPrevious | undefined;
+    for (let attempt = 1; previous === undefined; attempt++) {
+      try {
+        const proxy = await upgrades.deployProxy(
+          PreviousFactory,
+          [MOCK_ROFL_APP_ID, deployer.address],
+          {
+            kind: 'uups',
+            initializer: 'initialize',
+            constructorArgs: [siweAuthAddress],
+            unsafeAllow: ['constructor', 'state-variable-immutable'],
+          },
+        );
+        await proxy.waitForDeployment();
+        previous = proxy as unknown as MockAccountingPrevious;
+      } catch (error) {
+        if (attempt >= 3) throw error;
+        console.log('MockAccountingPrevious proxy deploy failed, retrying...', error);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    const previousProxyAddress = await previous.getAddress();
+
+    const seedPayload = ethers.concat([
+      TEST_TOKEN.tokenId,
+      ethers.zeroPadValue(ethers.toBeHex(parseUsdt("7")), 32),
+      keccak256(ethers.toUtf8Bytes("previous-inline-history")),
+    ]);
+    const appendTx = await previous.mockAppendHistory(deployer.address, 0, seedPayload);
+    await appendTx.wait();
+
+    const implementationBefore = await upgrades.erc1967.getImplementationAddress(previousProxyAddress);
+
+    const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
+    const upgraded = await upgrades.upgradeProxy(
+      previousProxyAddress,
+      AccountingFactory,
+      {
+        kind: 'uups',
+        constructorArgs: [siweAuthAddress],
+        unsafeAllow: ['constructor', 'state-variable-immutable'],
+      },
+    ) as unknown as MockAccounting;
+
+    // sapphire-paratime#688: upgradeProxy may return before the upgrade tx lands.
+    await waitForImplementationChange(previousProxyAddress, implementationBefore);
+
+    expect(await upgraded.owner()).to.equal(deployer.address);
+
+    const [history, total] = await upgraded.getHistory(
+      0,
+      10,
+      mockAuthToken(deployer.address),
+    );
+    expect(total).to.equal(1n);
+    expect(history[0].kind).to.equal(0n); // HistoryKind.Deposit
+    expect(history[0].timestamp).to.be.greaterThan(0n);
+    expect(history[0].payload).to.equal(seedPayload);
+  });
+
   it("Should only allow owner to upgrade", async function () {
     const attacker = getDeployer(1);
 
@@ -1572,6 +1644,7 @@ describe('Upgradability', function () {
     expect(balanceBefore).to.equal(initialBalance);
 
     // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
+    const implementationBefore = await upgrades.erc1967.getImplementationAddress(proxyAddress);
     const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
     const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
@@ -1579,8 +1652,11 @@ describe('Upgradability', function () {
       constructorArgs: [await mockSiweAuth.getAddress()],
     }) as unknown as MockAccountingV2;
 
+    // sapphire-paratime#688: upgradeProxy may return before the upgrade tx lands.
+    await waitForImplementationChange(proxyAddress, implementationBefore);
+
     // Call reinitializer
-    await upgraded.initializeV2(42);
+    await (await upgraded.initializeV2(42)).wait();
 
     // Verify new state is set
     expect(await upgraded.newStateVar()).to.equal(42);

@@ -24,12 +24,18 @@ enum ChainType {
 ///         or references a tokenId that has not been registered via registerToken.
 error UnsupportedTokenType();
 
+/// @notice User-visible history entry kinds.
+/// @dev Append-only: `HistoryKind` values are persisted inside `HistoryEntry`
+///      storage and decoded off-chain by ordinal, so existing members must
+///      never be reordered or removed.
 enum HistoryKind {
     Deposit,
     Withdraw,
     CreateLock,
     TransferFromLock,
-    TransferBalance
+    TransferBalance,
+    ModifyLock,
+    UnlockLock
 }
 
 struct TokenInfo {

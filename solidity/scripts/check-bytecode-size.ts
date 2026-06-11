@@ -1,6 +1,10 @@
 import { artifacts } from 'hardhat';
 
-const EIP170_LIMIT_BYTES = 24576;
+// Accounting deploys to Oasis Sapphire, whose runtime raised the create-contract
+// limit to 64 KiB (oasis-sdk#2471, Sapphire >= 1.3.0-testnet). Keep a 1 KiB
+// safety buffer so nothing is ever deployed right at the hard ceiling.
+const SAPPHIRE_LIMIT_BYTES = 65536;
+const SIZE_BUFFER_BYTES = 1024;
 
 async function checkContractSize(contractName: string, maxBytes: number): Promise<void> {
   const artifact = await artifacts.readArtifact(contractName);
@@ -13,13 +17,13 @@ async function checkContractSize(contractName: string, maxBytes: number): Promis
 
   if (deployedSize > maxBytes) {
     throw new Error(
-      `${contractName} exceeds EIP-170 limit by ${deployedSize - maxBytes} bytes (${deployedSize}/${maxBytes}).`
+      `${contractName} exceeds the Sapphire contract size budget by ${deployedSize - maxBytes} bytes (${deployedSize}/${maxBytes}).`
     );
   }
 }
 
 async function main() {
-  await checkContractSize('Accounting', EIP170_LIMIT_BYTES);
+  await checkContractSize('Accounting', SAPPHIRE_LIMIT_BYTES - SIZE_BUFFER_BYTES);
   console.log('Bytecode size checks passed.');
 }
 
