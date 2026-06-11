@@ -2,19 +2,19 @@
 id: idle-yield
 title: "Idle Yield"
 sidebar_position: 2
-description: "When your assets aren't being swapped, Privana can route idle stablecoin balances to vetted yield protocols — automatically and privately."
+description: "When your assets aren't being swapped, Privana can route idle stablecoin balances to vetted yield protocols, automatically and privately."
 ---
 
-When your assets aren't being swapped, Privana can route idle stablecoin balances to vetted yield protocols — automatically and privately.
+When your assets aren't being swapped, Privana can route idle stablecoin balances to vetted yield protocols, automatically and privately.
 
-The yield module is **opt-in**. When you activate it for an asset, the Privana yield microservice routes idle balances to whitelisted yield protocols — [Aave](https://aave.com/) at launch, with more protocols planned post-MVP. You define which assets participate, the deposit threshold, and the maximum amount. Nothing happens automatically until you enable it.
+The yield module is **opt-in**. When you activate it for an asset, the Privana yield microservice routes idle balances to whitelisted yield protocols: [Aave](https://aave.com/) at launch, with more to follow. You define which assets participate, the deposit threshold, and the maximum amount. Nothing happens automatically until you enable it.
 
-Yield positions are managed entirely inside the TEE. Your deposit amounts, protocol choices, and APY history are encrypted — not visible to anyone outside the enclave. When you initiate a swap, the system automatically unwinds any active yield position for that asset before executing the trade.
+Your yield accounting (amounts, protocol, position history) is private on Sapphire. The deposit into the protocol itself executes on the external chain from the pooled vault address, the same as any settlement. When you start a swap, the system unwinds any active yield position for that asset first.
 
-### Why yield is part of the MVP
+## Works with the rest of Privana
 
-Including yield from launch serves three purposes. First, it meets baseline DeFi expectations — users expect idle assets to be productive. Second, it enables **composability across applications**. For example, a gaming application built on the Privana SDK could let its players earn yield on in-game stablecoin holdings without the game developer needing to implement DeFi integrations. Third, it enables automation rules where realized trading profits are automatically routed to yield, compounding returns without your intervention (see [Automation Rules](./automation-rules.md)).
+Yield is available through the Privana SDK, so an app can offer its users yield on in-app balances without building its own DeFi integration. [Automation Rules](./automation-rules.md) can route realized trading profits into yield automatically.
 
-### Safety model
+## Safety model
 
-Privana only routes to protocols that have passed internal vetting. The yield module never activates automatically — it's always opt-in. If a protocol is delisted (for example, due to a vulnerability disclosure), the system halts new deposits and begins unwinding existing positions automatically.
+Privana only routes to protocols that have passed internal vetting. If a protocol is delisted (for example, due to a vulnerability disclosure), the system halts new deposits and begins unwinding existing positions automatically.

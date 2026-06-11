@@ -48,7 +48,7 @@ const sidebars: SidebarsConfig = {
         "How the stack actually works — Oasis Sapphire, ROFL, the system architecture, the on-chain fallback, the trust model, and the academic research it's all built on.",
       link: {type: 'generated-index', slug: '/underlying-technology'},
       items: [
-        'architecture/oasis-sapphire',
+        'architecture/oasis-sapphire-and-rofl',
         'architecture/deep-dive',
         'architecture/fallback-recovery',
         'architecture/trust-model',

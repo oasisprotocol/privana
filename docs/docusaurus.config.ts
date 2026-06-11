@@ -75,14 +75,14 @@ const config: Config = {
             {label: 'Getting Started', to: '/overview/privacy-problem'},
             {label: 'Core Concepts', to: '/concepts/privana-overview'},
             {label: 'Features', to: '/features/private-swaps'},
-            {label: 'Underlying Technology', to: '/architecture/oasis-sapphire'},
+            {label: 'Underlying Technology', to: '/architecture/oasis-sapphire-and-rofl'},
           ],
         },
         {
           title: 'Resources',
           items: [
             {label: 'Liquefaction paper', href: 'https://arxiv.org/abs/2412.02634'},
-            {label: 'Oasis Sapphire', href: 'https://docs.oasis.io/dapp/sapphire/'},
+            {label: 'Oasis Sapphire', href: 'https://docs.oasis.io/build/sapphire/'},
             {label: 'GitHub', href: 'https://github.com/oasisprotocol/privana'},
           ],
         },
