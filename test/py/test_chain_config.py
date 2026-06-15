@@ -15,7 +15,7 @@ from src.config.chain_config import (
 
 def test_known_chain_finality():
     assert get_finality_depth(84532) == 15  # Base Sepolia
-    assert get_finality_depth(11155111) == 32  # Eth Sepolia
+    assert get_finality_depth(11155111) == 2  # Eth Sepolia Testnet/Localnet
 
 
 def test_unknown_chain_uses_default():
