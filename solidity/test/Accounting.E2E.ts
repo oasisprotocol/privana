@@ -4,7 +4,7 @@ import { keccak256, Wallet } from 'ethers';
 import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken } from './utils';
+import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken, waitForImplementationChange } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
@@ -90,7 +90,7 @@ describe('Accounting', function () {
   let userWallet2: Wallet;
   let tokenId: string;
 
-  before(async () => {
+  before(async function () {
     const [user1, user2, service] = (await ethers.getSigners()).slice(1, 4);
     const deployer = getDeployer();
 
@@ -792,7 +792,7 @@ describe('WithdrawFromLock', function () {
       .connect(provider) as any;
   });
 
-  beforeEach(async () => {
+  beforeEach(async function () {
     const [deployer] = await ethers.getSigners();
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth');
@@ -991,7 +991,7 @@ describe('ModifyLock', function () {
 
   const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
-  before(async () => {
+  before(async function () {
     const provider = ethers.provider;
     const [user1, user2] = (await ethers.getSigners()).slice(1,3);
     const deployer = getDeployer();
@@ -1410,7 +1410,7 @@ describe('Upgradability', function () {
 
   const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21);
 
-  before(async () => {
+  before(async function () {
     const deployer = getDeployer();
 
     const MockSiweAuthFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
@@ -1572,6 +1572,7 @@ describe('Upgradability', function () {
     expect(balanceBefore).to.equal(initialBalance);
 
     // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
+    const implementationBefore = await upgrades.erc1967.getImplementationAddress(proxyAddress);
     const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
     const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
@@ -1579,8 +1580,11 @@ describe('Upgradability', function () {
       constructorArgs: [await mockSiweAuth.getAddress()],
     }) as unknown as MockAccountingV2;
 
+    // sapphire-paratime#688: upgradeProxy may return before the upgrade tx lands.
+    await waitForImplementationChange(proxyAddress, implementationBefore);
+
     // Call reinitializer
-    await upgraded.initializeV2(42);
+    await (await upgraded.initializeV2(42)).wait();
 
     // Verify new state is set
     expect(await upgraded.newStateVar()).to.equal(42);

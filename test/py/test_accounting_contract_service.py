@@ -143,7 +143,7 @@ async def test_get_history_parses_contract_entries() -> None:
         "chain_id": 84532,
     }
     assert parsed["history"][1] == {
-        "kind": "transferBalance",
+        "kind": "transferFromLockIn",
         "timestamp": 1710000001,
         "token_id": "0x" + ("44" * 32),
         "amount": "456",
@@ -159,8 +159,12 @@ async def test_get_history_parses_contract_entries() -> None:
     [
         (1, "withdraw"),
         (2, "createLock"),
-        (3, "transferFromLock"),
-        (4, "transferBalance"),
+        (3, "transferFromLockOut"),
+        (4, "transferFromLockIn"),
+        (5, "transferBalanceOut"),
+        (6, "transferBalanceIn"),
+        (7, "modifyLock"),
+        (8, "unlockLock"),
     ],
 )
 async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name: str) -> None:
@@ -193,6 +197,11 @@ async def test_history_entry_decodes_address_payload_kinds(kind: int, kind_name:
         (
             HistoryKind.Withdraw,
             bytes.fromhex("77" * 32) + _history_amount(1) + bytes.fromhex("cd" * 19),
+            "must be 84 bytes",
+        ),
+        (
+            HistoryKind.TransferBalanceOut,
+            bytes.fromhex("77" * 32) + _history_amount(1) + bytes.fromhex("cd" * 21),
             "must be 84 bytes",
         ),
     ],

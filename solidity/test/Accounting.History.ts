@@ -4,7 +4,7 @@ import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { Block, Wallet } from 'ethers';
 import { MockAccounting, MockSiweAuth } from '../typechain-types';
-import { deployMockAccounting, mockAuthToken } from './utils';
+import { advanceTimePast, deployMockAccounting, mockAuthToken } from './utils';
 
 const types = {
   Lock: [
@@ -102,7 +102,7 @@ describe('Accounting history', function () {
   let user1Signer: HardhatEthersSigner;
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
 
-  beforeEach(async () => {
+  beforeEach(async function () {
     const [deployer] = await ethers.getSigners();
     const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
 
@@ -182,11 +182,7 @@ describe('Accounting history', function () {
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {
-    const MockAccountingHelper = await ethers.getContractFactory('MockAccountingHelper');
-    const mockAccountingHelper = await MockAccountingHelper.deploy(accounting);
-    await mockAccountingHelper.waitForDeployment();
-
-    const tx = await mockAccountingHelper.mockCreditDepositNTimes(
+    const tx = await accounting.mockCreditDepositNTimes(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       1,
@@ -218,7 +214,7 @@ describe('Accounting history', function () {
     expect(amountFromPayload(preLastPage[9].payload)).to.equal(100n);
   });
 
-  it('records only the canonical five kinds with payload-based metadata and no recipient mirrors', async function () {
+  it('records fund movements and recipient mirrors', async function () {
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('50'));
     await accounting.mockCreditDeposit(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('3'), depositKey('seed'));
 
@@ -307,7 +303,7 @@ describe('Accounting history', function () {
     const [user3History, user3Total] = await accounting.getHistory(0, 20, mockAuthToken(userWallet3.address));
 
     expect(user1Total).to.equal(6n);
-    expect(user1History.map((entry) => Number(entry.kind))).to.deep.equal([0, 2, 3, 1, 4, 1]);
+    expect(user1History.map((entry) => Number(entry.kind))).to.deep.equal([0, 2, 3, 1, 5, 1]);
 
     expect(user1History[0].payload).to.equal(
       depositPayload(TEST_TOKEN.tokenId, parseUsdt('3'), depositKey('seed'))
@@ -328,11 +324,91 @@ describe('Accounting history', function () {
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address)
     );
 
-    expect(user3Total).to.equal(0n);
-    expect(user3History).to.have.length(0);
+    expect(user3Total).to.equal(2n);
+    expect(user3History.map((entry) => Number(entry.kind))).to.deep.equal([4, 6]);
+    expect(user3History[0].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('4'), userWallet1.address)
+    );
+    expect(user3History[1].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address)
+    );
   });
 
-  it('does not append history for modifyLock', async function () {
+  it('records one row for self-directed transfers', async function () {
+    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('10'));
+
+    const expiry = (await latestTimestamp()) + 3600;
+    const createLockNonce = await accounting.createLockNonces(userWallet1.address);
+    const createLockSignature = await userWallet1.signTypedData(domain, { Lock: types.Lock }, {
+      serviceAddress: userWallet2.address,
+      tokenId: TEST_TOKEN.tokenId,
+      amount: parseUsdt('4'),
+      expiry,
+      nonce: createLockNonce,
+    });
+    await accounting.createLock(userWallet2.address, TEST_TOKEN.tokenId, parseUsdt('4'), expiry, createLockNonce, createLockSignature);
+
+    const transferLockedNonce = await accounting.transferLockedNonces(userWallet2.address);
+    const transferLockedSignature = await userWallet2.signTypedData(domain, { TransferLocked: types.TransferLocked }, {
+      userAddress: userWallet1.address,
+      toAddress: userWallet1.address,
+      lockId: 1,
+      amount: parseUsdt('1'),
+      nonce: transferLockedNonce,
+      serviceAddress: userWallet2.address,
+    });
+    await accounting.transferFromLock(
+      userWallet1.address,
+      userWallet1.address,
+      1,
+      parseUsdt('1'),
+      transferLockedNonce,
+      transferLockedSignature
+    );
+
+    const transferNonce = await accounting.transferNonces(userWallet1.address);
+    const transferSignature = await userWallet1.signTypedData(domain, { Transfer: types.Transfer }, {
+      toAddress: userWallet1.address,
+      tokenId: TEST_TOKEN.tokenId,
+      amount: parseUsdt('2'),
+      nonce: transferNonce,
+    });
+    await accounting.transferBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('2'), transferNonce, transferSignature);
+
+    const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
+
+    expect(total).to.equal(3n);
+    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 3, 5]);
+    expect(history[1].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address)
+    );
+    expect(history[2].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), userWallet1.address)
+    );
+  });
+
+  it('records only the sender row for zero-address transfer recipients', async function () {
+    await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('10'));
+
+    const transferNonce = await accounting.transferNonces(userWallet1.address);
+    const transferSignature = await userWallet1.signTypedData(domain, { Transfer: types.Transfer }, {
+      toAddress: ethers.ZeroAddress,
+      tokenId: TEST_TOKEN.tokenId,
+      amount: parseUsdt('2'),
+      nonce: transferNonce,
+    });
+    await accounting.transferBalance(ethers.ZeroAddress, TEST_TOKEN.tokenId, parseUsdt('2'), transferNonce, transferSignature);
+
+    const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
+
+    expect(total).to.equal(1n);
+    expect(history[0].kind).to.equal(5n);
+    expect(history[0].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), ethers.ZeroAddress)
+    );
+  });
+
+  it('records modifyLock history', async function () {
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('10'));
     const initialExpiry = (await latestTimestamp()) + 3600;
 
@@ -368,33 +444,60 @@ describe('Accounting history', function () {
       modifyLockSignature
     );
 
+    const expiryOnlyNonce = await accounting.modifyLockNonces(userWallet1.address);
+    const expiryOnlySignature = await userWallet1.signTypedData(domain, { ModifyLock: types.ModifyLock }, {
+      lockId: 1,
+      amount: 0,
+      newExpiry: initialExpiry + 600,
+      nonce: expiryOnlyNonce,
+    });
+    await accounting.modifyLock(
+      1,
+      0,
+      initialExpiry + 600,
+      expiryOnlyNonce,
+      expiryOnlySignature
+    );
+
     const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
 
-    expect(total).to.equal(1n);
-    expect(Number(history[0].kind)).to.equal(2);
+    expect(total).to.equal(3n);
+    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 7, 7]);
     expect(history[0].payload).to.equal(
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('3'), userWallet2.address)
     );
+    expect(history[1].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), userWallet2.address)
+    );
+    expect(history[2].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, 0n, userWallet2.address)
+    );
   });
 
-  it('does not append history for single or batch unlocks', async function () {
+  it('records single and batch unlock history', async function () {
+    this.timeout(120000); // On Sapphire, waiting for the locks to expire takes real seconds.
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('30'));
     const expiry = (await latestTimestamp()) + 10;
+    // Lock 2 stays active across the time jump below: batch unlock must skip it
+    // without writing a history row.
+    const farExpiry = expiry + 365 * 24 * 3600;
+    const lockExpiries = [expiry, farExpiry, expiry + 2];
 
     for (let lockIndex = 0; lockIndex < 3; lockIndex++) {
+      const amount = parseUsdt(String(lockIndex + 1));
       const nonce = await accounting.createLockNonces(userWallet1.address);
       const signature = await userWallet1.signTypedData(domain, { Lock: types.Lock }, {
         serviceAddress: userWallet2.address,
         tokenId: TEST_TOKEN.tokenId,
-        amount: parseUsdt('1'),
-        expiry: expiry + lockIndex,
+        amount,
+        expiry: lockExpiries[lockIndex],
         nonce,
       });
       const tx = await accounting.createLock(
         userWallet2.address,
         TEST_TOKEN.tokenId,
-        parseUsdt('1'),
-        expiry + lockIndex,
+        amount,
+        lockExpiries[lockIndex],
         nonce,
         signature
       );
@@ -405,24 +508,28 @@ describe('Accounting history', function () {
     expect(total1).to.equal(3n);
     expect(history1.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2]);
 
-    // Sapphire doesn't support evm_mine and evm_increaseTime.
-    const network = await ethers.provider.getNetwork();
-    if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
-      this.skip();
-    }
-
-    await ethers.provider.send('evm_increaseTime', [3600]);
-    await ethers.provider.send('evm_mine', []);
+    await advanceTimePast(lockExpiries[2]);
 
     const tx1 = await accounting.unlockSingleLock(userWallet1.address, 1);
     await tx1.wait();
-    const tx2 = await accounting.unlockAllExpiredLocks(userWallet1.address);
-    await tx2.wait();
+    await expect(accounting.unlockAllExpiredLocks(userWallet1.address)).to.not.be.reverted;
 
     const [history2, total2] = await accounting.getHistory(0, 20, mockAuthToken(userWallet1.address));
 
-    expect(total2).to.equal(3n);
-    expect(history2.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2]);
+    // Lock 2 (still active) must not produce a row; lock 3 is swapped into lock
+    // 1's slot by the single unlock, so the batch unlocks it from index 0.
+    expect(total2).to.equal(5n);
+    expect(history2.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2, 8, 8]);
+    expect(history2[3].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet2.address)
+    );
+    expect(history2[4].payload).to.equal(
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('3'), userWallet2.address)
+    );
+
+    const remainingLocks = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
+    expect(remainingLocks).to.have.length(1);
+    expect(remainingLocks[0].amount).to.equal(parseUsdt('2'));
   });
 
   it('returns an empty page for out-of-range offsets while preserving total', async function () {

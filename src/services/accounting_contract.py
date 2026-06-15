@@ -1220,8 +1220,12 @@ class AccountingContractService:
             case (
                 HistoryKind.Withdraw
                 | HistoryKind.CreateLock
-                | HistoryKind.TransferFromLock
-                | HistoryKind.TransferBalance
+                | HistoryKind.TransferFromLockOut
+                | HistoryKind.TransferFromLockIn
+                | HistoryKind.TransferBalanceOut
+                | HistoryKind.TransferBalanceIn
+                | HistoryKind.ModifyLock
+                | HistoryKind.UnlockLock
             ):
                 expected_len = _HISTORY_COUNTERPARTY_PAYLOAD_LEN
                 tail_field = "counterparty"

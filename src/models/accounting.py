@@ -32,16 +32,24 @@ class HistoryKind(IntEnum):
     Deposit = 0
     Withdraw = 1
     CreateLock = 2
-    TransferFromLock = 3
-    TransferBalance = 4
+    TransferFromLockOut = 3
+    TransferFromLockIn = 4
+    TransferBalanceOut = 5
+    TransferBalanceIn = 6
+    ModifyLock = 7
+    UnlockLock = 8
 
 
 HISTORY_KIND_WIRE_NAMES: dict[HistoryKind, str] = {
     HistoryKind.Deposit: "deposit",
     HistoryKind.Withdraw: "withdraw",
     HistoryKind.CreateLock: "createLock",
-    HistoryKind.TransferFromLock: "transferFromLock",
-    HistoryKind.TransferBalance: "transferBalance",
+    HistoryKind.TransferFromLockOut: "transferFromLockOut",
+    HistoryKind.TransferFromLockIn: "transferFromLockIn",
+    HistoryKind.TransferBalanceOut: "transferBalanceOut",
+    HistoryKind.TransferBalanceIn: "transferBalanceIn",
+    HistoryKind.ModifyLock: "modifyLock",
+    HistoryKind.UnlockLock: "unlockLock",
 }
 
 
@@ -343,8 +351,12 @@ class HistoryEntry(BaseModel):
         "deposit",
         "withdraw",
         "createLock",
-        "transferFromLock",
-        "transferBalance",
+        "transferFromLockOut",
+        "transferFromLockIn",
+        "transferBalanceOut",
+        "transferBalanceIn",
+        "modifyLock",
+        "unlockLock",
         "unknown",
     ]
     timestamp: int

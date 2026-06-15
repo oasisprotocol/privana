@@ -102,13 +102,13 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 
 | Field | Description | History kind type(s) |
 | --- | --- | --- |
-| `kind` | Entry type. Known values are `deposit`, `withdraw`, `createLock`, `transferFromLock`, and `transferBalance`; undecoded entries return `unknown`. | all |
+| `kind` | Entry type. Known values are `deposit`, `withdraw`, `createLock`, `transferFromLockOut`, `transferFromLockIn`, `transferBalanceOut`, `transferBalanceIn`, `modifyLock`, and `unlockLock`; undecoded entries return `unknown`. | all |
 | `timestamp` | Entry timestamp. | all |
-| `token_id` | Token identifier. | `deposit`, `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
-| `amount` | Token amount as a decimal string. | `deposit`, `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
-| `chain_id` | Source chain for `token_id`, when known. | `deposit`, `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
+| `token_id` | Token identifier. | all decoded kinds |
+| `amount` | Token amount as a decimal string. For `modifyLock`, this is the additional locked amount and can be `0` for expiry-only changes. For `unlockLock`, this is the amount returned to available balance. | all decoded kinds |
+| `chain_id` | Source chain for `token_id`, when known. | all decoded kinds |
 | `deposit_id` | Deposit identifier. | `deposit` |
-| `counterparty` | Address payload for non-deposit entries: withdrawal destination, lock service, or transfer recipient. | `withdraw`, `createLock`, `transferFromLock`, `transferBalance` |
+| `counterparty` | Address payload for non-deposit entries: withdrawal destination for `withdraw`, lock service for `createLock`/`modifyLock`/`unlockLock`, the recipient for `transferFromLockOut`/`transferBalanceOut`, and the sender for `transferFromLockIn`/`transferBalanceIn`. | all decoded kinds except `deposit` |
 
 ## Deposit Flow
 
