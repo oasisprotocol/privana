@@ -143,8 +143,6 @@ def test_get_history_route_wires_to_service_with_private_read_auth(monkeypatch) 
             "token_id": "0x" + "11" * 32,
             "amount": "42",
             "counterparty": None,
-            "from_address": None,
-            "to_address": None,
             "deposit_id": "0x" + "dd" * 32,
             "chain_id": 84532,
         },
@@ -154,13 +152,11 @@ def test_get_history_route_wires_to_service_with_private_read_auth(monkeypatch) 
             "token_id": "0x" + "22" * 32,
             "amount": "7",
             "counterparty": "0x1234567890123456789012345678901234567890",
-            "from_address": None,
-            "to_address": None,
             "deposit_id": None,
             "chain_id": 84532,
         },
     ]
-    mock_service.get_history.assert_awaited_once_with(-1, 2, b"\x12\x34", BENEFICIARY)
+    mock_service.get_history.assert_awaited_once_with(-1, 2, b"\x12\x34")
 
 
 def test_get_history_route_accepts_bearer_jwt(
@@ -188,7 +184,7 @@ def test_get_history_route_accepts_bearer_jwt(
 
     assert response.status_code == 200
     mint_private_read_token.assert_called_once_with(BENEFICIARY)
-    mock_service.get_history.assert_awaited_once_with(-1, 50, minted_token, BENEFICIARY)
+    mock_service.get_history.assert_awaited_once_with(-1, 50, minted_token)
 
 
 def test_get_history_route_rejects_limit_above_max(monkeypatch) -> None:
@@ -227,7 +223,7 @@ def test_get_history_route_preserves_empty_pages(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"history": [], "total": 9}
-    mock_service.get_history.assert_awaited_once_with(9, 0, b"\x12\x34", BENEFICIARY)
+    mock_service.get_history.assert_awaited_once_with(9, 0, b"\x12\x34")
 
 
 def test_deposit_status_route_rejects_empty_siwe_token(monkeypatch) -> None:

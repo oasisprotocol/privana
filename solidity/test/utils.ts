@@ -1,7 +1,7 @@
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HttpNetworkConfig } from "hardhat/types/config";
-import { artifacts, config, ethers, network, upgrades } from 'hardhat';
+import { config, ethers, network, upgrades } from 'hardhat';
 import { JsonRpcProvider } from 'ethers';
 import { MockAccounting } from "../typechain-types";
 
@@ -33,66 +33,6 @@ export function getDeployer(index?: number): HardhatEthersSigner {
  */
 export function mockAuthToken(address: string) {
 	return ethers.hexlify(ethers.zeroPadValue(address, 32))
-}
-
-const SAPPHIRE_LEGACY_CODE_SIZE_LIMIT = 24576;
-let sapphireLargeCodeSupported: boolean | undefined;
-
-async function probeLargeCodeDeploy(): Promise<boolean> {
-	const deployer = getDeployer();
-	const factory = await ethers.getContractFactory('MockAccounting', deployer);
-	// Any nonzero address works here: Accounting's constructor rejects address(0).
-	const siweAuthAddress = '0x0000000000000000000000000000000000000001';
-	for (let attempt = 0; attempt < 3; attempt++) {
-		try {
-			const probe = await factory.deploy(siweAuthAddress);
-			await probe.waitForDeployment();
-			return true;
-		} catch (error) {
-			console.log(`Large-code probe deploy failed (attempt ${attempt + 1}/3)`, error);
-			if (attempt < 2) {
-				await new Promise((resolve) => setTimeout(resolve, 1000));
-			}
-		}
-	}
-	// Distinguish "runtime rejects large code" from "environment is broken": a
-	// small control contract must deploy fine. If it cannot, fail loudly instead
-	// of skipping suites for the wrong reason.
-	const controlFactory = await ethers.getContractFactory('MockSiweAuth', deployer);
-	const control = await controlFactory.deploy('large-code-probe');
-	await control.waitForDeployment();
-	return false;
-}
-
-/**
- * Skips the calling suite when the connected Sapphire runtime cannot deploy
- * MockAccounting. Sapphire runtimes below 1.3.0-testnet enforce the EVM's
- * 24,576-byte code size limit, which MockAccounting exceeds. Deploy-dependent
- * suites self-skip on such runtimes (for example an outdated sapphire-localnet
- * image) and fail loudly when deploys break for any other reason.
- * @param ctx Mocha context of the calling before/beforeEach hook
- */
-export async function skipUnlessMockAccountingDeployable(ctx: Mocha.Context): Promise<void> {
-	const chainId = (await ethers.provider.getNetwork()).chainId;
-	if (!(0x5afdn <= chainId && chainId <= 0x5affn)) {
-		return;
-	}
-	const artifact = await artifacts.readArtifact('MockAccounting');
-	const deployedSize = (artifact.deployedBytecode.length - 2) / 2;
-	if (deployedSize <= SAPPHIRE_LEGACY_CODE_SIZE_LIMIT) {
-		return;
-	}
-	if (sapphireLargeCodeSupported === undefined) {
-		sapphireLargeCodeSupported = await probeLargeCodeDeploy();
-	}
-	if (!sapphireLargeCodeSupported) {
-		console.warn(
-			`Skipping suite: MockAccounting (${deployedSize} bytes) exceeds this Sapphire runtime's ` +
-			`${SAPPHIRE_LEGACY_CODE_SIZE_LIMIT}-byte code size limit (needs a Sapphire runtime >= ` +
-			`1.3.0-testnet; for sapphire-localnet, pull the latest image).`
-		);
-		ctx.skip();
-	}
 }
 
 /**

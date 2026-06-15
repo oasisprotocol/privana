@@ -25,15 +25,17 @@ enum ChainType {
 error UnsupportedTokenType();
 
 /// @notice User-visible history entry kinds.
-/// @dev Append-only: `HistoryKind` values are persisted inside `HistoryEntry`
-///      storage and decoded off-chain by ordinal, so existing members must
-///      never be reordered or removed.
+/// @dev Ordinals are the wire encoding shared with Python `HistoryKind`; keep
+///      them in lockstep. Before durable deployments they may be renumbered
+///      with a coordinated redeploy; afterwards preserve existing ordinals.
 enum HistoryKind {
     Deposit,
     Withdraw,
     CreateLock,
-    TransferFromLock,
-    TransferBalance,
+    TransferFromLockOut,
+    TransferFromLockIn,
+    TransferBalanceOut,
+    TransferBalanceIn,
     ModifyLock,
     UnlockLock
 }

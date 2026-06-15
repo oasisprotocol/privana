@@ -45,7 +45,6 @@ _HISTORY_DEPOSIT_PAYLOAD_LEN = _HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN + _HI
 _HISTORY_COUNTERPARTY_PAYLOAD_LEN = (
     _HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN + _HISTORY_ADDRESS_LEN
 )
-_HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN = _HISTORY_COUNTERPARTY_PAYLOAD_LEN + _HISTORY_ADDRESS_LEN
 _INT256_MIN = -(2**255)
 _INT256_MAX = 2**255 - 1
 
@@ -1212,9 +1211,7 @@ class AccountingContractService:
         }
 
     @staticmethod
-    def _decode_history_payload(
-        kind: HistoryKind, payload: Any, owner_address: Optional[str]
-    ) -> Dict[str, Any]:
+    def _decode_history_payload(kind: HistoryKind, payload: Any) -> Dict[str, Any]:
         payload_bytes = bytes(HexBytes(payload))
         match kind:
             case HistoryKind.Deposit:
@@ -1223,32 +1220,22 @@ class AccountingContractService:
             case (
                 HistoryKind.Withdraw
                 | HistoryKind.CreateLock
+                | HistoryKind.TransferFromLockOut
+                | HistoryKind.TransferFromLockIn
+                | HistoryKind.TransferBalanceOut
+                | HistoryKind.TransferBalanceIn
                 | HistoryKind.ModifyLock
                 | HistoryKind.UnlockLock
             ):
                 expected_len = _HISTORY_COUNTERPARTY_PAYLOAD_LEN
                 tail_field = "counterparty"
-            case HistoryKind.TransferFromLock | HistoryKind.TransferBalance:
-                # Paired transfer rows carry both addresses; rows written by the
-                # previous contract carry only the recipient.
-                expected_len = None
-                tail_field = "transfer_pair"
             case _:
                 raise ValueError(f"Unsupported history kind {kind.name}")
 
-        if expected_len is not None and len(payload_bytes) != expected_len:
+        if len(payload_bytes) != expected_len:
             raise ValueError(
                 f"History payload for {kind.name} must be "
                 f"{expected_len} bytes, got {len(payload_bytes)} bytes"
-            )
-        if expected_len is None and len(payload_bytes) not in (
-            _HISTORY_COUNTERPARTY_PAYLOAD_LEN,
-            _HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN,
-        ):
-            raise ValueError(
-                f"History payload for {kind.name} must be "
-                f"{_HISTORY_COUNTERPARTY_PAYLOAD_LEN} or "
-                f"{_HISTORY_PAIRED_TRANSFER_PAYLOAD_LEN} bytes, got {len(payload_bytes)} bytes"
             )
 
         decoded: Dict[str, Any] = {
@@ -1262,23 +1249,11 @@ class AccountingContractService:
                 )
             ),
             "counterparty": None,
-            "from_address": None,
-            "to_address": None,
             "deposit_id": None,
         }
         tail = payload_bytes[_HISTORY_TOKEN_ID_LEN + _HISTORY_AMOUNT_LEN :]
         if tail_field == "deposit_id":
             decoded["deposit_id"] = _to_prefixed_hex(tail)
-        elif tail_field == "transfer_pair" and len(tail) == 2 * _HISTORY_ADDRESS_LEN:
-            from_address = Web3.to_checksum_address(tail[:_HISTORY_ADDRESS_LEN])
-            to_address = Web3.to_checksum_address(tail[_HISTORY_ADDRESS_LEN:])
-            owner = Web3.to_checksum_address(owner_address) if owner_address else None
-            decoded["from_address"] = from_address
-            decoded["to_address"] = to_address
-            if owner == to_address:
-                decoded["counterparty"] = from_address
-            elif owner == from_address:
-                decoded["counterparty"] = to_address
         else:
             decoded["counterparty"] = Web3.to_checksum_address(tail)
         return decoded
@@ -1291,20 +1266,16 @@ class AccountingContractService:
             "token_id": None,
             "amount": None,
             "counterparty": None,
-            "from_address": None,
-            "to_address": None,
             "deposit_id": None,
             "chain_id": None,
         }
 
-    async def _history_entry_to_dict(
-        self, entry: Any, owner_address: Optional[str]
-    ) -> Dict[str, Any]:
+    async def _history_entry_to_dict(self, entry: Any) -> Dict[str, Any]:
         kind, timestamp, payload = entry
         timestamp_int = int(timestamp)
         try:
             kind_enum = HistoryKind(int(kind))
-            decoded = self._decode_history_payload(kind_enum, payload, owner_address)
+            decoded = self._decode_history_payload(kind_enum, payload)
         except ValueError as exc:
             logger.warning("History entry decode failed (timestamp=%d): %s", timestamp_int, exc)
             return self._unknown_history_entry(timestamp_int)
@@ -1326,24 +1297,19 @@ class AccountingContractService:
             "chain_id": chain_id,
         }
 
-    async def get_history(
-        self, offset: int, limit: int, siwe_token: bytes, user_address: str
-    ) -> Dict[str, Any]:
+    async def get_history(self, offset: int, limit: int, siwe_token: bytes) -> Dict[str, Any]:
         """Fetch one page of history. Page 0 is the oldest; pass ``offset=-1`` for the newest page."""
         if offset < _INT256_MIN or offset > _INT256_MAX:
             raise ValueError("offset must fit int256")
         if limit < 0:
             raise ValueError("limit must be >= 0")
-        owner_address = self._require_address(user_address, "user_address")
 
         contract_reader = await self._get_confidential_reader_contract()
         entries, total = await contract_reader.functions.getHistory(
             offset, limit, siwe_token
         ).call()
 
-        history = await asyncio.gather(
-            *(self._history_entry_to_dict(entry, owner_address) for entry in entries)
-        )
+        history = await asyncio.gather(*(self._history_entry_to_dict(entry) for entry in entries))
         return {
             "history": list(history),
             "total": int(total),

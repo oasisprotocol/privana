@@ -74,4 +74,19 @@ contract MockAccounting is Accounting {
         roflSignerAddress = newSigner;
         emit RoflSignerUpdated(newSigner);
     }
+
+    /**
+     * @notice Calls mockCreditDeposit n times from solidity to speed up the sapphire-localnet tests.
+     */
+    function mockCreditDepositNTimes(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId,
+        uint256 n
+    ) external {
+        for (uint256 i = 0; i < n; i++) {
+            this.mockCreditDeposit(beneficiary, tokenId, i + amount, keccak256(abi.encodePacked(depositId, i)));
+        }
+    }
 }

@@ -194,34 +194,6 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     }
 
     /**
-     * @dev Records the same transfer payload against both participants (the
-     *      recipient entry is skipped when it would duplicate the sender's).
-     * @param fromAddress The sending party (always recorded).
-     * @param toAddress The receiving party (recorded unless zero or equal to `fromAddress`).
-     * @param kind The history entry kind.
-     * @param tokenId The token transferred.
-     * @param amount The transfer amount.
-     */
-    function _appendTransferHistoryForParticipants(
-        address fromAddress,
-        address toAddress,
-        HistoryKind kind,
-        bytes32 tokenId,
-        uint256 amount
-    ) internal {
-        bytes memory payload = abi.encodePacked(
-            tokenId,
-            amount,
-            fromAddress,
-            toAddress
-        );
-        _appendHistory(fromAddress, kind, payload);
-        if (toAddress != address(0) && toAddress != fromAddress) {
-            _appendHistory(toAddress, kind, payload);
-        }
-    }
-
-    /**
      * @notice Get the deposit address for an authenticated user.
      * @param chainType The chain family (see ChainType enum)
      * @param version Key derivation index
@@ -729,13 +701,22 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         lock.amount -= amount;
         balances[toAddress][lock.tokenId] += amount;
 
-        _appendTransferHistoryForParticipants(
+        _appendUserCounterpartyHistory(
             userAddress,
-            toAddress,
-            HistoryKind.TransferFromLock,
+            HistoryKind.TransferFromLockOut,
             lock.tokenId,
-            amount
+            amount,
+            toAddress
         );
+        if (toAddress != address(0) && toAddress != userAddress) {
+            _appendUserCounterpartyHistory(
+                toAddress,
+                HistoryKind.TransferFromLockIn,
+                lock.tokenId,
+                amount,
+                userAddress
+            );
+        }
 
         if (lock.amount == 0) {
             locks[lockIndex] = locks[locks.length - 1];
@@ -853,13 +834,22 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
 
-        _appendTransferHistoryForParticipants(
+        _appendUserCounterpartyHistory(
             userAddress,
-            toAddress,
-            HistoryKind.TransferBalance,
+            HistoryKind.TransferBalanceOut,
             tokenId,
-            amount
+            amount,
+            toAddress
         );
+        if (toAddress != address(0) && toAddress != userAddress) {
+            _appendUserCounterpartyHistory(
+                toAddress,
+                HistoryKind.TransferBalanceIn,
+                tokenId,
+                amount,
+                userAddress
+            );
+        }
     }
 
     /**

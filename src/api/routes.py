@@ -1115,7 +1115,7 @@ async def get_history(
 ) -> HistoryResponse:
     """Get one page of authenticated user history."""
     try:
-        result = await _service.get_history(offset, limit, auth.token, auth.user_address)
+        result = await _service.get_history(offset, limit, auth.token)
         return HistoryResponse(**result)
     except ContractLogicError as exc:
         logger.warning("History token validation failed: %s", exc)

@@ -4,7 +4,7 @@ import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { Block, Wallet } from 'ethers';
 import { MockAccounting, MockSiweAuth } from '../typechain-types';
-import { advanceTimePast, deployMockAccounting, mockAuthToken, skipUnlessMockAccountingDeployable } from './utils';
+import { advanceTimePast, deployMockAccounting, mockAuthToken } from './utils';
 
 const types = {
   Lock: [
@@ -80,10 +80,6 @@ function counterpartyPayload(tokenId: string, amount: bigint, counterparty: stri
   return ethers.concat([tokenId, amountWord(amount), counterparty]);
 }
 
-function pairedTransferPayload(tokenId: string, amount: bigint, fromAddress: string, toAddress: string): string {
-  return ethers.concat([tokenId, amountWord(amount), fromAddress, toAddress]);
-}
-
 function amountFromPayload(payload: string): bigint {
   return BigInt(ethers.dataSlice(payload, 32, 64));
 }
@@ -107,7 +103,6 @@ describe('Accounting history', function () {
   let domain: { name: string; version: string; chainId: number; verifyingContract: string };
 
   beforeEach(async function () {
-    await skipUnlessMockAccountingDeployable(this);
     const [deployer] = await ethers.getSigners();
     const mnemonic = (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic;
 
@@ -187,11 +182,7 @@ describe('Accounting history', function () {
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {
-    const MockAccountingHelper = await ethers.getContractFactory('MockAccountingHelper');
-    const mockAccountingHelper = await MockAccountingHelper.deploy(accounting);
-    await mockAccountingHelper.waitForDeployment();
-
-    const tx = await mockAccountingHelper.mockCreditDepositNTimes(
+    const tx = await accounting.mockCreditDepositNTimes(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       1,
@@ -312,7 +303,7 @@ describe('Accounting history', function () {
     const [user3History, user3Total] = await accounting.getHistory(0, 20, mockAuthToken(userWallet3.address));
 
     expect(user1Total).to.equal(6n);
-    expect(user1History.map((entry) => Number(entry.kind))).to.deep.equal([0, 2, 3, 1, 4, 1]);
+    expect(user1History.map((entry) => Number(entry.kind))).to.deep.equal([0, 2, 3, 1, 5, 1]);
 
     expect(user1History[0].payload).to.equal(
       depositPayload(TEST_TOKEN.tokenId, parseUsdt('3'), depositKey('seed'))
@@ -321,29 +312,29 @@ describe('Accounting history', function () {
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('10'), userWallet2.address)
     );
     expect(user1History[2].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('4'), userWallet1.address, userWallet3.address)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('4'), userWallet3.address)
     );
     expect(user1History[3].payload).to.equal(
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), userWallet3.address)
     );
     expect(user1History[4].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address, userWallet3.address)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet3.address)
     );
     expect(user1History[5].payload).to.equal(
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address)
     );
 
     expect(user3Total).to.equal(2n);
-    expect(user3History.map((entry) => Number(entry.kind))).to.deep.equal([3, 4]);
+    expect(user3History.map((entry) => Number(entry.kind))).to.deep.equal([4, 6]);
     expect(user3History[0].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('4'), userWallet1.address, userWallet3.address)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('4'), userWallet1.address)
     );
     expect(user3History[1].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address, userWallet3.address)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address)
     );
   });
 
-  it('records one row for self-directed paired transfers', async function () {
+  it('records one row for self-directed transfers', async function () {
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('10'));
 
     const expiry = (await latestTimestamp()) + 3600;
@@ -387,16 +378,16 @@ describe('Accounting history', function () {
     const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
 
     expect(total).to.equal(3n);
-    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 3, 4]);
+    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 3, 5]);
     expect(history[1].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address, userWallet1.address)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet1.address)
     );
     expect(history[2].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('2'), userWallet1.address, userWallet1.address)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), userWallet1.address)
     );
   });
 
-  it('records only the sender row for zero-address paired transfer recipients', async function () {
+  it('records only the sender row for zero-address transfer recipients', async function () {
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('10'));
 
     const transferNonce = await accounting.transferNonces(userWallet1.address);
@@ -411,9 +402,9 @@ describe('Accounting history', function () {
     const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
 
     expect(total).to.equal(1n);
-    expect(history[0].kind).to.equal(4n);
+    expect(history[0].kind).to.equal(5n);
     expect(history[0].payload).to.equal(
-      pairedTransferPayload(TEST_TOKEN.tokenId, parseUsdt('2'), userWallet1.address, ethers.ZeroAddress)
+      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), ethers.ZeroAddress)
     );
   });
 
@@ -471,7 +462,7 @@ describe('Accounting history', function () {
     const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
 
     expect(total).to.equal(3n);
-    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 5, 5]);
+    expect(history.map((entry) => Number(entry.kind))).to.deep.equal([2, 7, 7]);
     expect(history[0].payload).to.equal(
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('3'), userWallet2.address)
     );
@@ -528,7 +519,7 @@ describe('Accounting history', function () {
     // Lock 2 (still active) must not produce a row; lock 3 is swapped into lock
     // 1's slot by the single unlock, so the batch unlocks it from index 0.
     expect(total2).to.equal(5n);
-    expect(history2.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2, 6, 6]);
+    expect(history2.map((entry) => Number(entry.kind))).to.deep.equal([2, 2, 2, 8, 8]);
     expect(history2[3].payload).to.equal(
       counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('1'), userWallet2.address)
     );
