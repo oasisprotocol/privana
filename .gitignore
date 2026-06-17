@@ -51,6 +51,7 @@ cover/
 
 # Environments
 .env
+.env.*.secrets
 .venv
 env/
 venv/

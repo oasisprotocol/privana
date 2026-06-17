@@ -15,6 +15,9 @@ import json
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv(".env.testnet") # Use Testnet environment in openapi specs usage
+
 from src.main import app
 
 SPEC_PATH = Path(__file__).resolve().parent.parent / "docs" / "openapi.json"

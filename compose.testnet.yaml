@@ -1,0 +1,25 @@
+services:
+  privana:
+    build:
+      context: .
+      args:
+        - ENV_FILE=.env.testnet
+    image: "ghcr.io/oasisprotocol/privana:testnet"
+    platform: linux/amd64
+    environment:
+      - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
+      - SWEEP_STATE_DIR=/data/sweep-engine
+      - MOONPAY_API_KEY=${MOONPAY_API_KEY}
+      - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY}
+      - MOONPAY_WEBHOOK_SECRET_KEY=${MOONPAY_WEBHOOK_SECRET_KEY}
+    volumes:
+      - /run/rofl-appd.sock:/run/rofl-appd.sock
+      - sweep-engine-data:/data/sweep-engine
+    ports:
+      - "8000:8000"
+    annotations:
+      net.oasis.proxy.ports.8000.custom_domain: api.testnet.privana.finance
+    restart: on-failure
+
+volumes:
+  sweep-engine-data:
