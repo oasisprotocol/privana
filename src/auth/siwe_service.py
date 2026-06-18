@@ -1,6 +1,7 @@
 """Reusable server-side SIWE authentication flow."""
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +12,7 @@ from web3 import Web3
 from src.auth.auth_token_service import get_auth_token_service
 from src.auth.siwe_config import get_siwe_configs
 from src.auth.token_store import get_token_store
-from src.config import DEFAULT_SIWE_ALLOWED_CHAIN_IDS, load_settings
+from src.config import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -75,26 +76,29 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
     if not token_store.is_nonce_valid(nonce):
         raise SiweAuthError("Invalid or expired nonce. Request a new nonce from /auth/nonce")
 
-    allowed_chains = settings.siwe_allowed_chain_ids
-    if not allowed_chains:
-        allowed_chains = (
-            DEFAULT_SIWE_ALLOWED_CHAIN_IDS
-            | set(settings.chain_rpc_urls.keys())
-            | {settings.sapphire_chain_id}
-        )
-    if not siwe_message.chain_id or siwe_message.chain_id not in allowed_chains:
+    match = re.search(
+        r"Sign in to Privana on chain \s*(\d+)", siwe_message.statement or "", re.IGNORECASE
+    )
+    if not match:
         logger.warning(
-            "SIWE chain_id %s not in allowed chains %s for %s",
-            siwe_message.chain_id,
-            allowed_chains,
+            "SIWE destination chain in statement not defined for %s",
             address,
         )
-        raise SiweAuthError(f"Chain ID {siwe_message.chain_id} is not supported")
+        raise SiweAuthError("Destination chain in statement not defined")
+
+    destination_chain_id = int(match.group(1), 10)
+    if destination_chain_id != settings.sapphire_chain_id:
+        logger.warning(
+            "Destination chain %s in SIWE statement does not match %s for %s",
+            destination_chain_id,
+            settings.sapphire_chain_id,
+            address,
+        )
+        raise SiweAuthError(f"Destination chain {destination_chain_id} not supported")
 
     try:
-        provider = None
-        if siwe_message.chain_id in settings.chain_rpc_urls:
-            provider = Web3.HTTPProvider(settings.chain_rpc_urls[siwe_message.chain_id])
+        provider = Web3.HTTPProvider(settings.sapphire_rpc_url)
+        # Only EOA signatures are supported for now.
         siwe_message.verify(
             signature,
             domain=matched_config.domain,

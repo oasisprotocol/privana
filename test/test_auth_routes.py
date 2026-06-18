@@ -30,6 +30,9 @@ OTHER_ADDRESS = "0x0000000000000000000000000000000000000002"
 # Use the default auth token validity from Settings
 AUTH_TOKEN_VALIDITY_SECONDS = Settings().auth_token_validity_seconds
 
+# Destination chain ID the server authenticates against (Sapphire).
+SAPPHIRE_CHAIN_ID = Settings().sapphire_chain_id
+
 
 async def _init_key_managers():
     """Initialize auth key managers for testing."""
@@ -46,6 +49,7 @@ def _build_siwe_message(
     issued_at: datetime | None = None,
     expiration_time: datetime | None = None,
     chain_id: int = 1,
+    destination_chain_id: int | None = SAPPHIRE_CHAIN_ID,
 ) -> str:
     """Build a SIWE message for testing.
 
@@ -56,12 +60,20 @@ def _build_siwe_message(
         issued_at: When the message was issued (default: now)
         expiration_time: When the message expires (default: now + 24h)
         chain_id: Chain ID for the SIWE message (default: 1)
+        destination_chain_id: Sapphire destination chain ID embedded in the
+            statement. The server requires this and verifies it matches its
+            configured ``sapphire_chain_id``. Pass ``None`` to omit it.
     """
     now = datetime.now(timezone.utc)
     if issued_at is None:
         issued_at = now
     if expiration_time is None:
         expiration_time = now + timedelta(seconds=AUTH_TOKEN_VALIDITY_SECONDS)
+
+    if destination_chain_id is None:
+        statement = "Sign in to Privana"
+    else:
+        statement = f"Sign in to Privana on chain {destination_chain_id}"
 
     return SiweMessage(
         domain=domain,
@@ -72,7 +84,7 @@ def _build_siwe_message(
         issued_at=issued_at.isoformat().replace("+00:00", "Z"),
         expiration_time=expiration_time.isoformat().replace("+00:00", "Z"),
         nonce=nonce,
-        statement="Sign in",
+        statement=statement,
     ).prepare_message()
 
 
@@ -1070,7 +1082,7 @@ class TestMissingTimestampFields:
             issued_at=now.isoformat().replace("+00:00", "Z"),
             expiration_time=(now + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
             nonce=test_nonce,
-            statement="Sign in",
+            statement=f"Sign in to Privana on chain {SAPPHIRE_CHAIN_ID}",
         ).prepare_message()
 
         class _MockAccountingService:
@@ -1150,16 +1162,21 @@ class TestMissingTimestampFields:
 
 
 class TestChainIdValidation:
-    """Tests for SIWE chain_id validation."""
+    """Tests for the SIWE destination chain ID requirement.
+
+    The server requires the SIWE message to declare a ``Destination Chain ID``
+    that matches its configured ``sapphire_chain_id``. The standard SIWE
+    ``Chain ID`` field (the wallet's current network) is not used for this check.
+    """
 
     @pytest.mark.asyncio
-    async def test_rejects_disallowed_chain_id(self, reset_auth_singletons, monkeypatch, tmp_path):
-        """Test that login rejects SIWE messages with chain_id not in allowed list."""
-        storage_dir = tmp_path / "chain_id_reject_test"
+    async def test_rejects_missing_destination_chain_id(
+        self, reset_auth_singletons, monkeypatch, tmp_path
+    ):
+        """Test that login rejects SIWE messages without a destination chain ID."""
+        storage_dir = tmp_path / "chain_id_missing_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-        # Only allow chain_id 1, but we'll use chain_id 999
-        monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", "1")
         src.config._settings = None
 
         src.auth.token_store._token_store_instance = None
@@ -1172,8 +1189,8 @@ class TestChainIdValidation:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
-        # Use chain_id 999 which is not in the allowed list
-        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, chain_id=999)
+        # Omit the destination chain ID entirely.
+        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, destination_chain_id=None)
 
         class _MockAccountingService:
             def get_siwe_domain(self):
@@ -1187,16 +1204,53 @@ class TestChainIdValidation:
             )
 
         assert exc.value.status_code == 400
-        assert "Chain ID 999 is not supported" in exc.value.detail
+        assert "Destination chain in statement not defined" in exc.value.detail
 
     @pytest.mark.asyncio
-    async def test_accepts_allowed_chain_id(self, reset_auth_singletons, monkeypatch, tmp_path):
-        """Test that login accepts SIWE messages with chain_id in allowed list."""
+    async def test_rejects_mismatched_destination_chain_id(
+        self, reset_auth_singletons, monkeypatch, tmp_path
+    ):
+        """Test that login rejects a destination chain ID that is not the Sapphire one."""
+        storage_dir = tmp_path / "chain_id_reject_test"
+        monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
+        monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
+        src.config._settings = None
+
+        src.auth.token_store._token_store_instance = None
+        token_store = TokenStore()
+
+        src.auth.auth_token_keys._auth_token_key_manager_instance = None
+        src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
+
+        monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
+
+        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        # Destination chain ID 999 does not match the configured Sapphire chain ID.
+        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, destination_chain_id=999)
+
+        class _MockAccountingService:
+            def get_siwe_domain(self):
+                return {"domain": "localhost:5173"}
+
+        monkeypatch.setattr(routes, "_service", _MockAccountingService())
+
+        with pytest.raises(HTTPException) as exc:
+            await _call_siwe_login(
+                SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
+            )
+
+        assert exc.value.status_code == 400
+        assert "Destination chain 999 not supported" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_accepts_matching_destination_chain_id(
+        self, reset_auth_singletons, monkeypatch, tmp_path
+    ):
+        """Test that login accepts a destination chain ID equal to the Sapphire one."""
         storage_dir = tmp_path / "chain_id_accept_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-        # Allow chain_id 42
-        monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", "42")
         src.config._settings = None
 
         src.auth.token_store._token_store_instance = None
@@ -1209,7 +1263,8 @@ class TestChainIdValidation:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
-        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, chain_id=42)
+        # Default destination_chain_id matches the configured Sapphire chain ID.
+        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _JwtService:
             access_token_expiry_seconds = 12 * 3600
@@ -1237,15 +1292,15 @@ class TestChainIdValidation:
         assert response.jwt_access_token == "jwt-access-token"
 
     @pytest.mark.asyncio
-    async def test_defaults_to_builtin_supported_chains_when_no_explicit_list(
+    async def test_validates_against_configured_sapphire_chain_id(
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
-        """Test that built-in supported SIWE chains are allowed when no explicit list is set."""
-        storage_dir = tmp_path / "chain_id_default_test"
+        """Test that the required destination chain ID follows SAPPHIRE_CHAIN_ID config."""
+        storage_dir = tmp_path / "chain_id_config_test"
         monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
         monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-        # Don't set SIWE_ALLOWED_CHAIN_IDS - should fall back to the built-in supported set.
-        monkeypatch.delenv("SIWE_ALLOWED_CHAIN_IDS", raising=False)
+        # Reconfigure the Sapphire chain ID; the message must match the new value.
+        monkeypatch.setenv("SAPPHIRE_CHAIN_ID", "23294")
         src.config._settings = None
 
         src.auth.token_store._token_store_instance = None
@@ -1258,8 +1313,7 @@ class TestChainIdValidation:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
-        # Use sapphire testnet chain_id (23295)
-        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, chain_id=23295)
+        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, destination_chain_id=23294)
 
         class _JwtService:
             access_token_expiry_seconds = 12 * 3600
@@ -1286,55 +1340,8 @@ class TestChainIdValidation:
         assert response.siwe_token.startswith("0x")
         assert response.jwt_access_token == "jwt-access-token"
 
-    @pytest.mark.asyncio
-    async def test_supports_hex_chain_ids_in_config(
-        self, reset_auth_singletons, monkeypatch, tmp_path
-    ):
-        """Test that hex chain IDs (e.g. 0x5afe) are parsed correctly from config."""
-        storage_dir = tmp_path / "chain_id_hex_test"
-        monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
-        monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
-        # Use hex format for Sapphire Mainnet (0x5afe = 23294)
-        monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", "0x5afe")
+        # Reset config for other tests
         src.config._settings = None
-
-        src.auth.token_store._token_store_instance = None
-        token_store = TokenStore()
-
-        src.auth.auth_token_keys._auth_token_key_manager_instance = None
-        src.auth.auth_token_service._auth_token_service_instance = None
-        await _init_key_managers()
-
-        monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
-
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
-        # Use chain_id 23294 (0x5afe - Sapphire Mainnet)
-        siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, chain_id=23294)
-
-        class _JwtService:
-            access_token_expiry_seconds = 12 * 3600
-            refresh_token_expiry_seconds = 7 * 24 * 3600
-
-            def create_token(self, address):
-                return "jwt-access-token"
-
-            def create_refresh_token(self, address):
-                return "jwt-refresh-token"
-
-        class _MockAccountingService:
-            def get_siwe_domain(self):
-                return {"domain": "localhost:5173"}
-
-        monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
-        monkeypatch.setattr(routes, "_service", _MockAccountingService())
-
-        with patch.object(SiweMessage, "verify"):
-            response = await _call_siwe_login(
-                SiweLoginRequest(siwe_message=siwe_msg, signature="0x" + "ab" * 65)
-            )
-
-        assert response.siwe_token.startswith("0x")
-        assert response.jwt_access_token == "jwt-access-token"
 
 
 class TestConfigErrors:

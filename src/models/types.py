@@ -1,7 +1,7 @@
 """Type definitions for the Accounting Module API."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Set, Tuple
+from typing import Dict, Tuple
 
 
 @dataclass
@@ -28,9 +28,6 @@ class Settings:
     # one of these (after canonicalization) for authentication to succeed.
     siwe_domains: Tuple[str, ...] = field(default_factory=tuple)
 
-    # Allowed chain IDs for SIWE authentication.
-    # If empty, defaults to DEFAULT_SIWE_ALLOWED_CHAIN_IDS plus configured RPC chain IDs.
-    siwe_allowed_chain_ids: Set[int] = field(default_factory=set)
     auth_token_storage_dir: str = ".auth_tokens"
     auth_clients_json: str = "[]"
     auth_code_ttl_seconds: int = 120

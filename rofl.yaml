@@ -73,8 +73,6 @@ deployments:
         value: pGJwa1ggLuywdA21iUKOZ5Md+2Q1Q/FZVcXOsZSc/MwifaYagApkbmFtZVghCpzYTlvRck4Yi5ZhdPcsi3UeoVnau3cERII99WkrGhlvZW5vbmNlT17gC0n4RgWqZ5LbucUwiWV2YWx1ZVWYptlAjsjNomqNbWPESQ3nZT0dK60=
       - name: SAPPHIRE_RPC_URL
         value: pGJwa1ggNUrAiF2M839zYbDdDssgDkue6qj6m592dDay4eXew01kbmFtZVgggOX7Axbwb0zHN9IThNzmjpgnlHK6Rn9srjRjhkZtYpNlbm9uY2VP0+Av5QOt0sdeAdldDhLPZXZhbHVlWDFdcEM/BIhTc6Q8Kams0DYPsrzXzKkRW9r4gzE/xWLYhivSgD/nTM/GiJZ8zePXJdWA
-      - name: SIWE_ALLOWED_CHAIN_IDS
-        value: pGJwa1ggmu1+uvIKY64nKYw1fTmjiPKfZYdZM4Qog81bnA6PdR9kbmFtZVgm/8emzBd3GTfQbl7HTwceEVKoYR+PhSaHsTVs32f7SqnKSa0Eks1lbm9uY2VPDblOcxpWyu0pH4xI6uqcZXZhbHVlUEIxdNGtAX+p5Afn8r1u/vk=
       - name: SIWE_DOMAINS
         value: pGJwa1ggmmDs3HUGk6BWytpAD+wUteNrdUria3tndznE4vFJP3JkbmFtZVgcnLuzhiRJ9fDBKUzelkkRQvPcSyU1gg8aV4KPBWVub25jZU+ttsHln9mUakBYqTMewM5ldmFsdWVYqT5VU44XOOM6+mWAybmFM23wX0DavSnj/ZqvUsE5NlIjLqn8OTMqnMMLkckjuc+H/cKdd7dBUdC/p4G01ZgokGvIUbu4aDxSiAW6TsxYGvGSpYVJGdegFzdMGhIxG96RiEgtMaCQb0UUz0vvmnwNugfbFoXxYYzCLsGDiQOO2cvMdJLqX44b16MW9phUussIjFlyjf1FtIpuIXpRfdP3WKI+418F1yhZXxY=
       - name: SIWE_NONCE_EXPIRY_SECONDS
@@ -102,11 +100,10 @@ deployments:
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
-        offer: playground_short
-        id: 00000000000005cc
+        offer: playground_internal_m
+        id: "0000000000000629"
         permissions:
           log.view:
-            # uniyalabhishek
             - oasis1qrrvz7pw8eysww22qzutnaufppam0avuduuxnq2f
 tooling:
   version: 0.18.6

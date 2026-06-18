@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {SignatureRSV, A13e} from "@oasisprotocol/sapphire-contracts/contracts/auth/A13e.sol";
 import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
 import {Subcall} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
+import {IAccountingSiweAuth} from "../interfaces/IAccountingSiweAuth.sol";
 
 /// @title AuthToken structure for SIWE-based authentication
 struct AuthToken {
@@ -22,51 +23,28 @@ struct AuthToken {
  * @notice SIWE authentication helper for Sapphire view-call authentication.
  *
  * This contract is a minimal fork of sapphire-contracts' SiweAuth
- * with one key difference: it avoids calling Sapphire precompiles in the constructor
- * on non-Sapphire test networks (e.g., Hardhat), so unit tests can deploy contracts.
- *
- * The authentication logic (login/authMsgSender) is only supported on Sapphire chains.
+ * with the following differences:
+ * 1. Login can only be performed off-chain. This mitigates replay attacks. As a
+ *    consequence the authTokenEncKey is generated off-chain too and a copy is
+ *    stored inside this contract (only whitelisted ROFL is allowed).
+ * 2. Domain check is removed to allow cross-domain logins.
  */
-contract AccountingSiweAuth is A13e {
+contract AccountingSiweAuth is A13e, IAccountingSiweAuth {
     bytes32 private _authTokenEncKey;
-    bytes21 private _roflAppId;
+    bytes21 public roflAppId;
 
-    error SiweAuth_UnsupportedChain();
     error SiweAuth_Expired();
-    error SiweAuth_NotAuthorizedRofl();
     error SiweAuth_LoginDisabled();
 
     constructor(bytes21 inRoflAppId) {
-        _roflAppId = inRoflAppId;
-
-        // TODO: Remove non-Sapphire fallback when Sapphire localnet e2e tests are available.
-        // This allows deployment on Hardhat/local networks for unit testing.
-        if (!_isSapphireChainId(block.chainid)) {
-            // Deterministic key for non-Sapphire local test networks (e.g., Hardhat).
-            // Authentication is not expected to be used off-Sapphire.
-            // On Sapphire, the ROFL service will set the key via setAuthTokenEncKey().
-            _authTokenEncKey = bytes32(uint256(1));
-        }
-    }
-
-    // TODO: Remove when Sapphire localnet e2e tests are available.
-    function _isSapphireChainId(uint256 chainId) private pure returns (bool) {
-        return chainId == 0x5afe || chainId == 0x5aff || chainId == 0x5afd;
-    }
-
-    function _requireSapphire() private view {
-        if (!_isSapphireChainId(block.chainid)) {
-            revert SiweAuth_UnsupportedChain();
-        }
+        roflAppId = inRoflAppId;
     }
 
     /// @notice Set the AuthToken encryption key. Can only be called by the authorized ROFL app.
     /// @dev The ROFL app ID is set at deployment. Only that app can call this function.
     /// @param newKey The 32-byte Deoxys-II encryption key.
     function setAuthTokenEncKey(bytes32 newKey) external {
-        if (Subcall.getRoflAppId() != _roflAppId) {
-            revert SiweAuth_NotAuthorizedRofl();
-        }
+        Subcall.roflEnsureAuthorizedOrigin(roflAppId);
         _authTokenEncKey = newKey;
     }
 
@@ -82,10 +60,6 @@ contract AccountingSiweAuth is A13e {
         revert SiweAuth_LoginDisabled();
     }
 
-    function roflAppId() public view returns (bytes21) {
-        return _roflAppId;
-    }
-
     /// @notice Returns the keccak256 hash of the stored encryption key for debugging.
     /// @dev This allows verifying the key was set correctly without exposing the key itself.
     function getAuthTokenEncKeyHash() external view returns (bytes32) {
@@ -99,8 +73,6 @@ contract AccountingSiweAuth is A13e {
         checkRevokedAuthToken(token)
         returns (address)
     {
-        _requireSapphire();
-
         if (token.length == 0) {
             return address(0);
         }
@@ -115,8 +87,6 @@ contract AccountingSiweAuth is A13e {
         virtual
         returns (AuthToken memory)
     {
-        _requireSapphire();
-
         bytes memory authTokenEncoded = Sapphire.decrypt(
             _authTokenEncKey,
             0,

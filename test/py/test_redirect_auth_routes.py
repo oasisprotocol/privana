@@ -62,7 +62,6 @@ def _reset_auth_state() -> None:
 def test_app(tmp_path, monkeypatch):
     monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
     monkeypatch.setenv("SIWE_DOMAINS", TEST_DOMAIN)
-    monkeypatch.setenv("SIWE_ALLOWED_CHAIN_IDS", f"{TEST_HOSTED_CHAIN_ID},23295")
     monkeypatch.setenv("AUTH_TOKEN_VALIDITY_SECONDS", "600")
     monkeypatch.setenv("AUTH_CODE_TTL_SECONDS", "90")
     monkeypatch.setenv("JWT_EXPIRY_HOURS", "1")
@@ -128,8 +127,7 @@ def test_authorize_page_renders_registered_client(client):
     assert TEST_REDIRECT_ORIGIN in response.text
     assert "/static/auth.css?v=" in response.text
     assert "/static/auth.js?v=" in response.text
-    assert f'"preferredChainId": {TEST_HOSTED_CHAIN_ID}' in response.text
-    assert '"supportedChainIds": [23295, 84532]' in response.text
+    assert '"sapphireChainId": 23295' in response.text
     assert response.headers["cache-control"] == "no-store"
     csp = response.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp
@@ -158,25 +156,6 @@ def test_authorize_page_preserves_root_path_in_rendered_urls(test_app):
     assert '"nonceEndpoint": "/api/v1/accounting/auth/nonce"' in response.text
     assert '"authorizeEndpoint": "/api/v1/accounting/auth/authorize"' in response.text
     assert "http://testserver" not in response.text
-
-
-def test_authorize_page_rejects_unsupported_chain(client):
-    response = client.get(
-        "/v1/accounting/auth/authorize",
-        params={
-            "client_id": TEST_CLIENT_ID,
-            "redirect_uri": TEST_REDIRECT_URI,
-            "code_challenge": _build_pkce_challenge("v" * 43),
-            "code_challenge_method": "S256",
-            "chain_id": 23294,
-            "response_mode": "web_message",
-            "state": "state-123",
-        },
-    )
-
-    assert response.status_code == 400
-    assert "Unsupported Chain" in response.text
-    assert "Chain ID 23294 is not supported for hosted sign-in." in response.text
 
 
 def test_authorize_code_and_exchange_is_single_use(client, monkeypatch):
