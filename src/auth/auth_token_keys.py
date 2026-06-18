@@ -57,7 +57,7 @@ class AuthTokenKeyManager:
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=b"flexvaults-auth-token-enc-key",
+            salt=b"privana-auth-token-enc-key",
             info=b"deoxysii-256-128",
         )
         return hkdf.derive(seed)

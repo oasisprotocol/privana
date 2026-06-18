@@ -64,7 +64,7 @@ function deliverSuccess(code) {
   if (context.responseMode === "web_message" && window.opener && !window.opener.closed) {
     window.opener.postMessage(
       {
-        type: "flexvaults-auth-response",
+        type: "privana-auth-response",
         code,
         state: context.state,
       },
@@ -81,7 +81,7 @@ function deliverError(error, errorDescription) {
   if (context.responseMode === "web_message" && window.opener && !window.opener.closed) {
     window.opener.postMessage(
       {
-        type: "flexvaults-auth-response",
+        type: "privana-auth-response",
         error,
         error_description: errorDescription,
         state: context.state,

@@ -345,10 +345,10 @@ class TestAuthTokenServiceWithTestKey:
         valid_until = int(time.time()) + 86400  # 24 hours
 
         ciphertext = service.create_and_encrypt(
-            domain="https://flexvaults.com",
+            domain="https://app.privana.finance",
             user_addr="0xdead000000000000000000000000000000000000",
             valid_until=valid_until,
-            statement="Sign in with Ethereum to flexvaults.com",
+            statement="Sign in with Ethereum to privana.finance",
             resources=[],
         )
 
@@ -362,7 +362,7 @@ class TestAuthTokenServiceWithTestKey:
             decrypted,
         )
 
-        assert decoded[0][0] == "https://flexvaults.com"
+        assert decoded[0][0] == "https://app.privana.finance"
         assert decoded[0][2] == valid_until
 
 

@@ -35,7 +35,7 @@ class FakeSiweMessage:
         self.expiration_time = expiration_time
         self.chain_id = chain_id
         self.statement = statement
-        self.resources = resources or ["https://privana.finance/privacy"]
+        self.resources = resources or ["https://app.privana.finance/dashboard"]
         self.domain = domain
         self.verify_calls: list[dict[str, str]] = []
 

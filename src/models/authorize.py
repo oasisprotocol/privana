@@ -44,7 +44,7 @@ class HostedAuthorizePageRequest(BaseModel):
 class TokenExchangeResponse(BaseModel):
     """Token response returned to third-party clients."""
 
-    access_token: str = Field(..., description="JWT access token for Flexvaults API calls")
+    access_token: str = Field(..., description="JWT access token for Privana API calls")
     id_token: str = Field(
         ..., description="Client-scoped identity token for third-party backend verification"
     )

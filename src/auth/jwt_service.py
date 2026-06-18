@@ -14,11 +14,6 @@ from src.auth.token_store import get_token_store
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JWT_EXPIRY_HOURS = 12
-DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS = 7
-DEFAULT_JWT_ISSUER = "flexvaults"
-DEFAULT_JWT_AUDIENCE = "flexvaults"
-
 # Token types
 TOKEN_TYPE_ACCESS = "access"
 TOKEN_TYPE_ID = "id"
@@ -31,12 +26,10 @@ class JWTService:
     def __init__(self) -> None:
         self._key_manager = get_jwt_key_manager()
         self._token_store = get_token_store()
-        self._expiry_hours = int(os.getenv("JWT_EXPIRY_HOURS", DEFAULT_JWT_EXPIRY_HOURS))
-        self._refresh_expiry_days = int(
-            os.getenv("JWT_REFRESH_EXPIRY_DAYS", DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS)
-        )
-        self._issuer = os.getenv("JWT_ISSUER", DEFAULT_JWT_ISSUER)
-        self._audience = os.getenv("JWT_AUDIENCE", DEFAULT_JWT_AUDIENCE)
+        self._expiry_hours = int(os.getenv("JWT_EXPIRY_HOURS"))
+        self._refresh_expiry_days = int(os.getenv("JWT_REFRESH_EXPIRY_DAYS"))
+        self._issuer = os.getenv("JWT_ISSUER")
+        self._audience = os.getenv("JWT_AUDIENCE")
         logger.info(
             f"JWT service initialized with issuer: {self._issuer}, "
             f"audience: {self._audience}, "

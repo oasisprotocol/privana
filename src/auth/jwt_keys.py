@@ -52,7 +52,7 @@ class JWTKeyManager:
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=b"flexvaults-jwt-signing-key",
+            salt=b"privana-jwt-signing-key",
             info=b"ed25519-private-key",
         )
         key_material = hkdf.derive(seed)

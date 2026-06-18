@@ -29,9 +29,9 @@ from src.auth.siwe_config import get_siwe_config
 from src.config import load_settings
 
 TEST_CLIENT_ID = "casino-web"
-TEST_REDIRECT_URI = "https://casino.flexvaults.test/callback"
-TEST_REDIRECT_ORIGIN = "https://casino.flexvaults.test"
-TEST_DOMAIN = "auth.flexvaults.com"
+TEST_REDIRECT_URI = "https://casino.privana.test/callback"
+TEST_REDIRECT_ORIGIN = "https://casino.privana.test"
+TEST_DOMAIN = "auth.privana.com"
 TEST_ADDRESS = Web3.to_checksum_address("0x000000000000000000000000000000000000dEaD")
 TEST_HOSTED_CHAIN_ID = 84532
 
@@ -66,8 +66,8 @@ def test_app(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTH_CODE_TTL_SECONDS", "90")
     monkeypatch.setenv("JWT_EXPIRY_HOURS", "1")
     monkeypatch.setenv("JWT_REFRESH_EXPIRY_DAYS", "7")
-    monkeypatch.setenv("JWT_ISSUER", "flexvaults-test")
-    monkeypatch.setenv("JWT_AUDIENCE", "flexvaults-test")
+    monkeypatch.setenv("JWT_ISSUER", "privana-test")
+    monkeypatch.setenv("JWT_AUDIENCE", "privana-test")
     monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(tmp_path / "auth-store"))
     monkeypatch.setenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "60")
     monkeypatch.setenv("AUTH_NONCE_RATE_LIMIT", "2")
@@ -237,7 +237,7 @@ def test_token_exchange_rejects_origin_mismatch(client):
 
     response = client.post(
         "/v1/accounting/auth/token",
-        headers={"Origin": "https://attacker.flexvaults.test"},
+        headers={"Origin": "https://attacker.privana.test"},
         json={
             "grant_type": "authorization_code",
             "code": code,
@@ -272,7 +272,7 @@ def test_token_exchange_accepts_default_https_port_equivalent_redirect_uri(clien
             "code": code,
             "code_verifier": verifier,
             "client_id": TEST_CLIENT_ID,
-            "redirect_uri": "https://casino.flexvaults.test:443/callback",
+            "redirect_uri": "https://casino.privana.test:443/callback",
         },
     )
 
@@ -281,7 +281,7 @@ def test_token_exchange_accepts_default_https_port_equivalent_redirect_uri(clien
 
 
 def test_token_exchange_accepts_root_redirect_uri_with_trailing_slash(client):
-    root_redirect_uri = "https://casino.flexvaults.test"
+    root_redirect_uri = "https://casino.privana.test"
     verifier = "v" * 43
     challenge = _build_pkce_challenge(verifier)
     client_registry._client_registry_instance = ClientRegistry(
@@ -313,7 +313,7 @@ def test_token_exchange_accepts_root_redirect_uri_with_trailing_slash(client):
             "code": code,
             "code_verifier": verifier,
             "client_id": TEST_CLIENT_ID,
-            "redirect_uri": "https://casino.flexvaults.test/",
+            "redirect_uri": "https://casino.privana.test/",
         },
     )
 
@@ -409,8 +409,8 @@ def test_jwt_siwe_token_exchange_caps_private_read_token_to_jwt_expiry(client, m
     access_token = jwt_api._encode_token(
         {
             "sub": TEST_ADDRESS,
-            "iss": "flexvaults-test",
-            "aud": "flexvaults-test",
+            "iss": "privana-test",
+            "aud": "privana-test",
             "iat": now,
             "nbf": now,
             "exp": now + 120,
@@ -509,7 +509,7 @@ def test_jwt_siwe_token_exchange_rejects_siwe_token_without_bearer(client, monke
 def test_token_exchange_issues_id_token_with_explicit_client_audience(client, monkeypatch):
     verifier = "v" * 43
     challenge = _build_pkce_challenge(verifier)
-    custom_audience = "oasis-flexvaults"
+    custom_audience = "oasis-privana"
     client_registry._client_registry_instance = ClientRegistry(
         json.dumps(
             [
@@ -781,7 +781,7 @@ def test_client_registry_rejects_insecure_non_loopback_http_redirect_uri():
                     {
                         "client_id": "casino-web",
                         "display_name": "Casino",
-                        "redirect_uris": ["http://casino.flexvaults.test/callback"],
+                        "redirect_uris": ["http://casino.privana.test/callback"],
                     }
                 ]
             )
@@ -795,17 +795,15 @@ def test_client_registry_normalizes_default_https_port():
                 {
                     "client_id": "casino-web",
                     "display_name": "Casino",
-                    "redirect_uris": ["https://casino.flexvaults.test:443/callback"],
+                    "redirect_uris": ["https://casino.privana.test:443/callback"],
                 }
             ]
         )
     )
 
-    assert registry.validate_redirect_uri("casino-web", "https://casino.flexvaults.test/callback")
-    assert registry.validate_redirect_uri(
-        "casino-web", "https://casino.flexvaults.test:443/callback"
-    )
-    assert ClientRegistry.redirect_origin("https://casino.flexvaults.test:443/callback") == (
+    assert registry.validate_redirect_uri("casino-web", "https://casino.privana.test/callback")
+    assert registry.validate_redirect_uri("casino-web", "https://casino.privana.test:443/callback")
+    assert ClientRegistry.redirect_origin("https://casino.privana.test:443/callback") == (
         TEST_REDIRECT_ORIGIN
     )
 
@@ -817,16 +815,16 @@ def test_client_registry_normalizes_root_redirect_uri():
                 {
                     "client_id": "casino-web",
                     "display_name": "Casino",
-                    "redirect_uris": ["https://casino.flexvaults.test"],
+                    "redirect_uris": ["https://casino.privana.test"],
                 }
             ]
         )
     )
 
-    assert registry.validate_redirect_uri("casino-web", "https://casino.flexvaults.test")
-    assert registry.validate_redirect_uri("casino-web", "https://casino.flexvaults.test/")
-    assert ClientRegistry.normalize_redirect_uri("https://casino.flexvaults.test") == (
-        "https://casino.flexvaults.test/"
+    assert registry.validate_redirect_uri("casino-web", "https://casino.privana.test")
+    assert registry.validate_redirect_uri("casino-web", "https://casino.privana.test/")
+    assert ClientRegistry.normalize_redirect_uri("https://casino.privana.test") == (
+        "https://casino.privana.test/"
     )
 
 
@@ -837,7 +835,7 @@ def test_client_registry_defaults_audience_to_client_id():
                 {
                     "client_id": "casino-web",
                     "display_name": "Casino",
-                    "redirect_uris": ["https://casino.flexvaults.test/callback"],
+                    "redirect_uris": ["https://casino.privana.test/callback"],
                 }
             ]
         )
@@ -853,14 +851,14 @@ def test_client_registry_accepts_explicit_audience():
                 {
                     "client_id": "casino-web",
                     "display_name": "Casino",
-                    "audience": "oasis-flexvaults",
-                    "redirect_uris": ["https://casino.flexvaults.test/callback"],
+                    "audience": "oasis-privana",
+                    "redirect_uris": ["https://casino.privana.test/callback"],
                 }
             ]
         )
     )
 
-    assert registry.require_client("casino-web").audience == "oasis-flexvaults"
+    assert registry.require_client("casino-web").audience == "oasis-privana"
 
 
 def test_build_cors_origins_raises_on_invalid_auth_client_registry(monkeypatch):
@@ -872,13 +870,13 @@ def test_build_cors_origins_raises_on_invalid_auth_client_registry(monkeypatch):
         SimpleNamespace(
             cors_allowed_origins="",
             environment="production",
-            siwe_domains=("https://auth.flexvaults.com",),
+            siwe_domains=("https://auth.privana.com",),
         ),
     )
     monkeypatch.setattr(
         main,
         "get_siwe_configs",
-        lambda _settings: (SimpleNamespace(origin="https://auth.flexvaults.com"),),
+        lambda _settings: (SimpleNamespace(origin="https://auth.privana.com"),),
     )
     monkeypatch.setattr(
         main,
@@ -893,10 +891,10 @@ def test_build_cors_origins_raises_on_invalid_auth_client_registry(monkeypatch):
 def test_siwe_config_normalizes_default_https_port():
     config = get_siwe_config(
         SimpleNamespace(
-            siwe_domains=("https://auth.flexvaults.com:443",),
+            siwe_domains=("https://auth.privana.com:443",),
             environment="production",
         )
     )
 
     assert config.domain == TEST_DOMAIN
-    assert config.origin == "https://auth.flexvaults.com"
+    assert config.origin == "https://auth.privana.com"
