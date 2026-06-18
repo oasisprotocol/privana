@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import time
 
 import jwt
@@ -14,14 +15,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from web3 import Web3
 
 from src.auth.jwt_service import (
-    DEFAULT_JWT_AUDIENCE,
-    DEFAULT_JWT_ISSUER,
     TOKEN_TYPE_ID,
     JWTService,
     get_jwt_service,
 )
 
 TEST_ADDRESS = "0x0000000000000000000000000000000000000001"
+
+# Configured in .env.localnet
+DEFAULT_JWT_ISSUER = os.getenv("JWT_ISSUER")
+DEFAULT_JWT_AUDIENCE = os.getenv("JWT_AUDIENCE")
 
 
 class TestAccessTokenCreation:

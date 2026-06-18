@@ -127,7 +127,7 @@ def test_authorize_page_renders_registered_client(client):
     assert TEST_REDIRECT_ORIGIN in response.text
     assert "/static/auth.css?v=" in response.text
     assert "/static/auth.js?v=" in response.text
-    assert '"sapphireChainId": 23295' in response.text
+    assert f'"sapphireChainId": {load_settings().sapphire_chain_id}' in response.text
     assert response.headers["cache-control"] == "no-store"
     csp = response.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp

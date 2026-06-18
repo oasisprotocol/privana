@@ -21,17 +21,17 @@ import src.auth.token_store
 import src.config
 from src.auth.jwt_service import JWTService
 from src.auth.token_store import TokenStore
+from src.config import load_settings
 from src.models.accounting import SiweLoginRequest
-from src.models.types import Settings
 
 TEST_ADDRESS = "0x0000000000000000000000000000000000000001"
 OTHER_ADDRESS = "0x0000000000000000000000000000000000000002"
 
 # Use the default auth token validity from Settings
-AUTH_TOKEN_VALIDITY_SECONDS = Settings().auth_token_validity_seconds
+AUTH_TOKEN_VALIDITY_SECONDS = load_settings().auth_token_validity_seconds
 
 # Destination chain ID the server authenticates against (Sapphire).
-SAPPHIRE_CHAIN_ID = Settings().sapphire_chain_id
+SAPPHIRE_CHAIN_ID = load_settings().sapphire_chain_id
 
 
 async def _init_key_managers():

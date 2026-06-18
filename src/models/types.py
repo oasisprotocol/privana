@@ -1,6 +1,6 @@
 """Type definitions for the Accounting Module API."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Tuple
 
 
@@ -8,46 +8,39 @@ from typing import Dict, Tuple
 class Settings:
     """Application configuration settings."""
 
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-    log_level: str = "INFO"
-    environment: str = "development"
-    cors_allowed_origins: str = ""
+    api_host: str
+    api_port: int
+    log_level: str
+    environment: str
+    cors_allowed_origins: str
 
-    accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
-    sapphire_chain_id: int = 23295
-    sapphire_rpc_url: str = "https://testnet.sapphire.oasis.io"
-    accounting_gas_limit: int = 500_000
-    chain_rpc_urls: Dict[int, str] = field(default_factory=dict)
-    withdrawal_poll_interval: int = 12
-    withdrawal_resolution_timeout: int = 60
-    min_withdrawal_gas_balance: int = 10_000_000_000_000  # 0.00001 ETH in wei
+    accounting_contract_address: str
+    sapphire_chain_id: int
+    sapphire_rpc_url: str
+    accounting_gas_limit: int
+    chain_rpc_urls: Dict[int, str]
+    withdrawal_poll_interval: int
+    withdrawal_resolution_timeout: int
+    min_withdrawal_gas_balance: int
 
-    auth_token_validity_seconds: int = 24 * 60 * 60
+    auth_token_validity_seconds: int
     # Allow-list of SIWE domains. A SIWE message's ``domain`` field must match
     # one of these (after canonicalization) for authentication to succeed.
-    siwe_domains: Tuple[str, ...] = field(default_factory=tuple)
+    siwe_domains: Tuple[str, ...]
 
-    auth_token_storage_dir: str = ".auth_tokens"
-    auth_clients_json: str = "[]"
-    auth_code_ttl_seconds: int = 120
-    auth_rate_limit_window_seconds: int = 60
-    auth_nonce_rate_limit: int = 30
-    auth_login_rate_limit: int = 10
-    auth_authorize_rate_limit: int = 10
-    auth_token_rate_limit: int = 20
-    trust_x_forwarded_for: bool = False
+    auth_token_storage_dir: str
+    auth_clients_json: str
+    auth_code_ttl_seconds: int
+    auth_rate_limit_window_seconds: int
+    auth_nonce_rate_limit: int
+    auth_login_rate_limit: int
+    auth_authorize_rate_limit: int
+    auth_token_rate_limit: int
+    trust_x_forwarded_for: bool
 
-    moonpay_api_key: str = ""
-    moonpay_secret_key: str = ""
-    moonpay_webhook_secret_key: str = ""
-    moonpay_allowed_hosts: Tuple[str, ...] = (
-        "buy.moonpay.com",
-        "buy-sandbox.moonpay.com",
-    )
-    moonpay_allowed_currency_codes: Tuple[str, ...] = (
-        "usdc",
-        "usdc_base",
-        "usdc_base_sepolia",
-    )
-    moonpay_webhook_tolerance_seconds: int = 300
+    moonpay_api_key: str
+    moonpay_secret_key: str
+    moonpay_webhook_secret_key: str
+    moonpay_allowed_hosts: Tuple[str, ...]
+    moonpay_allowed_currency_codes: Tuple[str, ...]
+    moonpay_webhook_tolerance_seconds: int
