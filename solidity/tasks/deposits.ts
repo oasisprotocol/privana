@@ -10,7 +10,7 @@ task("getDepositAddress")
   .addOptionalParam(
     "apiurl",
     "API base URL",
-    "https://testnet.privana.finance",
+    "https://api.testnet.privana.finance",
   )
   .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
   .addOptionalParam("chaintype", "Chain type", "evm")
@@ -76,7 +76,7 @@ task("checkDeposit")
   .addOptionalParam(
     "apiurl",
     "API base URL",
-    "https://testnet.privana.finance",
+    "https://api.testnet.privana.finance",
   )
   .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
   .addOptionalParam("sourcechainid", "Source chain ID where deposit was made", "84532")
