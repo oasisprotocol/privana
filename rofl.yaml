@@ -36,8 +36,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: riWujNwPA2PY51iykPMYEGPBugUhIDewUbv3A0oN50QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: asPujt+6Igrxl5I6K62D6zl6Pol+eH6wOVPAO+LwubIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: P266Qy8v9dgBRDi9vvpLWElgCRoVybVbKzKdDOLDDsIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 8wPTwNYPQVjRMJIdhLGwo2PvCUHz7xAVNLgjetPD1ZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -53,6 +53,13 @@ deployments:
         value: pGJwa1ggRpWMFpgqRv4PZ6RXVjr1w4BxjhULkoEFMYpGXqMBYnpkbmFtZVgqXgdNOwR9yKKbmimw34+uenH6hZdLYuzuFkbCnWJYaX/vX2vWMOe4V3mjZW5vbmNlT5S7RBE/bX9HoUbuGiAUYmV2YWx1ZVg45wyUN6gFz40R71+kSZR+BHENNNXUwDL+HU76gjrzV46WyMPYw8YGh1zcNYLC2M2N+hJUKNKdvc8=
     machines:
       default:
+        provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
+        offer: playground_internal_m
+        id: "0000000000000634"
+        permissions:
+          log.view:
+            - oasis1qrrvz7pw8eysww22qzutnaufppam0avuduuxnq2f
+      old-testnet:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_internal_m
         id: "0000000000000629"
