@@ -60,30 +60,28 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://github.com/oasisprotocol/privana',
-          label: 'GitHub',
-          position: 'right',
+          to: '/faq',
+          label: 'FAQ',
+          position: 'left',
         },
+        // Restore when the privana repo is public.
+        // {
+        //   href: 'https://github.com/oasisprotocol/privana',
+        //   label: 'GitHub',
+        //   position: 'right',
+        // },
       ],
     },
     footer: {
       style: 'dark',
       links: [
         {
-          title: 'Documentation',
-          items: [
-            {label: 'Getting Started', to: '/overview/privacy-problem'},
-            {label: 'Core Concepts', to: '/concepts/privana-overview'},
-            {label: 'Features', to: '/features/private-swaps'},
-            {label: 'Underlying Technology', to: '/architecture/oasis-sapphire-and-rofl'},
-          ],
-        },
-        {
           title: 'Resources',
           items: [
             {label: 'Liquefaction paper', href: 'https://arxiv.org/abs/2412.02634'},
             {label: 'Oasis Sapphire', href: 'https://docs.oasis.io/build/sapphire/'},
-            {label: 'GitHub', href: 'https://github.com/oasisprotocol/privana'},
+            // Restore when the privana repo is public.
+            // {label: 'GitHub', href: 'https://github.com/oasisprotocol/privana'},
           ],
         },
       ],
