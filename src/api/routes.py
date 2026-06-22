@@ -3,7 +3,6 @@
 import logging
 import time
 import uuid
-from dataclasses import dataclass
 from typing import Optional
 
 import jwt
@@ -72,6 +71,7 @@ from src.models.accounting import (
     WithdrawFromLockRequest,
     _normalise_hex,
 )
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import (
     SubmissionResult,
     get_accounting_contract_service,
@@ -229,19 +229,20 @@ def _mint_private_read_token(user_address: str, *, valid_until: Optional[int] = 
     return token
 
 
-@dataclass(frozen=True)
-class PrivateReadAuth:
-    """Authenticated SIWE token + resolved user address for private reads."""
-
-    token: bytes
-    user_address: str
-
-
 def _require_private_read_auth(
     current_user: Optional[str] = Depends(get_current_user_optional),
     authorization: Optional[str] = Header(None, alias="Authorization"),
     token: Optional[str] = Header(None, alias=_SIWE_TOKEN_HEADER),
 ) -> PrivateReadAuth:
+    """Authenticate and return a locally-decoded private-read auth value.
+
+    The user address comes from the JWT, or is decoded locally from the SIWE
+    token. The token is forwarded to the contract, which enforces the access
+    check. Use for private reads. Where the resolved address itself drives a
+    state change such as deposit crediting or on-ramp correlation, use
+    ``_require_resolved_private_read_auth``, which resolves on-chain via
+    ``authSender()``.
+    """
     if authorization and token:
         raise HTTPException(
             status_code=400,
@@ -265,17 +266,20 @@ def _require_private_read_auth(
     return PrivateReadAuth(bytes(raw), auth_token.user_addr)
 
 
-async def _require_user_and_private_read_token(
+async def _require_resolved_private_read_auth(
     current_user: Optional[str] = Depends(get_current_user_optional),
     token: Optional[str] = Header(None, alias=_SIWE_TOKEN_HEADER),
-) -> tuple[str, bytes]:
-    """Authenticate and return (user_address, siwe_token).
+) -> PrivateReadAuth:
+    """Authenticate and return private-read auth for ownership-sensitive flows.
+
+    Use this where the resolved address drives a state change such as deposit
+    crediting or on-ramp correlation.
 
     JWT path: address from JWT, SIWE token minted server-side.
     SIWE path: address resolved on-chain via authSender(), token used directly.
     """
     if current_user:
-        return current_user, _mint_private_read_token(current_user)
+        return PrivateReadAuth(_mint_private_read_token(current_user), current_user)
     if not token:
         raise HTTPException(
             status_code=401,
@@ -299,7 +303,7 @@ async def _require_user_and_private_read_token(
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     if not Web3.is_address(address) or Web3.to_checksum_address(address) == _ZERO_ADDRESS:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token")
-    return address, raw
+    return PrivateReadAuth(raw, address)
 
 
 def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
@@ -378,7 +382,7 @@ async def get_deposit_address(
 async def check_deposit(
     payload: DepositCheckRequest,
     response: Response,
-    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> DepositCheckResponse:
     """Verify a deposit and start the sweep in the background.
 
@@ -386,23 +390,21 @@ async def check_deposit(
     Returns 202 with status="pending" when sweep is started or in progress.
     Clients poll GET /deposits/status/{deposit_id} for completion.
     """
-    beneficiary, siwe_token = auth
     try:
         processor = get_deposit_processor()
         result = await processor.process_deposit(
-            beneficiary=beneficiary,
+            auth=auth,
             chain_type=payload.chain_type,
             chain_id=payload.chain_id,
             tx_hash=payload.tx_hash,
             amount=payload.amount,
             log_index=payload.log_index,
             version=payload.version,
-            siwe_token=siwe_token,
         )
         resp = DepositCheckResponse(**result)
         if resp.status in {"pending", "credited"}:
             _mark_onramp_deposit_started(
-                beneficiary=beneficiary,
+                beneficiary=auth.user_address,
                 chain_id=payload.chain_id,
                 source_tx_hash=payload.tx_hash,
                 deposit_id=resp.deposit_id,
@@ -427,14 +429,14 @@ async def check_deposit(
 @router.get("/deposits/status/{deposit_id}", response_model=DepositCheckResponse)
 async def get_deposit_status(
     deposit_id: str,
-    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> DepositCheckResponse:
     """Poll deposit status by deposit_id.
 
     Returns credited/pending/error based on sweep state.
     Falls through to on-chain check when no in-memory record exists.
     """
-    beneficiary, _siwe_token = auth
+    beneficiary = auth.user_address
     deposit_id_hex = _normalise_hex(deposit_id)
 
     processor = get_deposit_processor()
@@ -464,12 +466,11 @@ async def get_deposit_status(
 @router.post("/onramp/intent", response_model=OnRampRecord)
 async def create_onramp_intent(
     payload: CreateOnRampIntentRequest,
-    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> OnRampRecord:
     """Create the Privana-side MoonPay correlation record before opening the widget."""
-    beneficiary, siwe_token = auth
     try:
-        deposit_address = await _service.get_deposit_address("evm", 0, siwe_token)
+        deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         deposit_address = Web3.to_checksum_address(deposit_address)
         if (
             payload.wallet_address
@@ -480,7 +481,7 @@ async def create_onramp_intent(
         intent_id = f"{_ONRAMP_INTENT_PREFIX}{uuid.uuid4().hex}"
         updates = payload.model_dump(exclude_none=True)
         updates["external_transaction_id"] = intent_id
-        updates["user_address"] = Web3.to_checksum_address(beneficiary)
+        updates["user_address"] = Web3.to_checksum_address(auth.user_address)
         updates["wallet_address"] = deposit_address
         record = get_onramp_store().upsert(intent_id, updates)
         logger.info("On-ramp intent created: %s", onramp_log_summary(record))
@@ -550,26 +551,25 @@ async def sign_onramp_url(
 
 @router.get("/onramp/pending", response_model=PendingOnRampsResponse)
 async def get_pending_onramps(
-    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> PendingOnRampsResponse:
     """Return completed MoonPay purchases that still need deposit verification."""
-    beneficiary, siwe_token = auth
     try:
-        deposit_address = await _service.get_deposit_address("evm", 0, siwe_token)
+        deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         store = get_onramp_store()
-        rows = store.pending_for_user(beneficiary, deposit_address)
+        rows = store.pending_for_user(auth.user_address, deposit_address)
         if rows:
             logger.info(
                 "On-ramp pending lookup: user=%s deposit=%s returned=%d",
-                short_address(beneficiary),
+                short_address(auth.user_address),
                 short_address(deposit_address),
                 len(rows),
             )
         else:
-            diagnostics = store.pending_filter_diagnostics(beneficiary, deposit_address)
+            diagnostics = store.pending_filter_diagnostics(auth.user_address, deposit_address)
             logger.info(
                 "On-ramp pending lookup: user=%s deposit=%s returned=0 diagnostics=%s",
-                short_address(beneficiary),
+                short_address(auth.user_address),
                 short_address(deposit_address),
                 diagnostics,
             )
@@ -707,12 +707,11 @@ async def moonpay_onramp_webhook(
 async def update_onramp(
     transaction_id: str,
     payload: UpdateOnRampRequest,
-    auth: tuple[str, bytes] = Depends(_require_user_and_private_read_token),
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> OnRampRecord:
     """Upsert caller-owned MoonPay transaction metadata."""
-    beneficiary, siwe_token = auth
     try:
-        deposit_address = await _service.get_deposit_address("evm", 0, siwe_token)
+        deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         deposit_address = Web3.to_checksum_address(deposit_address)
         if (
             payload.wallet_address
@@ -720,7 +719,7 @@ async def update_onramp(
         ):
             raise OnRampError("wallet_address must be the Privana deposit address")
 
-        beneficiary = Web3.to_checksum_address(beneficiary)
+        beneficiary = Web3.to_checksum_address(auth.user_address)
         store = get_onramp_store()
         existing = store.get(transaction_id)
         if existing:
@@ -962,9 +961,7 @@ async def withdraw_from_lock(
     """Withdraw locked funds directly to an external destination."""
 
     try:
-        submission = await _service.withdraw_from_lock(
-            payload.model_dump(), auth.user_address, auth.token
-        )
+        submission = await _service.withdraw_from_lock(payload.model_dump(), auth)
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1065,9 +1062,8 @@ async def get_locked_funds(
     """Get locked funds for the authenticated user, optionally filtered by service address."""
     try:
         result = await _service.get_locked_funds(
-            auth.user_address,
+            auth,
             service_address,
-            auth.token,
         )
         return LockedFundsResponse(**result)
     except ContractLogicError as exc:
@@ -1089,7 +1085,7 @@ async def get_balance(
 ) -> BalanceResponse:
     """Get the authenticated user's balance for a specific token from the contract."""
     try:
-        result = await _service.get_balance(auth.user_address, token_id, auth.token)
+        result = await _service.get_balance(auth, token_id)
         return BalanceResponse(**result)
     except ContractLogicError as exc:
         logger.warning("SIWE token validation failed for %s: %s", auth.user_address, exc)
@@ -1155,7 +1151,7 @@ async def get_expired_locks(
 ) -> ExpiredLocksResponse:
     """Get all expired locks for the authenticated user."""
     try:
-        result = await _service.get_expired_locks(auth.user_address, auth.token)
+        result = await _service.get_expired_locks(auth)
         return ExpiredLocksResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -1176,7 +1172,7 @@ async def get_batch_balances(
 ) -> BatchBalancesResponse:
     """Get balances for multiple tokens for the authenticated user."""
     try:
-        result = await _service.get_batch_balances(auth.user_address, payload.token_ids, auth.token)
+        result = await _service.get_batch_balances(auth, payload.token_ids)
         return BatchBalancesResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -1197,7 +1193,7 @@ async def get_total_locked_balance(
 ) -> TotalLockedBalanceResponse:
     """Get total locked balance for a specific token across all locks for the authenticated user."""
     try:
-        result = await _service.get_total_locked_balance(auth.user_address, token_id, auth.token)
+        result = await _service.get_total_locked_balance(auth, token_id)
         return TotalLockedBalanceResponse(**result)
     except ContractLogicError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc

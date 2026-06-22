@@ -9,6 +9,7 @@ from web3 import Web3
 
 from src.clients.rofl import RoflSubmissionResult
 from src.models.accounting import HistoryKind
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import AccountingContractService
 
 
@@ -366,8 +367,7 @@ async def test_withdraw_from_lock_rejects_zero_to_address() -> None:
                 "nonce": 0,
                 "signature": "0x1234",
             },
-            user_address=USER_A,
-            siwe_token=b"\x00" * 32,
+            auth=PrivateReadAuth(token=b"\x00" * 32, user_address=USER_A),
         )
 
 
@@ -385,8 +385,7 @@ async def test_withdraw_from_lock_rejects_missing_lock() -> None:
                 "nonce": 0,
                 "signature": "0x1234",
             },
-            user_address=USER_A,
-            siwe_token=b"\x11" * 32,
+            auth=PrivateReadAuth(token=b"\x11" * 32, user_address=USER_A),
         )
 
 
@@ -436,8 +435,7 @@ async def test_withdraw_from_lock_reads_locks_via_confidential_reader() -> None:
             "nonce": 0,
             "signature": signature_hex,
         },
-        user_address=USER_A,
-        siwe_token=siwe_token,
+        auth=PrivateReadAuth(token=siwe_token, user_address=USER_A),
     )
 
     service._fetch_user_locks.assert_awaited_once_with(siwe_token)

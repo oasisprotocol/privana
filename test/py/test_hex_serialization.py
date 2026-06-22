@@ -7,6 +7,7 @@ import pytest
 from hexbytes import HexBytes
 from web3 import Web3
 
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import (
     AccountingContractService,
     _to_prefixed_hex,
@@ -52,7 +53,9 @@ class TestHexSerialization:
         service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=23295))
         service._get_token_symbol = AsyncMock(return_value="TEST")
 
-        result = await service.get_batch_balances(user, [token_id_input], b"")
+        result = await service.get_batch_balances(
+            PrivateReadAuth(token=b"", user_address=user), [token_id_input]
+        )
 
         assert result["balances"][0]["token_id"] == token_id_input.lower()
 
@@ -71,6 +74,7 @@ class TestHexSerialization:
     async def test_get_balance_returns_prefixed_token_id(self):
         service = AccountingContractService.__new__(AccountingContractService)
         user = Web3.to_checksum_address("0x4444444444444444444444444444444444444444")
+        siwe_token = b"\x44" * 32
         token_hex = HexBytes("0x" + "ab" * 32)
 
         contract_reader = MagicMock()
@@ -83,14 +87,18 @@ class TestHexSerialization:
         service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=23295))
         service._get_token_symbol = AsyncMock(return_value="TEST")
 
-        result = await service.get_balance(user, "ab" * 32, b"")
+        result = await service.get_balance(
+            PrivateReadAuth(token=siwe_token, user_address=user), "ab" * 32
+        )
 
         assert result["token_id"] == "0x" + "ab" * 32
+        service._fetch_balance.assert_awaited_once_with(token_hex, siwe_token)
 
     @pytest.mark.asyncio
     async def test_get_total_locked_balance_returns_prefixed_token_id(self):
         service = AccountingContractService.__new__(AccountingContractService)
         user = Web3.to_checksum_address("0x5555555555555555555555555555555555555555")
+        siwe_token = b"\x55" * 32
         token_hex = HexBytes("0x" + "ab" * 32)
         other_token = bytes.fromhex("cd" * 32)
 
@@ -112,7 +120,10 @@ class TestHexSerialization:
             ]
         )
 
-        result = await service.get_total_locked_balance(user, "0x" + "ab" * 32, b"")
+        result = await service.get_total_locked_balance(
+            PrivateReadAuth(token=siwe_token, user_address=user), "0x" + "ab" * 32
+        )
 
         assert result["token_id"] == "0x" + "ab" * 32
         assert result["total_locked"] == "10"
+        service._fetch_user_locks.assert_awaited_once_with(siwe_token)

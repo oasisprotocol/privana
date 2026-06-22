@@ -10,6 +10,7 @@ import pytest
 from web3 import Web3
 
 from src.models.accounting import DepositQuoteResponse, LockedFundsResponse, LockInfo
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import AccountingContractService
 
 
@@ -130,7 +131,7 @@ class TestServiceLayerStrAmounts:
         service._get_confidential_reader_contract = AsyncMock(return_value=contract_reader)
         service._get_chain_timestamp = AsyncMock(return_value=500)
 
-        result = await service.get_locked_funds(user, None, b"")
+        result = await service.get_locked_funds(PrivateReadAuth(token=b"", user_address=user), None)
 
         assert isinstance(result["total_locked"], str)
         assert result["total_locked"] == str(10 * 10**18)
@@ -157,7 +158,7 @@ class TestServiceLayerStrAmounts:
         service._get_confidential_reader_contract = AsyncMock(return_value=contract_reader)
         service._get_chain_timestamp = AsyncMock(return_value=500)
 
-        result = await service.get_locked_funds(user, None, b"")
+        result = await service.get_locked_funds(PrivateReadAuth(token=b"", user_address=user), None)
 
         # Must be "300" (numeric sum), NOT "100200" (string concatenation)
         assert result["total_locked"] == "300"
@@ -182,7 +183,7 @@ class TestServiceLayerStrAmounts:
         service._get_confidential_reader_contract = AsyncMock(return_value=contract_reader)
         service._get_chain_timestamp = AsyncMock(return_value=now)
 
-        result = await service.get_expired_locks(user, b"")
+        result = await service.get_expired_locks(PrivateReadAuth(token=b"", user_address=user))
 
         assert len(result["expired_locks"]) == 1
         assert isinstance(result["expired_locks"][0]["amount"], str)
