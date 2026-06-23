@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from web3 import Web3
 from web3.exceptions import ContractCustomError
 
 import src.api.routes as routes
@@ -13,7 +14,10 @@ from src.services.accounting_contract import SubmissionResult
 from src.services.deposit_processor import DepositProcessor
 
 BENEFICIARY = "0x" + "bb" * 20
+CHECKSUM_BENEFICIARY = Web3.to_checksum_address(BENEFICIARY)
 DEPOSIT_ID_HEX = "0x" + "dd" * 32
+TOKEN_ID_HEX = "0x" + "11" * 32
+SERVICE_ADDRESS = Web3.to_checksum_address("0x" + "22" * 20)
 
 
 def _make_client() -> TestClient:
@@ -226,6 +230,172 @@ def test_get_history_route_preserves_empty_pages(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"history": [], "total": 9}
     mock_service.get_history.assert_awaited_once_with(9, 0, b"\x12\x34")
+
+
+def test_get_balance_route_passes_token_and_echoes_user(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.get_balance = AsyncMock(
+        return_value={
+            "token_id": TOKEN_ID_HEX,
+            "balance": "7",
+            "token_symbol": "TEST",
+            "chain_id": "23295",
+        }
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    token = b"\xba\x1a"
+    client = _make_private_read_client(token=token)
+    response = client.get(f"/v1/accounting/balances/{TOKEN_ID_HEX}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_address": CHECKSUM_BENEFICIARY,
+        "token_id": TOKEN_ID_HEX,
+        "balance": "7",
+        "token_symbol": "TEST",
+        "chain_id": "23295",
+    }
+    mock_service.get_balance.assert_awaited_once_with(token, TOKEN_ID_HEX)
+
+
+def test_get_batch_balances_route_passes_token_and_echoes_user(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.get_batch_balances = AsyncMock(
+        return_value={
+            "balances": [
+                {
+                    "token_id": TOKEN_ID_HEX,
+                    "balance": "7",
+                    "token_symbol": "TEST",
+                    "chain_id": "23295",
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    token = b"\xba\x7c"
+    client = _make_private_read_client(token=token)
+    response = client.post("/v1/accounting/balances/batch", json={"token_ids": [TOKEN_ID_HEX]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_address": CHECKSUM_BENEFICIARY,
+        "balances": [
+            {
+                "token_id": TOKEN_ID_HEX,
+                "balance": "7",
+                "token_symbol": "TEST",
+                "chain_id": "23295",
+            }
+        ],
+    }
+    mock_service.get_batch_balances.assert_awaited_once_with(token, [TOKEN_ID_HEX])
+
+
+def test_get_locked_funds_route_passes_token_and_echoes_user(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.get_locked_funds = AsyncMock(
+        return_value={
+            "service_address": SERVICE_ADDRESS,
+            "locks": [
+                {
+                    "lock_id": 1,
+                    "service_address": SERVICE_ADDRESS,
+                    "token_id": TOKEN_ID_HEX,
+                    "amount": "7",
+                    "expiry": 9999999999,
+                    "is_expired": False,
+                }
+            ],
+            "total_locked": "7",
+        }
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    token = b"\x10\xcc"
+    client = _make_private_read_client(token=token)
+    response = client.get(f"/v1/accounting/funds/locked?service_address={SERVICE_ADDRESS}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_address": CHECKSUM_BENEFICIARY,
+        "service_address": SERVICE_ADDRESS,
+        "locks": [
+            {
+                "lock_id": 1,
+                "user_address": CHECKSUM_BENEFICIARY,
+                "service_address": SERVICE_ADDRESS,
+                "token_id": TOKEN_ID_HEX,
+                "amount": "7",
+                "expiry": 9999999999,
+                "is_expired": False,
+            }
+        ],
+        "total_locked": "7",
+    }
+    mock_service.get_locked_funds.assert_awaited_once_with(token, SERVICE_ADDRESS)
+
+
+def test_get_expired_locks_route_passes_token_and_echoes_user(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.get_expired_locks = AsyncMock(
+        return_value={
+            "expired_locks": [
+                {
+                    "lock_id": 1,
+                    "service_address": SERVICE_ADDRESS,
+                    "token_id": TOKEN_ID_HEX,
+                    "amount": "7",
+                    "expiry": 1,
+                    "is_expired": True,
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    token = b"\xee\x11"
+    client = _make_private_read_client(token=token)
+    response = client.get("/v1/accounting/funds/expired")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_address": CHECKSUM_BENEFICIARY,
+        "expired_locks": [
+            {
+                "lock_id": 1,
+                "user_address": CHECKSUM_BENEFICIARY,
+                "service_address": SERVICE_ADDRESS,
+                "token_id": TOKEN_ID_HEX,
+                "amount": "7",
+                "expiry": 1,
+                "is_expired": True,
+            }
+        ],
+    }
+    mock_service.get_expired_locks.assert_awaited_once_with(token)
+
+
+def test_get_total_locked_balance_route_passes_token_and_echoes_user(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.get_total_locked_balance = AsyncMock(
+        return_value={"token_id": TOKEN_ID_HEX, "total_locked": "7"}
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    token = b"\x70\x7a\x01"
+    client = _make_private_read_client(token=token)
+    response = client.get(f"/v1/accounting/funds/locked/total/{TOKEN_ID_HEX}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_address": CHECKSUM_BENEFICIARY,
+        "token_id": TOKEN_ID_HEX,
+        "total_locked": "7",
+    }
+    mock_service.get_total_locked_balance.assert_awaited_once_with(token, TOKEN_ID_HEX)
 
 
 def test_deposit_status_route_resolves_siwe_token_user(monkeypatch) -> None:

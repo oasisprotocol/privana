@@ -1194,13 +1194,11 @@ class AccountingContractService:
         token = await contract_reader.functions.login(siwe_message, (r, s, v)).call()
         return {"token": _to_prefixed_hex(token)}
 
-    async def get_balance(self, auth: PrivateReadAuth, token_id: str) -> Dict[str, Any]:
-        checksum_user = self._require_address(auth.user_address, "user_address")
+    async def get_balance(self, siwe_token: bytes, token_id: str) -> Dict[str, Any]:
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
-        balance = await self._fetch_balance(token_hex, auth.token)
+        balance = await self._fetch_balance(token_hex, siwe_token)
         context = await self._get_token_context(token_hex)
         return {
-            "user_address": checksum_user,
             "token_id": _to_prefixed_hex(token_hex),
             "balance": str(balance),
             "token_symbol": await self._get_token_symbol(token_hex),
@@ -1317,9 +1315,8 @@ class AccountingContractService:
         return await contract_reader.functions.balanceOf(bytes(token), siwe_token).call()
 
     async def get_batch_balances(
-        self, auth: PrivateReadAuth, token_ids_raw: list[str]
+        self, siwe_token: bytes, token_ids_raw: list[str]
     ) -> Dict[str, Any]:
-        user = self._require_address(auth.user_address, "user_address")
         if not isinstance(token_ids_raw, list) or len(token_ids_raw) == 0:
             raise ValueError("token_ids must be a non-empty array")
 
@@ -1329,7 +1326,7 @@ class AccountingContractService:
 
         response_balances = []
         for token_id in token_ids:
-            balance = await self._fetch_balance(token_id, auth.token)
+            balance = await self._fetch_balance(token_id, siwe_token)
             context = await self._get_token_context(token_id)
             response_balances.append(
                 {
@@ -1340,13 +1337,12 @@ class AccountingContractService:
                 }
             )
 
-        return {"user_address": user, "balances": response_balances}
+        return {"balances": response_balances}
 
-    def _lock_to_info(self, user: ChecksumAddress, lock: Any, now: int) -> Dict[str, Any]:
+    def _lock_to_info(self, lock: Any, now: int) -> Dict[str, Any]:
         lock_id, service_id, token_id, amount, expiry = lock
         return {
             "lock_id": int(lock_id),
-            "user_address": user,
             "service_address": Web3.to_checksum_address(service_id),
             "token_id": _to_prefixed_hex(token_id),
             "amount": str(int(amount)),
@@ -1360,10 +1356,9 @@ class AccountingContractService:
 
     async def get_locked_funds(
         self,
-        auth: PrivateReadAuth,
+        siwe_token: bytes,
         service_address: Optional[str],
     ) -> Dict[str, Any]:
-        user = self._require_address(auth.user_address, "user_address")
         service = (
             self._require_address(service_address, "service_address") if service_address else None
         )
@@ -1373,7 +1368,7 @@ class AccountingContractService:
         # Backend services that need service-authenticated reads should query
         # getServiceLocks(...) directly on the contract using Sapphire authenticated
         # view calls (for Python wrappers: signed query with empty token parameter).
-        all_locks = await self._fetch_user_locks(auth.token)
+        all_locks = await self._fetch_user_locks(siwe_token)
         if service is None:
             locks = all_locks
         else:
@@ -1381,36 +1376,29 @@ class AccountingContractService:
 
         now = await self._get_chain_timestamp()
 
-        lock_infos = [self._lock_to_info(user, lock, now) for lock in locks]
+        lock_infos = [self._lock_to_info(lock, now) for lock in locks]
         total_locked = sum(int(info["amount"]) for info in lock_infos)
 
         return {
-            "user_address": user,
             "service_address": service,
             "locks": lock_infos,
             "total_locked": str(total_locked),
         }
 
-    async def get_expired_locks(self, auth: PrivateReadAuth) -> Dict[str, Any]:
-        user = self._require_address(auth.user_address, "user_address")
-
+    async def get_expired_locks(self, siwe_token: bytes) -> Dict[str, Any]:
         now = await self._get_chain_timestamp()
-        all_locks = await self._fetch_user_locks(auth.token)
+        all_locks = await self._fetch_user_locks(siwe_token)
         expired_locks = [lock for lock in all_locks if now >= int(lock[4])]
-        lock_infos = [self._lock_to_info(user, lock, now) for lock in expired_locks]
-        return {"user_address": user, "expired_locks": lock_infos}
+        lock_infos = [self._lock_to_info(lock, now) for lock in expired_locks]
+        return {"expired_locks": lock_infos}
 
-    async def get_total_locked_balance(
-        self, auth: PrivateReadAuth, token_id: str
-    ) -> Dict[str, Any]:
-        user = self._require_address(auth.user_address, "user_address")
+    async def get_total_locked_balance(self, siwe_token: bytes, token_id: str) -> Dict[str, Any]:
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
 
-        locks = await self._fetch_user_locks(auth.token)
+        locks = await self._fetch_user_locks(siwe_token)
         total_locked = sum(int(lock[3]) for lock in locks if HexBytes(lock[2]) == token_hex)
 
         return {
-            "user_address": user,
             "token_id": _to_prefixed_hex(token_hex),
             "total_locked": str(total_locked),
         }
