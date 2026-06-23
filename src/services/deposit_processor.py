@@ -15,6 +15,7 @@ from web3 import Web3
 
 from src.config import load_settings
 from src.config.chain_config import MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import get_accounting_contract_service
 from src.services.deposit_verifier import DepositVerifier
 from src.services.sweep_engine import (
@@ -119,8 +120,7 @@ class DepositProcessor:
         amount: int,
         log_index: int,
         version: int,
-        siwe_token: bytes,
-        beneficiary: str,
+        auth: PrivateReadAuth,
     ) -> Dict:
         """Verify a deposit and start the sweep in the background.
 
@@ -145,7 +145,7 @@ class DepositProcessor:
             )
 
         deposit_address = await self._accounting.get_deposit_address(
-            chain_type, version, siwe_token
+            chain_type, version, auth.token
         )
 
         verified = await self._verifier.verify_deposit(
@@ -202,7 +202,7 @@ class DepositProcessor:
         task = asyncio.create_task(
             self._background_sweep(
                 deposit_address=deposit_address,
-                beneficiary=beneficiary,
+                beneficiary=auth.user_address,
                 chain_type=chain_type,
                 version=version,
                 chain_id=chain_id,

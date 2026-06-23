@@ -8,6 +8,7 @@ from web3.exceptions import ContractCustomError
 
 import src.api.routes as routes
 import src.auth.dependencies as auth_dependencies
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import SubmissionResult
 from src.services.deposit_processor import DepositProcessor
 
@@ -27,9 +28,9 @@ def _make_authed_client(monkeypatch) -> TestClient:
     app.include_router(routes.router)
 
     async def _override_auth():
-        return (BENEFICIARY, b"\x00" * 65)
+        return PrivateReadAuth(token=b"\x00" * 65, user_address=BENEFICIARY)
 
-    app.dependency_overrides[routes._require_user_and_private_read_token] = _override_auth
+    app.dependency_overrides[routes._require_resolved_private_read_auth] = _override_auth
     return TestClient(app)
 
 
@@ -37,7 +38,7 @@ def _make_private_read_client(token: bytes = b"\x12\x34") -> TestClient:
     """Client with _require_private_read_auth overridden to a fixed token+user."""
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[routes._require_private_read_auth] = lambda: routes.PrivateReadAuth(
+    app.dependency_overrides[routes._require_private_read_auth] = lambda: PrivateReadAuth(
         token=token, user_address=BENEFICIARY
     )
     return TestClient(app)
@@ -73,11 +74,12 @@ def test_withdraw_from_lock_route_wires_to_service(monkeypatch) -> None:
     assert body["detail"] == "chain_id=84532"
     call_args = mock_service.withdraw_from_lock.call_args
     called_payload = call_args[0][0]
+    called_auth = call_args[0][1]
     assert called_payload["signature"] == "0xabcd"
     assert called_payload["amount"] == 1000
     assert called_payload["nonce"] == 7
-    assert call_args[0][1] == BENEFICIARY
-    assert call_args[0][2] == fake_token
+    assert called_auth.user_address == BENEFICIARY
+    assert called_auth.token == fake_token
 
 
 def test_withdraw_from_lock_route_rejects_missing_auth(monkeypatch) -> None:
@@ -224,6 +226,36 @@ def test_get_history_route_preserves_empty_pages(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"history": [], "total": 9}
     mock_service.get_history.assert_awaited_once_with(9, 0, b"\x12\x34")
+
+
+def test_deposit_status_route_resolves_siwe_token_user(monkeypatch) -> None:
+    raw_token = b"\x12\x34\x56"
+    resolved_user = "0x" + "33" * 20
+
+    mock_service = MagicMock()
+    mock_service.resolve_address_from_token = AsyncMock(return_value=resolved_user)
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    mock_processor = MagicMock(spec=DepositProcessor)
+    mock_processor.get_deposit_status = MagicMock(
+        return_value={
+            "status": "pending",
+            "deposit_id": DEPOSIT_ID_HEX,
+            "amount": "50000000",
+            "token_address": "0x" + "cc" * 20,
+        }
+    )
+    monkeypatch.setattr(routes, "get_deposit_processor", lambda: mock_processor)
+
+    client = _make_client()
+    response = client.get(
+        f"/v1/accounting/deposits/status/{DEPOSIT_ID_HEX}",
+        headers={"X-SIWE-Token": "0x123456"},
+    )
+
+    assert response.status_code == 200
+    mock_service.resolve_address_from_token.assert_awaited_once_with(raw_token)
+    mock_processor.get_deposit_status.assert_called_once_with(DEPOSIT_ID_HEX, resolved_user)
 
 
 def test_deposit_status_route_rejects_empty_siwe_token(monkeypatch) -> None:

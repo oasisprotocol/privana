@@ -4,12 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from web3 import Web3
 
+from src.models.private_read import PrivateReadAuth
 from src.services.deposit_processor import DepositProcessor
 from src.services.deposit_verifier import VerifiedDeposit
 from src.services.sweep_engine import SweepRecord, SweepState
 
 ONE_ETH = Web3.to_wei(1, "ether")
 FIFTY_USDC = 50 * 10**6
+PRIVATE_READ_AUTH = PrivateReadAuth(token=b"\x00" * 65, user_address="0x" + "bb" * 20)
 
 
 @pytest.fixture
@@ -48,7 +50,7 @@ def processor(mock_verifier, mock_sweep_engine, mock_accounting):
 
 
 @pytest.mark.asyncio
-async def test_process_native_deposit(processor, mock_verifier, mock_sweep_engine):
+async def test_process_native_deposit(processor, mock_verifier, mock_sweep_engine, mock_accounting):
     """Full flow: verify → background sweep native."""
     mock_verifier.verify_deposit.return_value = VerifiedDeposit(
         chain_id=84532,
@@ -67,15 +69,17 @@ async def test_process_native_deposit(processor, mock_verifier, mock_sweep_engin
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     assert result["status"] == "pending"
     assert result["deposit_id"] is not None
+    mock_accounting.get_deposit_address.assert_awaited_once_with("evm", 0, PRIVATE_READ_AUTH.token)
 
     await asyncio.sleep(0)
     mock_sweep_engine.sweep_native.assert_called_once()
+    call_kwargs = mock_sweep_engine.sweep_native.call_args.kwargs
+    assert call_kwargs["beneficiary"] == PRIVATE_READ_AUTH.user_address
 
 
 @pytest.mark.asyncio
@@ -92,8 +96,7 @@ async def test_reject_gas_funding_tx(processor, mock_verifier, mock_sweep_engine
             amount=ONE_ETH,
             log_index=0,
             version=0,
-            siwe_token=b"\x00" * 65,
-            beneficiary="0x" + "bb" * 20,
+            auth=PRIVATE_READ_AUTH,
         )
 
 
@@ -121,8 +124,7 @@ async def test_idempotent_duplicate_returns_credited(
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     assert result["status"] == "credited"
@@ -156,8 +158,7 @@ async def test_reject_unsupported_token(
             amount=ONE_ETH,
             log_index=0,
             version=0,
-            siwe_token=b"\x00" * 65,
-            beneficiary="0x" + "bb" * 20,
+            auth=PRIVATE_READ_AUTH,
         )
 
     # Must not sweep unsupported tokens
@@ -190,8 +191,7 @@ async def test_reject_below_minimum_native(
             amount=1000,
             log_index=0,
             version=0,
-            siwe_token=b"\x00" * 65,
-            beneficiary="0x" + "bb" * 20,
+            auth=PRIVATE_READ_AUTH,
         )
 
     mock_sweep_engine.sweep_native.assert_not_called()
@@ -218,8 +218,7 @@ async def test_process_erc20_deposit(processor, mock_verifier, mock_sweep_engine
         amount=FIFTY_USDC,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     assert result["status"] == "pending"
@@ -266,8 +265,7 @@ async def test_concurrent_check_returns_pending(
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     assert result["status"] == "pending"
@@ -304,8 +302,7 @@ async def test_stop_awaits_in_flight_background_sweeps(processor, mock_verifier,
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     await sweep_started.wait()
@@ -371,8 +368,7 @@ async def test_stop_timeout_preserves_task_for_next_recovery(
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     await sweep_started.wait()
@@ -422,8 +418,7 @@ async def test_errored_record_allows_retry(
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     assert result["status"] == "pending"
@@ -464,8 +459,7 @@ async def test_errored_record_with_sweep_tx_hash_preserves_record(
         amount=ONE_ETH,
         log_index=0,
         version=0,
-        siwe_token=b"\x00" * 65,
-        beneficiary="0x" + "bb" * 20,
+        auth=PRIVATE_READ_AUTH,
     )
 
     assert result["status"] == "pending"

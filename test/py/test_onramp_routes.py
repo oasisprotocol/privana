@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -14,11 +14,14 @@ from web3 import Web3
 import src.api.routes as routes
 import src.config
 import src.services.onramp as onramp
+from src.models.private_read import PrivateReadAuth
 
 BENEFICIARY = Web3.to_checksum_address("0x" + "bb" * 20)
 DEPOSIT_ADDRESS = Web3.to_checksum_address("0x" + "aa" * 20)
 TOKEN_ID = "0x" + "11" * 32
 TX_HASH = "0x" + "22" * 32
+PRIVATE_READ_TOKEN = b"\x12" * 65
+RESOLVED_PRIVATE_READ_TOKEN = b"\x34" * 65
 
 
 def _webhook_signature(raw: bytes) -> str:
@@ -51,13 +54,13 @@ def _make_client(monkeypatch, tmp_path) -> tuple[TestClient, MagicMock]:
 
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[routes._require_private_read_auth] = lambda: routes.PrivateReadAuth(
-        token=b"\x12" * 65,
+    app.dependency_overrides[routes._require_private_read_auth] = lambda: PrivateReadAuth(
+        token=PRIVATE_READ_TOKEN,
         user_address=BENEFICIARY,
     )
-    app.dependency_overrides[routes._require_user_and_private_read_token] = lambda: (
-        BENEFICIARY,
-        b"\x12" * 65,
+    app.dependency_overrides[routes._require_resolved_private_read_auth] = lambda: PrivateReadAuth(
+        token=RESOLVED_PRIVATE_READ_TOKEN,
+        user_address=BENEFICIARY,
     )
     return TestClient(app), mock_service
 
@@ -94,7 +97,10 @@ def test_sign_onramp_url_returns_moonpay_signature(monkeypatch, tmp_path) -> Non
         hmac.new(b"sk_test_key", f"?{query}".encode(), hashlib.sha256).digest()
     ).decode("ascii")
     assert response.json() == {"signature": expected}
-    assert mock_service.get_deposit_address.await_count == 2
+    assert mock_service.get_deposit_address.await_args_list == [
+        call("evm", 0, RESOLVED_PRIVATE_READ_TOKEN),
+        call("evm", 0, PRIVATE_READ_TOKEN),
+    ]
 
 
 def test_sign_onramp_url_rejects_currency_mismatched_intent(monkeypatch, tmp_path) -> None:
@@ -191,7 +197,7 @@ def test_sign_onramp_url_requires_external_customer_id(monkeypatch, tmp_path) ->
 
 
 def test_webhook_completion_surfaces_pending_onramp(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    client, mock_service = _make_client(monkeypatch, tmp_path)
 
     create_response = client.post(
         "/v1/accounting/onramp/moonpay-tx-1",
@@ -235,9 +241,11 @@ def test_webhook_completion_surfaces_pending_onramp(monkeypatch, tmp_path) -> No
     )
     assert webhook_response.status_code == 200
 
+    mock_service.get_deposit_address.reset_mock()
     pending_response = client.get("/v1/accounting/onramp/pending")
 
     assert pending_response.status_code == 200
+    mock_service.get_deposit_address.assert_awaited_once_with("evm", 0, RESOLVED_PRIVATE_READ_TOKEN)
     pending = pending_response.json()["pending"]
     assert len(pending) == 1
     assert pending[0]["transaction_id"] == "moonpay-tx-1"
@@ -785,7 +793,7 @@ def test_late_moonpay_mapping_does_not_delete_wallet_mismatched_orphan(
 
 
 def test_update_onramp_rejects_cross_user_rebind(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    client, mock_service = _make_client(monkeypatch, tmp_path)
     other_user = Web3.to_checksum_address("0x" + "cc" * 20)
     transaction_id = "privana_existing"
     onramp.get_onramp_store().upsert(
@@ -806,6 +814,7 @@ def test_update_onramp_rejects_cross_user_rebind(monkeypatch, tmp_path) -> None:
     )
 
     assert response.status_code == 403
+    mock_service.get_deposit_address.assert_awaited_once_with("evm", 0, RESOLVED_PRIVATE_READ_TOKEN)
     stored = onramp.get_onramp_store().get(transaction_id)
     assert stored is not None
     assert stored["user_address"] == other_user
