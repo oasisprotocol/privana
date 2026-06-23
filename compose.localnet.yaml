@@ -1,0 +1,24 @@
+services:
+  privana:
+    build:
+      context: .
+      args:
+        - ENV_FILE=.env.localnet
+    image: "privana:localnet"
+    platform: linux/amd64
+    environment:
+      - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
+      - SWEEP_STATE_DIR=/data/sweep-engine
+      - MOONPAY_API_KEY=${MOONPAY_API_KEY}
+      - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY}
+      - MOONPAY_WEBHOOK_SECRET_KEY=${MOONPAY_WEBHOOK_SECRET_KEY}
+    volumes:
+      - ./rofl-appd.sock:/run/rofl-appd.sock
+      - sweep-engine-data:/data/sweep-engine
+    network_mode: host # For sapphire-localnet
+    ports:
+      - "8000:8000"
+    restart: on-failure
+
+volumes:
+  sweep-engine-data:

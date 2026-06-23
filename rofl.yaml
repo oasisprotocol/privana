@@ -1,4 +1,4 @@
-name: flexvaults
+name: privana
 version: 0.1.0
 tee: tdx
 kind: container
@@ -15,7 +15,6 @@ artifacts:
   stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage2-podman.tar.bz2#b2ea2a0ca769b6b2d64e3f0c577ee9c08f0bb81a6e33ed5b15b2a7e50ef9a09f
   container:
     runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.6/rofl-containers#5aa26a3c5a7e1d284e217959d89b7a620ea7b7fc5079909e25042124ffb384e8
-    compose: compose.yaml
 deployments:
   testnet:
     default: true
@@ -24,6 +23,9 @@ deployments:
     paratime: sapphire
     admin: ptrus_testnet
     oci_repository: rofl.sh/b7a29e6a-5988-4b3f-bdd6-052076c05be7:1774001283
+    artifacts:
+      container:
+        compose: compose.testnet.yaml
     trust_root:
       height: 31222788
       hash: 5d3dd487142108386028b51b5f1330a5d407742ac0af2541c91303263a1bc984
@@ -34,63 +36,15 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: riWujNwPA2PY51iykPMYEGPBugUhIDewUbv3A0oN50QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: asPujt+6Igrxl5I6K62D6zl6Pol+eH6wOVPAO+LwubIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: P266Qy8v9dgBRDi9vvpLWElgCRoVybVbKzKdDOLDDsIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 8wPTwNYPQVjRMJIdhLGwo2PvCUHz7xAVNLgjetPD1ZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
-      - name: ACCOUNTING_CONTRACT_ADDRESS
-        value: pGJwa1ggCF/w1zmhqVyplZ+483JVFuuYvm+M/hg50O6wWJ5gsUtkbmFtZVgrs8Q0DCKqjYY4VZIOJd2oMutljSx9V0svEdzY7vLdXXbnR1RXVaxKGv7LRWVub25jZU+bDDmlwN3EODay/BnA21xldmFsdWVYOppYOus0A+ymbAOK2cVDP79j0KyYJFwu7kkV4qYWH6nUvJpzfnUF9caA0K4XQF0+VOdg/oHGVh/YfUA=
-      - name: ACCOUNTING_GAS_LIMIT
-        value: pGJwa1gg9qATVWKC8nNk0I4BXS8/F4laiDu/ns2MWuKpC5SJIXJkbmFtZVgkop++G5Ei42D2t58CmoK2j/U6iqi4Gce3Hker/GU36isCypnuZW5vbmNlT22lordnYNZmhYOvvJWQqmV2YWx1ZVZstQLsfQb4deo+QYEKOayIHkVS2d0r
       - name: ALCHEMY_API_KEY
         value: pGJwa1ggJZlnbqC9PdW3EY8b7q/1mmKHDa+KrtuUoX/0rYNRXg5kbmFtZVgfBiOjEJguCpyi3B7pnover4t/lqTtYqTYjWk6tsgWhGVub25jZU+J2kr8BCXyZ/oB5Rg4iY1ldmFsdWVYJc+0rcicYGp0fE5tnufQiPq3cdRHbqMkHtluXeujqTqpLGRDmaA=
-      - name: API_HOST
-        value: pGJwa1gg4ijxBsRHce+r24PhsQkyLc8XvMLJ9kTNTPQaaq0m0VFkbmFtZVgY64w3vdRVLMIupzgDHlVdCE+04Hh6PR/SZW5vbmNlT+PyjkWVOEmEuwyZAlriGmV2YWx1ZVcWJtQOpVTXRJkEvs7qKmrrJ48ASLJ10g==
-      - name: API_PORT
-        value: pGJwa1ggWsZq4D0ifxTW58N30NlL8j1xAtGianaxovKnskxmX3FkbmFtZVgYhdh21G3ux9gBedI3WptA9aCvXNV7zRkGZW5vbmNlT9upt4olzn8X44rKQ93swmV2YWx1ZVSqZJjrW+Y695toT5iNQPUtkcyhTw==
-      - name: AUTH_TOKEN_STORAGE_DIR
-        value: pGJwa1ggfg7EzvADMjCeWtd2kdZyf6hEkpZ48ZTQfGsyy85+hAxkbmFtZVgm+yczdaPyXa39J6u43hcYvxJ1Q03+fb9SkRWTD7hX/QJlxcT7i91lbm9uY2VPPp0531qLmIJ79LbTPHBpZXZhbHVlWBxm0YPGRTfcdlSXJ//7fDRHjNu11W/QQeUBfRxb
-      - name: AUTH_TOKEN_VALIDITY_SECONDS
-        value: pGJwa1gg6n1pv6ls4+mwmEvdwQlLQoZFyOeIz7f1eXOQkvs51VFkbmFtZVgr0ew8TSQVscfzaZ+GZVdLYpcYFiqCyQ5GgW7YTfG8aeHT2nWKVWzwFpH72GVub25jZU9gW/nmS1uNCAps0CUZyJhldmFsdWVVb1GyOesLrm0be6bW3sN6/DXDpF8S
-      - name: ENVIRONMENT
-        value: pGJwa1ggvZ4KmLpAdIdS9JWtHNSRTplnjqJwGis+JeScns2t5gJkbmFtZVgb2/E3wnev+BvPMFksBY+eHsHoDvvmL8GGI3oEZW5vbmNlT7zvmZP9mt1VbQrzB4BDumV2YWx1ZVc1CZR9KcDFybfVI51EgLNCRDS754wVng==
-      - name: JWT_AUDIENCE
-        value: pGJwa1ggoOgfD2/4pMv1gXeKMFUhK21NXe+1RLFk265NoRoAj1hkbmFtZVgcz5Btu8GMEV/c5Lx5BuT/IxQg3sQLBY8K3H1SA2Vub25jZU8iRQWV0zbLE84w9tCqYLRldmFsdWVYGuZPRLm7Sk9l94CQuIxwdCr0JLKix3NFR0dD
-      - name: JWT_EXPIRY_HOURS
-        value: pGJwa1ggQADebyuGt9OsVXf/kubKOPpDVKoOBc0ZgP3/1/uixCtkbmFtZVgg9iBfuBPMf52yujCl8Pj61ZYqAuA7YLBZsdNmv/rHVihlbm9uY2VPN6epD1hHCfp1ag1TuBMZZXZhbHVlUjRxuIuJryCjFqg7oWLPd/gx9A==
-      - name: JWT_ISSUER
-        value: pGJwa1ggzMY55gRJ2vfaDc48P5sOBRV81GUL4aTUl5X130IjEU1kbmFtZVgaUAymNIkh+Zfzf7VIZnrwMCJofFmVYG0va9Nlbm9uY2VPyIGpKW63buTyN9BiMTe+ZXZhbHVlWBqU2cQPVonfsU0r99dlq0MttY+bp+I6Qn+t6Q==
-      - name: JWT_REFRESH_EXPIRY_DAYS
-        value: pGJwa1gglyYkwiUbe0qGhj2zpoGqovt4zADzygfnwC12XTkPBjdkbmFtZVgnQIqaleWpv8jQAzLEgM7aVCsHeQl41nJIl2NeSWsxp1uHWpUKt/SdZW5vbmNlTzmtOdpF+/gDBnLgfReEqGV2YWx1ZVGbp2U5tYWZQHdDi0NVWfZgVw==
-      - name: LOG_LEVEL
-        value: pGJwa1ggtEcnzjNmijlpE5OW3RsA07ug1yU5ImybAQ3E7H2sgiJkbmFtZVgZ8wyEjg013xKikPUqbmJhaNhYINaDBpsC1WVub25jZU9jOSNMANiuxKm1Wc8rnqJldmFsdWVUafcJuNMf65NHhmq4MPLnbQZJUwI=
-      - name: MIN_WITHDRAWAL_GAS_BALANCE
-        value: pGJwa1ggzJfKyFjmp8jJIfiknmmuHHw75Zid6tJgj1+LxPdp40xkbmFtZVgqLAjieWb/Ay33ysFBq5kAWiuG4aM6pqSgJTL8V6TgYZvdGQt63DTYNycpZW5vbmNlT9//H/Te7FvGboga4/Thg2V2YWx1ZVgekvJJDIHhjRRR8yT9Tc78Goo/Ea3yyWN0bcpTEpQI
-      - name: SAPPHIRE_CHAIN_ID
-        value: pGJwa1ggLuywdA21iUKOZ5Md+2Q1Q/FZVcXOsZSc/MwifaYagApkbmFtZVghCpzYTlvRck4Yi5ZhdPcsi3UeoVnau3cERII99WkrGhlvZW5vbmNlT17gC0n4RgWqZ5LbucUwiWV2YWx1ZVWYptlAjsjNomqNbWPESQ3nZT0dK60=
-      - name: SAPPHIRE_RPC_URL
-        value: pGJwa1ggNUrAiF2M839zYbDdDssgDkue6qj6m592dDay4eXew01kbmFtZVgggOX7Axbwb0zHN9IThNzmjpgnlHK6Rn9srjRjhkZtYpNlbm9uY2VP0+Av5QOt0sdeAdldDhLPZXZhbHVlWDFdcEM/BIhTc6Q8Kams0DYPsrzXzKkRW9r4gzE/xWLYhivSgD/nTM/GiJZ8zePXJdWA
-      - name: SIWE_DOMAINS
-        value: pGJwa1ggmmDs3HUGk6BWytpAD+wUteNrdUria3tndznE4vFJP3JkbmFtZVgcnLuzhiRJ9fDBKUzelkkRQvPcSyU1gg8aV4KPBWVub25jZU+ttsHln9mUakBYqTMewM5ldmFsdWVYqT5VU44XOOM6+mWAybmFM23wX0DavSnj/ZqvUsE5NlIjLqn8OTMqnMMLkckjuc+H/cKdd7dBUdC/p4G01ZgokGvIUbu4aDxSiAW6TsxYGvGSpYVJGdegFzdMGhIxG96RiEgtMaCQb0UUz0vvmnwNugfbFoXxYYzCLsGDiQOO2cvMdJLqX44b16MW9phUussIjFlyjf1FtIpuIXpRfdP3WKI+418F1yhZXxY=
-      - name: SIWE_NONCE_EXPIRY_SECONDS
-        value: pGJwa1ggvpGd+1qU5cs5Lv0JVxORu4ZXYsvO2N4HdxwySm4gY1hkbmFtZVgp5EX/6JaiVruXZ2YYcDeU2grXg5Rfy4BPjf2KkQOB1KrGzGwEHKiDnYVlbm9uY2VPXDyPG93GaDYFe9LxP4f/ZXZhbHVlU1Wh0AXLJ0P/i1x5RBzg00KU1f8=
-      - name: WITHDRAWAL_POLL_INTERVAL
-        value: pGJwa1ggmRoOjGax/GGs2yyCX57svkGsrhHUfmkWC53bmwXQ73RkbmFtZVgoMQ2Kl1XoViUPlWU9Bvod1oQfuHwfCJQi+aLZkR75FSiG0m4RgQSZJWVub25jZU+gRAZgB2w8E1/wFGynJ89ldmFsdWVShCSVGs9lo7wBymR6NR6d2v+y
-      - name: WITHDRAWAL_RESOLUTION_TIMEOUT
-        value: pGJwa1ggN5bdNbY8I5BHeXpojKUuwK0e/1UOMFtsnL1J7izmkmRkbmFtZVgtCx8vfvvAxJLC9/iLk3SP5jiOEALEj5c6I6u8Nn44IfxgWT13Ko+7qRcIPloFZW5vbmNlTwo83VPn0xe7SZ3zTfonl2V2YWx1ZVLEpW2xjuR2vGJba2CtgKcTC+s=
-      - name: AUTH_TOKEN_KEY_ID
-        value: pGJwa1gg3W+Szn5MSQPDVGzl9AuSNo9BeD6bMv2yvEmWIsT6VUZkbmFtZVghz+C2lCFxs5y7StayHROOcmQ6wZhgz9PRad/SQ6Dwv1iQZW5vbmNlT7BWGxqlAJeb5cgNYGb4GWV2YWx1ZVgqTNYLehV32olQFPR3Rh0tOCkmKfIsucgCBDL1v/9JcYhHhsLuwXCgVQqp
-      - name: AUTH_CLIENTS
-        value: pGJwa1ggd9kqPD9VmN5EX3+Kw+NOvYQ6B6CQigpMubdbhkANixlkbmFtZVgc/sxqTLWf8JRFvo8tjvC9tqX5Nsc5gg2ZPi4Ok2Vub25jZU/nnIS4V+m+dp8vw2bsrXJldmFsdWVZAglNjEXfhbZ9ogyTJFQI32Y0bH5jzDdun/eeFVzJEUzIuJP+SYm4skngBYsjDFDvXWFWIY3dhZoJhB5T9H1R86zoYHEENI7vp2RW/m2LksU26j1tNQ3Q5jhtyy5BWaKuiSF8qYMrzb0A5h2mC9cnT5Rs4VSl8s57r94q3LEL4j1XQmkM1r4dU0wWnAAnlIcGdVaY2gHc9jdT4dNFc/QbyPev+CnGSOmNIytUUExmnNG/aQr9BBf5LnxK4RfkXuB25+N3AjSnDLEpaGU5/L1f0EEo42YJyg9vS5rNDnLIugC/0iwM7ukIWNlRamgEuh5PuILPh7TeFo+7T4esRq5wdSK9uKlp1G1IqJ+BvM98ZGnKQgpkrQH7gWV9pgORHuL0aPW7nMZjWo+ivps6ajoxoTuqiUxdNl5m91MC6PCUQKgH+CFhBtGg3ZdBQ2DIwpxwMsqlIvK9NN2yS/PTvQb7wetWxoaDXCy0izLr6Dtr69GqRSMXOdlLrjYMGfnmI0jAGGl7zoQV64pcLadI4lDWuzILlyYx00a8vMvOUyYaNZSGyyogt9kq7KRetoQffNk09A/UXru+rrBniotCPQl1SgtahOxdOvUonQS+iNSRYbqqDA94a4zM51bmEPCTX9VCKTTBfm3h8PQ2AyPppxO/KfgD5UPBu40Jw+pB3InkKit3gNB8Ut9Yqtw4Uw==
-      - name: CORS_ALLOWED_ORIGINS
-        value: pGJwa1ggnL+wAXeA1BkJ4vbmi1//sr+ashJZs7J2LNis4g6JbiRkbmFtZVgkt5Im0top59HV3+1MYR9rLz6Nk4hiHbEIc0dyo8hpMnxC87l6ZW5vbmNlTz8oXBGPsSFA+HvKTD9CrGV2YWx1ZVipl2EfEaMCfkAsKEd96BXRbTnwtfB3WFz6FzroNzf5WNcnKk3eXOyLQ1jPoamhjKpLNOXmbRSorRfbrE5fAqzTHvxGJCzbSeIg6WJ87ZPbNmMNfEA7GImWpfb9uxW64/xaF7D2mcXL3bUG85iBgT+Gqh9buhMJ8ZumGzAFxLED0nMT8wA5S+dqkSRRrDSlwXlOFyKCaAITr61khBl9XVHC1mU5jYrB4x70FA==
-      - name: DEPOSIT_POLL_INTERVAL
-        value: pGJwa1ggiw47DBa02X0kJ6BCA3efTmSvA0/JSL6y1uBOc2it1nJkbmFtZVglgk2kp9SYmf7Bo6azaazsW5+JnboQcdTxaIOOILjnsiRmOvNZbWVub25jZU9TrGt+NetntsszHzYL4GNldmFsdWVRid/dFdD5prHaRbdtufjD/TA=
-      - name: ROFL_ADAPTER_ADDRESS
-        value: pGJwa1ggfyjzbEAk2yfqDdIxZSlVwQFYLqwFg0Ioqtgr/bs9CTBkbmFtZVgkNlIPvnKqW1NRBv0TfEvNrXFuYDydc6vr7vPhBRF6n90qpqYjZW5vbmNlT8C+Ovm5tr0Tff72Qw9vWWV2YWx1ZVg66jrIYFEvZXEi/wTvyV1GUm1lCar11dtVl6vuWzu04/YzLxuMHtss034TDXkSabkThJKAfS2GPKqrWA==
       - name: MOONPAY_API_KEY
         value: pGJwa1ggZ8ZDXcH/LjWM5DrA589apaH2x2eoaDg+iQo6BNphP1hkbmFtZVgfQ1DJBIHqc+OMfavoFAlgPTuHvE3m06lSowdqtujPtmVub25jZU/iTBTaZS9C0R4VZgzJPutldmFsdWVYNt6FkkVhfgX/l6KrWn/zgyLaYekTVMww+qNQn3so501ReBUYdEMDap21x3ztxtv6pYLcC3GarQ==
       - name: MOONPAY_SECRET_KEY
@@ -99,6 +53,13 @@ deployments:
         value: pGJwa1ggRpWMFpgqRv4PZ6RXVjr1w4BxjhULkoEFMYpGXqMBYnpkbmFtZVgqXgdNOwR9yKKbmimw34+uenH6hZdLYuzuFkbCnWJYaX/vX2vWMOe4V3mjZW5vbmNlT5S7RBE/bX9HoUbuGiAUYmV2YWx1ZVg45wyUN6gFz40R71+kSZR+BHENNNXUwDL+HU76gjrzV46WyMPYw8YGh1zcNYLC2M2N+hJUKNKdvc8=
     machines:
       default:
+        provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
+        offer: playground_internal_m
+        id: "0000000000000634"
+        permissions:
+          log.view:
+            - oasis1qrrvz7pw8eysww22qzutnaufppam0avuduuxnq2f
+      old-testnet:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_internal_m
         id: "0000000000000629"

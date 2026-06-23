@@ -11,7 +11,7 @@ build
 venv
 my_env
 .env
-.env.*
+.env.*.secrets
 .git
 .gitignore
 .pytest_cache

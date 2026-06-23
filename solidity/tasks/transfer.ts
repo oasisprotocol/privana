@@ -30,7 +30,7 @@ task("transfer")
   .addOptionalParam(
     "apiurl",
     "API base URL",
-    "https://p8000.m1356.opf-testnet-rofl-25.rofl.app",
+    "https://api.testnet.privana.finance",
   )
   .setDescription("Transfer funds from your account to another account")
   .setAction(async (args, hre) => {
@@ -49,28 +49,22 @@ task("transfer")
     console.log("Token ID:", args.tokenid);
     console.log("Amount (base units):", args.amount);
 
-    // SIWE login for private reads (balances/locks).
-    let siweToken: string | null = null;
-    try {
-      siweToken = await getSiweToken({
-        apiBaseUrl,
-        signer,
-        userAddress,
-        chainId,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `SIWE login failed; skipping private balance reads: ${message}`,
-      );
-    }
+    console.log("\nAuthenticating with SIWE...");
+    const siweToken = await getSiweToken({
+      apiBaseUrl,
+      signer,
+      userAddress,
+      chainId,
+    });
+    console.log("SIWE authentication successful");
 
     // Get balance before transfer
-    const balanceBefore = await tryFetchBalance(
+    const balanceBefore = await fetchBalance({
+      apiBaseUrl,
+      userAddress,
+      tokenId: args.tokenid,
       siweToken,
-      { apiBaseUrl, userAddress, tokenId: args.tokenid },
-      "before transfer",
-    );
+    });
     console.log(
       "Balance before:",
       balanceBefore !== null ? balanceBefore.toString() : "(unavailable)",
@@ -167,11 +161,12 @@ task("transfer")
     console.log("\nWaiting for transaction to process...");
     await new Promise((r) => setTimeout(r, 5000));
 
-    const balanceAfter = await tryFetchBalance(
+    const balanceAfter = await fetchBalance({
+      apiBaseUrl,
+      userAddress,
+      tokenId: args.tokenid,
       siweToken,
-      { apiBaseUrl, userAddress, tokenId: args.tokenid },
-      "after transfer",
-    );
+    });
     console.log(
       "Balance after:",
       balanceAfter !== null ? balanceAfter.toString() : "(unavailable)",

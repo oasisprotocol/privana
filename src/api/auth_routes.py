@@ -115,7 +115,7 @@ async def authorize_page(
     response_mode: str = Query(default="web_message"),
     code_challenge_method: str = Query(default="S256"),
 ) -> HTMLResponse:
-    """Serve the Flexvaults auth page for popup/redirect SIWE login."""
+    """Serve the Privana auth page for popup/redirect SIWE login."""
     registry = get_client_registry()
     settings = load_settings()
     payload = HostedAuthorizePageRequest(
@@ -217,7 +217,7 @@ async def authorize_code(
     request: Request,
     response: Response,
 ) -> AuthorizeCodeResponse:
-    """Verify SIWE on the Flexvaults origin and mint an authorization code."""
+    """Verify SIWE on the Privana origin and mint an authorization code."""
     settings = load_settings()
     try:
         expected_origins = {cfg.origin for cfg in get_siwe_configs(settings)}

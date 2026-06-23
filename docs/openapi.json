@@ -1282,7 +1282,7 @@
         "description": "Token response returned to third-party clients.",
         "properties": {
           "access_token": {
-            "description": "JWT access token for Flexvaults API calls",
+            "description": "JWT access token for Privana API calls",
             "title": "Access Token",
             "type": "string"
           },
@@ -2023,7 +2023,7 @@
     },
     "/v1/accounting/auth/authorize": {
       "get": {
-        "description": "Serve the Flexvaults auth page for popup/redirect SIWE login.",
+        "description": "Serve the Privana auth page for popup/redirect SIWE login.",
         "operationId": "authorize_page_v1_accounting_auth_authorize_get",
         "parameters": [
           {
@@ -2116,7 +2116,7 @@
         ]
       },
       "post": {
-        "description": "Verify SIWE on the Flexvaults origin and mint an authorization code.",
+        "description": "Verify SIWE on the Privana origin and mint an authorization code.",
         "operationId": "authorize_code_v1_accounting_auth_authorize_post",
         "requestBody": {
           "content": {

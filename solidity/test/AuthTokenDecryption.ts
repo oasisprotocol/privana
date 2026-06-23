@@ -19,7 +19,7 @@ import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { AbiCoder, keccak256, solidityPacked, getBytes } from 'ethers';
 
 // Default domain for test tokens (not validated by contract anymore)
-const TEST_DOMAIN = 'https://flexvaults.com';
+const TEST_DOMAIN = 'https://api.privana.finance';
 
 // AuthToken struct type for ABI encoding (must match Solidity struct)
 const AUTH_TOKEN_TYPE = 'tuple(string domain, address userAddr, uint256 validUntil, string statement, string[] resources)';
@@ -81,8 +81,8 @@ describe('AuthTokenDecryption', function () {
        */
       const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
-      const statement = 'Sign in with Ethereum to flexvaults.com';
-      const resources: string[] = ['https://api.flexvaults.com/v1'];
+      const statement = 'Sign in with Ethereum to privana.finance';
+      const resources: string[] = ['https://api.privana.finance/v1'];
 
       // Encode using the struct format (same as Python's eth_abi with tuple)
       const encoded = encodeAuthToken(TEST_DOMAIN, userAddress, validUntil, statement, resources);
@@ -106,8 +106,8 @@ describe('AuthTokenDecryption', function () {
       const validUntil = await getFutureTimestamp(24);
       const userAddress = user1.address;
       const resources = [
-        'https://api.flexvaults.com/v1',
-        'https://api.flexvaults.com/v2',
+        'https://api.privana.finance/v1',
+        'https://api.privana.finance/v2',
         'ipfs://QmTest123',
       ];
 
@@ -284,11 +284,11 @@ describe('AuthTokenDecryption', function () {
     it('Should produce consistent encoding for reference vector', async function () {
       // Fixed values for reproducible test vector
       // Note: using far future timestamp to avoid expiration errors
-      const domain = 'https://flexvaults.com';
+      const domain = 'https://app.privana.finance';
       const userAddr = '0x1234567890123456789012345678901234567890';
       const validUntil = await getFutureTimestamp(24 * 365); // 1 year from now
-      const statement = 'Sign in with Ethereum to flexvaults.com';
-      const resources = ['https://api.flexvaults.com/v1'];
+      const statement = 'Sign in with Ethereum to privana.finance';
+      const resources = ['https://api.privana.finance/v1'];
 
       const encoded = await mockDecrypt.encodeAuthToken(domain, userAddr, validUntil, statement, resources);
 
@@ -315,7 +315,7 @@ describe('AuthTokenDecryption', function () {
     });
 
     it('Should produce consistent encoding for empty fields vector', async function () {
-      const domain = 'https://flexvaults.com';
+      const domain = 'https://app.privana.finance';
       const userAddr = '0xdead000000000000000000000000000000000000';
       const validUntil = await getFutureTimestamp(24 * 365); // 1 year from now
       const statement = '';
@@ -338,7 +338,7 @@ describe('AuthTokenDecryption', function () {
 
     it('Should verify TypeScript encoding matches contract encoding', async function () {
       // Use the same values for both TypeScript and contract encoding
-      const domain = 'https://flexvaults.com';
+      const domain = 'https://app.privana.finance';
       const userAddr = '0xabcdef1234567890abcdef1234567890abcdef12';
       const validUntil = await getFutureTimestamp(24);
       const statement = 'Test statement';

@@ -3,6 +3,7 @@
 import asyncio
 
 import pytest
+from dotenv import load_dotenv
 
 import src.auth.auth_token_keys as auth_token_keys
 import src.auth.auth_token_service as auth_token_service
@@ -11,6 +12,8 @@ import src.auth.jwt_service as jwt_service
 import src.auth.rate_limiter as rate_limiter
 import src.auth.token_store as token_store
 import src.config
+
+load_dotenv(".env.localnet")
 
 
 def _run_async(coro):

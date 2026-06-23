@@ -4,7 +4,11 @@ import logging
 import os
 from typing import Dict, Optional, Tuple
 
+from dotenv import load_dotenv
+
 from src.models.types import Settings
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,7 +17,6 @@ logging.basicConfig(
 
 
 _settings: Optional[Settings] = None
-_defaults = Settings()
 
 ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
     84532: "base-sepolia",
@@ -41,10 +44,8 @@ NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
 }
 
 
-def _get_int(name: str, default: int) -> int:
+def _get_int(name: str) -> int:
     value = os.getenv(name)
-    if value is None:
-        return default
     try:
         return int(value, 0)
     except ValueError as exc:
@@ -68,11 +69,8 @@ def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
     return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
 
 
-def _get_bool(name: str, default: bool) -> bool:
+def _get_bool(name: str) -> bool:
     value = os.getenv(name)
-    if value is None:
-        return default
-
     normalized = value.strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
         return True
@@ -105,75 +103,39 @@ def load_settings(refresh: bool = False) -> Settings:
         chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key)
 
         _settings = Settings(
-            api_host=os.getenv("API_HOST", _defaults.api_host),
-            api_port=_get_int("API_PORT", _defaults.api_port),
-            log_level=os.getenv("LOG_LEVEL", _defaults.log_level),
-            environment=os.getenv("ENVIRONMENT", _defaults.environment),
-            cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", _defaults.cors_allowed_origins),
-            accounting_contract_address=os.getenv(
-                "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
-            ),
-            sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id),
-            sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
-            accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit),
+            api_host=os.getenv("API_HOST"),
+            api_port=_get_int("API_PORT"),
+            log_level=os.getenv("LOG_LEVEL"),
+            environment=os.getenv("ENVIRONMENT"),
+            cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS"),
+            accounting_contract_address=os.getenv("ACCOUNTING_CONTRACT_ADDRESS"),
+            sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID"),
+            sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL"),
+            accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT"),
             chain_rpc_urls=chain_rpc_urls,
-            withdrawal_poll_interval=_get_int(
-                "WITHDRAWAL_POLL_INTERVAL", _defaults.withdrawal_poll_interval
-            ),
-            withdrawal_resolution_timeout=_get_int(
-                "WITHDRAWAL_RESOLUTION_TIMEOUT", _defaults.withdrawal_resolution_timeout
-            ),
-            min_withdrawal_gas_balance=_get_int(
-                "MIN_WITHDRAWAL_GAS_BALANCE", _defaults.min_withdrawal_gas_balance
-            ),
-            auth_token_validity_seconds=_get_int(
-                "AUTH_TOKEN_VALIDITY_SECONDS", _defaults.auth_token_validity_seconds
-            ),
+            withdrawal_poll_interval=_get_int("WITHDRAWAL_POLL_INTERVAL"),
+            withdrawal_resolution_timeout=_get_int("WITHDRAWAL_RESOLUTION_TIMEOUT"),
+            min_withdrawal_gas_balance=_get_int("MIN_WITHDRAWAL_GAS_BALANCE"),
+            auth_token_validity_seconds=_get_int("AUTH_TOKEN_VALIDITY_SECONDS"),
             siwe_domains=_parse_siwe_domains(os.getenv("SIWE_DOMAINS")),
-            auth_token_storage_dir=os.getenv(
-                "AUTH_TOKEN_STORAGE_DIR", _defaults.auth_token_storage_dir
-            ),
-            auth_clients_json=os.getenv(
-                "AUTH_CLIENTS",
-                os.getenv("OAUTH_CLIENTS", _defaults.auth_clients_json),
-            ),
-            auth_code_ttl_seconds=_get_int(
-                "AUTH_CODE_TTL_SECONDS", _defaults.auth_code_ttl_seconds
-            ),
-            auth_rate_limit_window_seconds=_get_int(
-                "AUTH_RATE_LIMIT_WINDOW_SECONDS", _defaults.auth_rate_limit_window_seconds
-            ),
-            auth_nonce_rate_limit=_get_int(
-                "AUTH_NONCE_RATE_LIMIT", _defaults.auth_nonce_rate_limit
-            ),
-            auth_login_rate_limit=_get_int(
-                "AUTH_LOGIN_RATE_LIMIT", _defaults.auth_login_rate_limit
-            ),
-            auth_authorize_rate_limit=_get_int(
-                "AUTH_AUTHORIZE_RATE_LIMIT", _defaults.auth_authorize_rate_limit
-            ),
-            auth_token_rate_limit=_get_int(
-                "AUTH_TOKEN_RATE_LIMIT", _defaults.auth_token_rate_limit
-            ),
-            trust_x_forwarded_for=_get_bool(
-                "TRUST_X_FORWARDED_FOR", _defaults.trust_x_forwarded_for
-            ),
-            moonpay_api_key=os.getenv("MOONPAY_API_KEY", _defaults.moonpay_api_key),
-            moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY", _defaults.moonpay_secret_key),
-            moonpay_webhook_secret_key=os.getenv(
-                "MOONPAY_WEBHOOK_SECRET_KEY", _defaults.moonpay_webhook_secret_key
-            ),
-            moonpay_allowed_hosts=(
-                _parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_HOSTS"))
-                or _defaults.moonpay_allowed_hosts
-            ),
+            auth_token_storage_dir=os.getenv("AUTH_TOKEN_STORAGE_DIR"),
+            auth_clients_json=os.getenv("AUTH_CLIENTS"),
+            auth_code_ttl_seconds=_get_int("AUTH_CODE_TTL_SECONDS"),
+            auth_rate_limit_window_seconds=_get_int("AUTH_RATE_LIMIT_WINDOW_SECONDS"),
+            auth_nonce_rate_limit=_get_int("AUTH_NONCE_RATE_LIMIT"),
+            auth_login_rate_limit=_get_int("AUTH_LOGIN_RATE_LIMIT"),
+            auth_authorize_rate_limit=_get_int("AUTH_AUTHORIZE_RATE_LIMIT"),
+            auth_token_rate_limit=_get_int("AUTH_TOKEN_RATE_LIMIT"),
+            trust_x_forwarded_for=_get_bool("TRUST_X_FORWARDED_FOR"),
+            moonpay_api_key=os.getenv("MOONPAY_API_KEY"),
+            moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY"),
+            moonpay_webhook_secret_key=os.getenv("MOONPAY_WEBHOOK_SECRET_KEY"),
+            moonpay_allowed_hosts=(_parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_HOSTS"))),
             moonpay_allowed_currency_codes=(
                 _parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_CURRENCY_CODES"))
-                or _defaults.moonpay_allowed_currency_codes
             ),
             moonpay_webhook_tolerance_seconds=_get_int(
                 "MOONPAY_WEBHOOK_TOLERANCE_SECONDS",
-                _defaults.moonpay_webhook_tolerance_seconds,
             ),
         )
     return _settings

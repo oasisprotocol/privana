@@ -40,7 +40,7 @@ Most write operations are authorized **per-request** by an EIP-712 signature emb
 
 A subset of endpoints expose **private state** (per-user balances, locks, deposit address, history) and require an authenticated session token instead. Two flows produce one:
 
-### 1. Direct SIWE (first-party Flexvaults origin)
+### 1. Direct SIWE (first-party Privana origin)
 
 ```
 GET  /auth/domain                       → which SIWE domain to sign
@@ -52,7 +52,7 @@ The login response returns:
 - `siwe_token` — encrypted Sapphire AuthToken; pass via `X-SIWE-Token` header for direct on-chain confidential reads.
 - `jwt_access_token` / `jwt_refresh_token` — pass `Authorization: Bearer <jwt_access_token>` for normal API auth.
 
-Browser requests to `/auth/nonce` and `/auth/login` are **origin-checked** — they must come from a configured Flexvaults SIWE origin. Non-browser clients (no `Origin` header) are accepted.
+Browser requests to `/auth/nonce` and `/auth/login` are **origin-checked** — they must come from a configured Privana SIWE origin. Non-browser clients (no `Origin` header) are accepted.
 Backends that only receive a JWT from hosted auth can exchange that JWT for a private-read token with `POST /auth/jwt/siwe-token`.
 
 ### 2. OAuth-style cross-domain (third-party apps)
@@ -61,7 +61,7 @@ For apps on other origins, use the hosted authorization page with PKCE:
 
 ```
 GET  /auth/authorize?client_id=…&redirect_uri=…&code_challenge=…&state=…&chain_id=…
-                                              → HTML page; user signs SIWE on Flexvaults origin
+                                              → HTML page; user signs SIWE on Privana origin
 POST /auth/authorize {siwe_message, sig, …}   → short-lived `code`
 POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
                                               → access_token + id_token + refresh_token
@@ -69,7 +69,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 
 - `code_challenge_method` must be `S256`.
 - `redirect_uri` must exactly match a value registered for the client. `http://localhost` and loopback callbacks are allowed; everything else must be `https`.
-- `id_token` is client-scoped (audience = configured client audience or `client_id`) — use it for third-party backend identity verification, not for Flexvaults API calls.
+- `id_token` is client-scoped (audience = configured client audience or `client_id`) — use it for third-party backend identity verification, not for Privana API calls.
 
 ### Endpoint matrix
 
@@ -256,7 +256,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `GET /auth/jwt/jwks.json` | JWKS document for verifying issued JWTs. |
 | `GET /auth/jwt/me` (Bearer) | Returns the authenticated address. Useful for client-side identity checks. |
 | `GET /auth/authorize` | HTML auth page for cross-domain sign-in. Query params: `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `chain_id`, `state`, `response_mode`. |
-| `POST /auth/authorize` | Verify SIWE on the Flexvaults origin and mint a short-lived authorization code. Browser-origin-checked. Rate-limited. |
+| `POST /auth/authorize` | Verify SIWE on the Privana origin and mint a short-lived authorization code. Browser-origin-checked. Rate-limited. |
 | `POST /auth/token` | Exchange an authorization code + PKCE verifier for `access_token`, `id_token`, `refresh_token`. |
 
 ## Status Code Semantics

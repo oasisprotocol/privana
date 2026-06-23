@@ -171,7 +171,7 @@ export async function fetchBalance(params: {
   tokenId: string;
   siweToken: string;
 }): Promise<bigint> {
-  const url = `${params.apiBaseUrl}/v1/accounting/balances/${params.userAddress}/${params.tokenId}`;
+  const url = `${params.apiBaseUrl}/v1/accounting/balances/${params.tokenId}`;
   const data = await fetchJson(url, {
     headers: { "X-SIWE-Token": params.siweToken },
   });
