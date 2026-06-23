@@ -1,23 +1,25 @@
-"""Accounting module ABI."""
+"""Accounting module ABI.
+
+``ACCOUNTING_ABI`` is the ``Accounting`` contract ABI, bound to the proxy.
+Bridge errors from the internal ``BridgeLib`` library are present in this ABI.
+"""
 
 import json
 from pathlib import Path
+from typing import Any
 
 from web3 import Web3
 
-_abi_path = (
-    Path(__file__).parent.parent.parent
-    / "solidity"
-    / "artifacts"
-    / "contracts"
-    / "Accounting.sol"
-    / "Accounting.json"
-)
+_artifacts = Path(__file__).parent.parent.parent / "solidity" / "artifacts" / "contracts"
+_accounting_path = _artifacts / "Accounting.sol" / "Accounting.json"
 
-with open(_abi_path) as f:
-    _contract_json = json.load(f)
 
-ACCOUNTING_ABI = _contract_json["abi"]
+def _load_abi(path: Path) -> list[dict[str, Any]]:
+    with open(path) as f:
+        return json.load(f)["abi"]
+
+
+ACCOUNTING_ABI = _load_abi(_accounting_path)
 
 
 def _build_error_selectors(abi: list) -> dict[bytes, str]:
@@ -27,16 +29,14 @@ def _build_error_selectors(abi: list) -> dict[bytes, str]:
         if item.get("type") == "error":
             name = item["name"]
             inputs = item.get("inputs", [])
-            # Build signature: ErrorName(type1,type2,...)
             types = ",".join(inp["type"] for inp in inputs)
             signature = f"{name}({types})"
-            # Compute selector (first 4 bytes of keccak256)
             selector = bytes(Web3.keccak(text=signature)[:4])
             selectors[selector] = name
     return selectors
 
 
-# Pre-computed error selectors from the ABI
+# Pre-computed error selectors from the Accounting ABI.
 ERROR_SELECTORS = _build_error_selectors(ACCOUNTING_ABI)
 
 

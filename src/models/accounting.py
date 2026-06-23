@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from enum import IntEnum
 from typing import ClassVar, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, Field, field_validator
 from web3 import Web3
 
 
@@ -686,3 +687,144 @@ class PendingOnRampsResponse(BaseModel):
     """Completed MoonPay transactions that still need Privana deposit verification."""
 
     pending: list[OnRampRecord]
+
+
+class BridgeWithdrawQuoteRequest(BaseModel):
+    """Request payload for a bridge-withdrawal quote.
+
+    ``user_nonce`` is informational only — the server reads the authoritative
+    nonce from ``withdrawalNonces(user_address)`` and writes that value into
+    both the response envelope and the EIP-712 message.
+    """
+
+    user_address: str = Field(..., min_length=1)
+    to_address: str = Field(..., min_length=1)
+    dest_chain_id: int = Field(..., gt=0)
+    gross_amount: int = Field(..., gt=0)
+    user_nonce: int = Field(..., ge=0)
+
+    @field_validator("gross_amount", "user_nonce", mode="before")
+    def _parse_int(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("user_address", "to_address")
+    def _lowercase_address(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
+class BridgeWithdrawAdvisory(BaseModel):
+    """Non-binding gas observations surfaced on the Sapphire branch only."""
+
+    gas_price_seen_wei: str
+    recommended_gas_limit: str
+    safety_margin: str
+
+
+_BRIDGE_WITHDRAW_EIP712_FIELD_ORDER: tuple[str, ...] = (
+    "userAddress",
+    "toAddress",
+    "destChainId",
+    "routeAddress",
+    "amount",
+    "maxGasCost",
+    "nonce",
+)
+
+
+class BridgeWithdrawEip712Message(BaseModel):
+    """EIP-712 ``BridgeWithdraw`` message.
+
+    Field order mirrors the on-chain typehash verbatim — see
+    ``solidity/contracts/EIP712SignatureVerifier.sol``. Pinned at import via
+    the module-level check below so a serializer/ordering drift fails on
+    import instead of silently breaking ecrecover for signed payloads.
+    """
+
+    EIP712_FIELD_ORDER: ClassVar[tuple[str, ...]] = _BRIDGE_WITHDRAW_EIP712_FIELD_ORDER
+
+    userAddress: str
+    toAddress: str
+    destChainId: str
+    routeAddress: str
+    amount: str
+    maxGasCost: str
+    nonce: str
+
+
+if tuple(BridgeWithdrawEip712Message.model_fields.keys()) != _BRIDGE_WITHDRAW_EIP712_FIELD_ORDER:
+    raise RuntimeError(
+        "BridgeWithdrawEip712Message field order drifted from the on-chain "
+        "BRIDGE_WITHDRAW typehash in EIP712SignatureVerifier.sol; got "
+        f"{tuple(BridgeWithdrawEip712Message.model_fields.keys())}, expected "
+        f"{_BRIDGE_WITHDRAW_EIP712_FIELD_ORDER}"
+    )
+
+
+class BridgeWithdrawEip712Envelope(BaseModel):
+    """Wrapper carrying the EIP-712 type name + message."""
+
+    type: Literal["BridgeWithdraw"]
+    message: BridgeWithdrawEip712Message
+
+
+class BridgeWithdrawQuoteResponse(BaseModel):
+    """Bridge-withdrawal quote envelope.
+
+    ``advisory`` is populated on the Sapphire native-release branch and
+    ``None`` on registered-route branches (operator pays foreign gas; the
+    user has no reserve to size). ``quote_config_version`` and ``expires_at``
+    are envelope fields — they are not part of the EIP-712 payload.
+    """
+
+    dest_chain_id: int
+    route_address: str
+    fee_model: str
+    gross_amount: str
+    max_gas_cost: str
+    net_amount: str
+    user_nonce: str
+    advisory: Optional[BridgeWithdrawAdvisory] = None
+    quote_config_version: str
+    expires_at: datetime
+    token_symbol: str
+    token_decimals: int
+    eip712: BridgeWithdrawEip712Envelope
+
+
+_EVM_ADDRESS_PATTERN = r"^0x[0-9a-fA-F]{40}$"
+_EVM_SIGNATURE_PATTERN = r"^0x[0-9a-fA-F]{130}$"
+_QUOTE_CONFIG_VERSION_PATTERN = r"^bridge-quote-v1:0x[0-9a-f]{64}$"
+
+
+class BridgeWithdrawSubmitRequest(BaseModel):
+    """Submit payload for a user-signed bridge withdrawal.
+
+    All fields except ``signature`` echo what the user signed in the EIP-712
+    ``BridgeWithdraw`` message; ``quote_config_version`` and ``expires_at``
+    bind the request to the authoritative quote config snapshot. Server-side
+    validation runs structural gates before any contract call; on-chain
+    ``verifyBridgeWithdrawSignature`` is the authoritative signature check.
+    """
+
+    user_address: str = Field(..., pattern=_EVM_ADDRESS_PATTERN)
+    to_address: str = Field(..., pattern=_EVM_ADDRESS_PATTERN)
+    dest_chain_id: int = Field(..., gt=0)
+    route_address: str = Field(..., pattern=_EVM_ADDRESS_PATTERN)
+    amount: int = Field(..., gt=0)
+    max_gas_cost: int = Field(..., ge=0)
+    quote_config_version: str = Field(..., pattern=_QUOTE_CONFIG_VERSION_PATTERN)
+    expires_at: AwareDatetime
+    user_nonce: int = Field(..., ge=0)
+    signature: str = Field(..., pattern=_EVM_SIGNATURE_PATTERN)
+
+    @field_validator("amount", "max_gas_cost", "user_nonce", mode="before")
+    def _parse_int(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("user_address", "to_address", "route_address")
+    def _lowercase_address(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+    @field_validator("signature")
+    def _normalise_signature(cls, value: str) -> str:
+        return _normalise_hex(value)

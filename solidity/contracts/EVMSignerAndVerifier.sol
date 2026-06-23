@@ -2,7 +2,7 @@
 /* solhint-disable no-console */
 pragma solidity ^0.8.20;
 
-import {ChainType, TokenInfo, EVMKeypair} from "./Types.sol";
+import {ChainType, TokenInfo, EVMKeypair, UnsupportedTokenType, InvalidAddress, GasPriceNotSet} from "./Types.sol";
 
 import {RLPReader} from "solidity-rlp/contracts/RLPReader.sol";
 import {
@@ -30,7 +30,9 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 
 abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     address public evmAddress;
-    bytes32 private secretKey;
+    /// @dev internal so derived contracts (e.g. `Accounting.resolveBridgeWithdrawal`)
+    ///      can hand the secret to `EIP155Signer.sign` directly. Never exposed externally.
+    bytes32 internal secretKey;
     address public gasTankAddress;
     bytes32 private gasTankSecret;
 
@@ -43,18 +45,19 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     ///      auth on view functions (roflEnsureAuthorizedOrigin is tx-only and doesn't work in eth_call).
     address public roflSignerAddress;
 
-    // Sweep gas limits: deposit address → evmAddress (always an EOA)
-    uint64 public constant gasLimitNativeSweep = 21000;
-    uint64 public constant gasLimitERC20Sweep = 65000;
+    // Sweep gas limits: deposit address → evmAddress (always an EOA).
+    // Native is 25k (not 21k) so Sapphire's ~22.1k confidential-VM transfer
+    // does not revert; mirrors `SWEEP_GAS_LIMIT_NATIVE` in `src/config/chain_config.py`.
+    uint64 internal constant gasLimitNativeSweep = 25000;
+    uint64 internal constant gasLimitERC20Sweep = 65000;
     // Withdrawal gas limits: evmAddress → user-chosen address (may be a contract)
-    uint64 public constant gasLimitNativeWithdraw = 50000;
-    uint64 public constant gasLimitERC20Withdraw = 100000;
+    uint64 internal constant gasLimitNativeWithdraw = 50000;
+    uint64 internal constant gasLimitERC20Withdraw = 100000;
+    // Bridge mint gas limit lives in `BridgeLib.GAS_LIMIT_BRIDGE_MINT`.
 
-    error GasPriceNotSet(uint256 chainId);
     error InvalidGasPrice();
     error InvalidNativeTokenDataLength();
     error InvalidERC20TokenDataLength();
-    error InvalidAddress();
     error UnsupportedChainType();
     error NotAuthorizedROFL();
     error RoflSignerNotSet();
@@ -268,7 +271,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
      * @notice Sign a native token sweep: depositAddress → evmAddress.
      * @dev Derives deposit keypair internally, signs via EIP155Signer.sign().
      *      ROFL broadcasts the returned signedTx on the source chain.
-     *      ROFL supplies amount (typically balance - 21000*gasPrice) from source chain query.
+     *      ROFL supplies amount (typically balance - 25000*gasPrice) from source chain query.
      */
     function generateSweepNativeTransfer(
         address beneficiary,
@@ -326,77 +329,6 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
                 nonce: sourceChainNonce,
                 gasPrice: gasPrice,
                 gasLimit: gasLimitERC20Sweep,
-                to: tokenAddress,
-                value: 0,
-                data: data,
-                chainId: chainId
-            })
-        );
-    }
-
-    /**
-     * @notice Sign a native transfer from a deposit address to an arbitrary destination.
-     * @dev Used by emergency withdraw — caller supplies all source-chain state.
-     */
-    function generateDepositAddressTransfer(
-        address beneficiary,
-        ChainType chainType,
-        uint256 version,
-        uint256 chainId,
-        address toAddress,
-        uint256 amount,
-        uint64 sourceChainNonce,
-        uint256 gasPrice
-    ) internal view returns (bytes memory signedTx) {
-        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
-            beneficiary, chainType, version
-        );
-        signedTx = EIP155Signer.sign(
-            depositAddr,
-            depositSecret,
-            EIP155Signer.EthTx({
-                nonce: sourceChainNonce,
-                gasPrice: gasPrice,
-                gasLimit: gasLimitNativeWithdraw,
-                to: toAddress,
-                value: amount,
-                data: "",
-                chainId: chainId
-            })
-        );
-    }
-
-    /**
-     * @notice Sign an ERC20 transfer from a deposit address to an arbitrary destination.
-     * @dev Used by emergency withdraw for ERC20 tokens — caller supplies all source-chain state.
-     *      Signs token.transfer(toAddress, amount) from the derived deposit keypair.
-     */
-    function generateDepositAddressERC20Transfer(
-        address beneficiary,
-        ChainType chainType,
-        uint256 version,
-        uint256 chainId,
-        address toAddress,
-        address tokenAddress,
-        uint256 amount,
-        uint64 sourceChainNonce,
-        uint256 gasPrice
-    ) internal view returns (bytes memory signedTx) {
-        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
-            beneficiary, chainType, version
-        );
-        bytes memory data = abi.encodeWithSignature(
-            "transfer(address,uint256)",
-            toAddress,
-            amount
-        );
-        signedTx = EIP155Signer.sign(
-            depositAddr,
-            depositSecret,
-            EIP155Signer.EthTx({
-                nonce: sourceChainNonce,
-                gasPrice: gasPrice,
-                gasLimit: gasLimitERC20Withdraw,
                 to: tokenAddress,
                 value: 0,
                 data: data,
@@ -551,6 +483,39 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         address tokenAddress
     ) public pure returns (bytes memory data) {
         return abi.encodePacked(chainId, tokenAddress);
+    }
+
+    /**
+     * @notice Encodes a bridge-asset symbol into the chain-agnostic token-data payload.
+     *
+     * Bridge assets (e.g. ROSE) live across multiple chains under a single canonical
+     * tokenId derived from this payload, so the encoding intentionally carries no
+     * chainId or contract address — only the asset symbol.
+     *
+     * @param symbol The asset symbol (e.g. "ROSE")
+     * @return data UTF-8 bytes of the symbol; pair with TokenType.BridgeAsset to derive
+     *              the canonical bridge-asset tokenId via getTokenId().
+     */
+    function encodeBridgeAssetTokenData(
+        string memory symbol
+    ) public pure returns (bytes memory data) {
+        return bytes(symbol);
+    }
+
+    /**
+     * @notice Decodes a bridge-asset token-data payload back to its symbol.
+     *
+     * @dev Reverts with UnsupportedTokenType when the payload is empty — the only
+     *      malformed shape a variable-length symbol can take.
+     *
+     * @param data The packed metadata bytes produced by encodeBridgeAssetTokenData()
+     * @return symbol The asset symbol
+     */
+    function decodeBridgeAssetTokenData(
+        bytes memory data
+    ) public pure returns (string memory symbol) {
+        if (data.length == 0) revert UnsupportedTokenType();
+        return string(data);
     }
 
     function getEVMNonceAndIncrement(

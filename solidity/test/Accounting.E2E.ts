@@ -74,9 +74,29 @@ function parseUsdt(amount: string): bigint {
   return wholePart + fractionPart;
 }
 
+function amountWord(amount: bigint): string {
+  return ethers.zeroPadValue(ethers.toBeHex(amount), 32);
+}
+
 async function getBlockTimestamp(): Promise<number> {
   const block = await ethers.provider.getBlock('latest');
   return block!.timestamp;
+}
+
+type UpgradeDeployment = {
+  deploymentTransaction?: () => { wait(): Promise<unknown> } | null;
+  deployTransaction?: { wait(): Promise<unknown> };
+};
+
+async function waitForUpgradeTx(contract: UpgradeDeployment): Promise<void> {
+  const deploymentTx =
+    typeof contract.deploymentTransaction === "function"
+      ? contract.deploymentTransaction()
+      : undefined;
+  const tx = deploymentTx ?? contract.deployTransaction;
+  if (tx) {
+    await tx.wait();
+  }
 }
 
 describe('Accounting', function () {
@@ -102,7 +122,7 @@ describe('Accounting', function () {
     accountingUser1 = accounting.connect(user1) as MockAccounting;
     accountingUser2 = accounting.connect(user2) as MockAccounting;
 
-    const hdNodeWallet = await ethers.HDNodeWallet.fromPhrase(
+    const hdNodeWallet = ethers.HDNodeWallet.fromPhrase(
       (config.networks.hardhat.accounts as HardhatNetworkHDAccountsConfig).mnemonic,
     );
 
@@ -1462,8 +1482,10 @@ describe('Upgradability', function () {
     const AccountingV2Factory = await ethers.getContractFactory('MockAccounting');
     const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
-      constructorArgs: [await mockSiweAuth.getAddress()]
+      constructorArgs: [await mockSiweAuth.getAddress()],
+      unsafeAllow: ['constructor', 'state-variable-immutable'],
     }) as unknown as MockAccounting;
+    await waitForUpgradeTx(upgraded);
 
     // Verify state is preserved after upgrade
     const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
@@ -1503,7 +1525,8 @@ describe('Upgradability', function () {
     if ((0x5afd <= network.chainId) && (network.chainId <= 0x5aff)) {
       const upgradeFactory = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
         kind: 'uups',
-        constructorArgs: [await mockSiweAuth.getAddress()]
+        constructorArgs: [await mockSiweAuth.getAddress()],
+        unsafeAllow: ['constructor', 'state-variable-immutable'],
       });
 
       let receipt = await ethers.provider.getTransactionReceipt(upgradeFactory.deployTransaction!.hash);
@@ -1516,7 +1539,8 @@ describe('Upgradability', function () {
       await expect(
         upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
           kind: 'uups',
-          constructorArgs: [await mockSiweAuth.getAddress()]
+          constructorArgs: [await mockSiweAuth.getAddress()],
+          unsafeAllow: ['constructor', 'state-variable-immutable'],
         })
       ).to.be.revertedWithCustomError(accounting, "OwnableUnauthorizedAccount");
     }
@@ -1561,24 +1585,17 @@ describe('Upgradability', function () {
   });
 
   it("Should support V2 upgrade with new state variables and reinitializer", async function () {
-    const deployer = getDeployer();
-    const user = (await ethers.getSigners())[1];
-
-    // Set up initial state
-    const initialBalance = parseUsdt("50");
-    await accounting.setBalance(user.address, TEST_TOKEN.tokenId, initialBalance);
-
-    const balanceBefore = await accounting.getBalance(user.address, TEST_TOKEN.tokenId);
-    expect(balanceBefore).to.equal(initialBalance);
+    const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
 
     // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
     const implementationBefore = await upgrades.erc1967.getImplementationAddress(proxyAddress);
     const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
     const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
-      unsafeAllow: ['missing-initializer'],
+      unsafeAllow: ['missing-initializer', 'constructor', 'state-variable-immutable'],
       constructorArgs: [await mockSiweAuth.getAddress()],
     }) as unknown as MockAccountingV2;
+    await waitForUpgradeTx(upgraded);
 
     // sapphire-paratime#688: upgradeProxy may return before the upgrade tx lands.
     await waitForImplementationChange(proxyAddress, implementationBefore);
@@ -1590,8 +1607,9 @@ describe('Upgradability', function () {
     expect(await upgraded.newStateVar()).to.equal(42);
 
     // Verify existing state is preserved
-    const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
-    expect(balanceAfter).to.equal(initialBalance, "Balance should survive V2 upgrade");
+    const tokenInfoAfter = await upgraded.tokens(TEST_TOKEN.tokenId);
+    expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should survive V2 upgrade");
+    expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should survive V2 upgrade");
 
     // Reinitializer should not be callable again
     await expect(

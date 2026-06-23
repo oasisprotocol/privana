@@ -60,6 +60,9 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["test"]
+markers = [
+    "e2e: live integration test requiring sapphire-localnet + appd + anvil (self-skips otherwise)",
+]
 
 [tool.mypy]
 python_version = "3.11"

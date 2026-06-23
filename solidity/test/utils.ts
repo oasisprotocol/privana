@@ -4,6 +4,7 @@ import { HttpNetworkConfig } from "hardhat/types/config";
 import { config, ethers, network, upgrades } from 'hardhat';
 import { JsonRpcProvider } from 'ethers';
 import { MockAccounting } from "../typechain-types";
+import { attachAccounting } from "./util/links";
 
 export const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
 
@@ -88,7 +89,7 @@ export async function waitForImplementationChange(
  * Helper to deploy the mock accounting contract with an unencrypted transaction and with workarounds for flaky UUPS wrapper errors.
  * @param mockSiweAuthAddress SIWE auth contract to initialize Accounting with
  */
-export async function deployMockAccounting(mockSiweAuthAddress: string) {
+export async function deployMockAccounting(mockSiweAuthAddress: string): Promise<MockAccounting> {
 	const deployer = getDeployer();
 	const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
 	let accounting: MockAccounting;
@@ -100,16 +101,20 @@ export async function deployMockAccounting(mockSiweAuthAddress: string) {
 			accounting = await upgrades.deployProxy(
 				AccountingFactory,
 				[MOCK_ROFL_APP_ID, deployer.address],
-				{ kind: 'uups', initializer: 'initialize', constructorArgs: [mockSiweAuthAddress] }
+				{
+					kind: 'uups',
+					initializer: 'initialize',
+					constructorArgs: [mockSiweAuthAddress],
+					unsafeAllow: ['constructor', 'state-variable-immutable'],
+				}
 			) as unknown as MockAccounting;
 			await accounting.waitForDeployment();
-			accounting = (await ethers.getContractFactory('MockAccounting')).attach(await accounting.getAddress()) as unknown as MockAccounting;
-			//accounting = accounting.connect((await getSigners())[0]); // Use wrapped signer for sending txes.
 			deploymentSucceeded = true;
 		} catch (error) {
 			console.log('Deployment failed, retrying...', error);
 			await new Promise(resolve => setTimeout(resolve, 1000));
 		}
 	}
-	return accounting!;
+	const proxyAddr = await accounting!.getAddress();
+	return (await attachAccounting(proxyAddr, deployer)) as unknown as MockAccounting;
 }

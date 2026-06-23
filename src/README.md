@@ -161,6 +161,38 @@ Idempotent: subsequent starts no-op when the address is already in sync. The pub
 
 Key file: `services/rofl_signer_bootstrap.py`.
 
+### Bridge Route Reconciliation
+
+`Accounting.setRoflBridge(uint256,address)` is `onlyROFL` — the ROFL TEE is the only writer. The `ROFL_BRIDGE_ADDRESS` ROFL secret is the single source of truth for the registered `ROFLBridge` address on every destination chain. There is no operator command for rotation; the secret is updated and the container redeployed (`rofl.yaml` only stores the encrypted blob and is not hand-edited).
+
+A background reconciler (`services/bridge_route_reconciler.run_loop`, started from `main.py` alongside the custody executor's chain loop) iterates `destination_chain_ids(settings)` and, for each destination chain, compares env to `Accounting.roflBridgeAddress(destChainId)` every `BRIDGE_ROUTE_RECONCILE_INTERVAL` seconds (default 30) and takes one of three actions:
+
+| On-chain vs env | Action |
+|---|---|
+| Equal | No-op. |
+| On-chain is `0x0…0` | Write env (first-time bootstrap). |
+| Different non-zero values | Run the five-source guard. Write env only when every inbound xROSE flow has reached `BURNED` and credited. Otherwise log unresolved deposit IDs and skip this tick. |
+
+The guard inherits the contradiction set from `sweep_engine.reconstruct_xrose_deposit_state` and consults:
+
+1. local sweep records for `xrose_bridge_in` (`has_any_active_xrose_bridge_in_flow`);
+2. local custody executor queue items for pending burns (`has_any_pending_xrose_burn`);
+3. `Accounting.BridgeBurnReserved` events;
+4. `ROFLBridge.Burned` events and `ROFLBridge.burnedDepositIds(id)` view;
+5. `Accounting.processedDeposits(id)` view.
+
+Missing local-state directories, malformed records, wrong-chain records, RPC faults on the destination side, multiple `Burned` events for one deposit, and reservation/burn amount mismatches all fail closed for that tick. There is no `--force` override; manual recovery means: clear the blocking local or on-chain state, after which the next reconcile tick proceeds.
+
+Startup behavior: `bridge_startup_check.verify_bridge_runtime` no longer aborts on a route mismatch. `on-chain == 0` and `on-chain != env != 0` both log and proceed; the reconciler handles the write on its first tick.
+
+Operator rotation procedure:
+
+1. Update the secret: `oasis rofl secrets set ROFL_BRIDGE_ADDRESS <new-bridge-address>` (or `oasis rofl secrets import` from a file).
+2. Redeploy: `oasis rofl deploy`.
+3. Watch logs. While inbound xROSE deposits are in flight against the old route, the reconciler logs "rotation blocked: \<deposit ids\>" each tick. Once those drain, the next tick writes the new route.
+
+Key files: `services/bridge_route_reconciler.py`, `services/bridge_startup_check.py`.
+
 ## State & Persistence
 
 | What | Where | Lifecycle |
@@ -168,7 +200,7 @@ Key file: `services/rofl_signer_bootstrap.py`.
 | Sweep records | `/data/sweep-engine/sweep_<addr>_<chain>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
 | JWT signing key | Derived in-memory from ROFL TEE seed at startup | Re-derived on each start; deterministic per ROFL app. |
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
-| Withdrawal high-water marks | In-memory only (`WithdrawalProcessor._chain_high_water_mark`) | Rebuilt on restart via the catch-up pass. |
+| Withdrawal dedup index | Derived per-poll from the custody executor's on-disk records (`CustodyTxExecutor.get_records_for_chain`) | No standalone state — re-derived every poll, so restarts pick up any in-flight indices from disk automatically. |
 
 ## Configuration
 
@@ -195,6 +227,9 @@ Environment variables: see `.env.example`. Notable ones:
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
 - `DISABLE_ROFL_KEYS` (local dev only) — skip AuthToken/JWT key sync at startup
 - `SWEEP_STATE_DIR` (default `/data/sweep-engine`) — sweep state directory
+
+History is read directly from the Accounting proxy via `getHistory`; there is
+no separate history contract or address to configure.
 
 ## Running Locally
 

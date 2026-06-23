@@ -6,7 +6,8 @@ A cross-chain accounting system on Oasis Sapphire. Confidential balance manageme
 
 The Accounting module consists of these main components:
 
-- **Accounting.sol** — Core accounting contract (UUPS upgradeable). Manages balances, deposits, locks, transfers, withdrawals, and emergency withdraws.
+- **Accounting.sol** — Core accounting contract (UUPS upgradeable). Manages balances, deposits, locks, transfers, withdrawals, emergency withdraws, per-user history, and the ROSE bridge.
+- **BridgeLib.sol** — internal library (inlined into `Accounting`) holding the bridge-withdrawal validation and signing helpers.
 - **EVMSignerAndVerifier.sol** — Sapphire-confidential EVM keypair management; signs sweep, gas-funding, and withdrawal transactions for source chains using the `EIP155Signer` precompile.
 - **EIP712SignatureVerifier.sol** — Verifies user-authored EIP-712 signatures for transfer / lock / withdrawal operations.
 - **auth/AccountingSiweAuth.sol** — SIWE-based authentication for confidential Sapphire view calls.
@@ -126,7 +127,8 @@ bun run coverage
 
 ## Deployment
 
-The `deploy` task provisions both the SIWE auth helper and the Accounting proxy/implementation in one step.
+The `deploy` task provisions the SIWE auth helper and the Accounting
+proxy/implementation in a single deploy task.
 
 ### Deploy to Sapphire Localnet
 
@@ -140,7 +142,8 @@ npx hardhat deploy --network sapphire-localnet --roflappid <rofl1…>
 npx hardhat deploy --network sapphire-testnet --roflappid <rofl1…>
 ```
 
-Outputs: SIWE-auth address, proxy address, implementation address, EVM signing address, owner.
+Outputs: SIWE-auth address, BridgeLib address, Accounting proxy/implementation
+address, EVM signing address, owner.
 
 ### Standalone subtasks
 
@@ -179,6 +182,10 @@ If the task cannot resolve `siweAuth()` from the existing proxy, pass it explici
 ```shell
 npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --siweauth <siwe-auth-address>
 ```
+
+`getHistory` is a resident `Accounting` view — history is stored and read directly in the Accounting proxy's
+own storage (the append paths are internal-only, so there is no external surface to forge
+entries).
 
 #### 3. Update the README
 
@@ -305,6 +312,7 @@ Run `npx hardhat <task> --help` for parameter details.
 | AccountingSiweAuth | TBD |
 | Accounting (Proxy) | TBD |
 | Accounting (Implementation) | TBD |
+| BridgeLib | TBD |
 
 ## Security Considerations
 
@@ -312,6 +320,7 @@ Run `npx hardhat <task> --help` for parameter details.
 - **Confidential signing:** Sapphire's `EIP155Signer` + `SIGN_DIGEST` precompile keeps the contract-held EVM private key inside the secure environment; signed transactions are returned only to authorized callers
 - **EIP-712:** All user-authored balance operations require typed-data signatures, validated by `EIP712SignatureVerifier`
 - **Signed view-call auth:** `onlyROFLQuery` matches `msg.sender` against the ROFL-published `roflSignerAddress`. `roflEnsureAuthorizedOrigin` is unavailable inside `eth_call`, so signed-query reads use this alternative gate
+- **History:** Accounting stores and reads per-user history in its own storage via resident, internal-only append paths — there is no external history-append selector, so entries cannot be forged.
 - **1-block delays** on `resolveWithdrawal` and `executeEmergencyWithdraw` mitigate same-block read-then-act simulation attacks
 
 ## Development
@@ -321,6 +330,7 @@ Run `npx hardhat <task> --help` for parameter details.
 ```
 contracts/
 ├── Accounting.sol              # Main accounting contract (UUPS proxy)
+├── BridgeLib.sol               # Bridge validation/signing library (inlined into Accounting)
 ├── EVMSignerAndVerifier.sol    # EVM keypairs + tx signing
 ├── EIP712SignatureVerifier.sol # User auth via EIP-712
 ├── Types.sol                   # Shared structs and enums

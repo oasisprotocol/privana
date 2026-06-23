@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import os
 from dataclasses import dataclass
 from typing import Final
 
@@ -123,7 +124,11 @@ class RoflAppdClient:
         """
         if cls._instance is None:
             cls._instance = super(RoflAppdClient, cls).__new__(cls)
-            cls._instance._client = AsyncRoflClient()
+            # Default ("") uses the appd unix socket (/run/rofl-appd.sock) — the
+            # in-TEE production path. ROFL_APPD_URL overrides it with a TCP
+            # endpoint (e.g. http://localhost:8549) so the client can reach the
+            # sapphire-localnet bundled appd from outside the container.
+            cls._instance._client = AsyncRoflClient(os.getenv("ROFL_APPD_URL", ""))
         return cls._instance
 
     async def get_keypair(self, key_id: str = ROFL_QUERY_SIGNER_KEY):

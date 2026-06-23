@@ -23,21 +23,25 @@ ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
 CHAIN_NAMES: Dict[int, str] = {
     84532: "Base Sepolia",
     11155111: "Ethereum Sepolia",
+    23295: "Sapphire Testnet",
 }
 
 NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     84532: "ETH",
     11155111: "ETH",
+    23295: "ROSE",
 }
 
 NATIVE_TOKEN_NAMES: Dict[int, str] = {
     84532: "Ether",
     11155111: "Ether",
+    23295: "ROSE",
 }
 
 NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
     84532: 18,
     11155111: 18,
+    23295: 18,
 }
 
 
@@ -68,6 +72,10 @@ def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
     return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
 
 
+def _get_str(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
 def _get_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -81,17 +89,24 @@ def _get_bool(name: str, default: bool) -> bool:
     raise ValueError(f"Environment variable {name} must be a boolean")
 
 
-def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
+def _build_chain_rpc_urls(
+    alchemy_api_key: Optional[str],
+    sapphire_chain_id: int,
+    sapphire_rpc_url: str,
+) -> Dict[int, str]:
+    rpc_urls: Dict[int, str] = {}
+
     if not alchemy_api_key or alchemy_api_key == "your-alchemy-api-key-here":
         logging.warning(
             "ALCHEMY_API_KEY not configured. Deposit verification will fail. "
             "Get an API key from https://dashboard.alchemy.com/"
         )
-        return {}
+    else:
+        for chain_id, subdomain in ALCHEMY_CHAIN_SUBDOMAINS.items():
+            rpc_urls[chain_id] = f"https://{subdomain}.g.alchemy.com/v2/{alchemy_api_key}"
 
-    rpc_urls = {}
-    for chain_id, subdomain in ALCHEMY_CHAIN_SUBDOMAINS.items():
-        rpc_urls[chain_id] = f"https://{subdomain}.g.alchemy.com/v2/{alchemy_api_key}"
+    if sapphire_rpc_url:
+        rpc_urls[sapphire_chain_id] = sapphire_rpc_url
 
     return rpc_urls
 
@@ -102,7 +117,9 @@ def load_settings(refresh: bool = False) -> Settings:
     global _settings
     if _settings is None or refresh:
         alchemy_api_key = os.getenv("ALCHEMY_API_KEY")
-        chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key)
+        sapphire_chain_id = _get_int("SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id)
+        sapphire_rpc_url = os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url)
+        chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key, sapphire_chain_id, sapphire_rpc_url)
 
         _settings = Settings(
             api_host=os.getenv("API_HOST", _defaults.api_host),
@@ -113,8 +130,8 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_contract_address=os.getenv(
                 "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
             ),
-            sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID", _defaults.sapphire_chain_id),
-            sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
+            sapphire_chain_id=sapphire_chain_id,
+            sapphire_rpc_url=sapphire_rpc_url,
             accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT", _defaults.accounting_gas_limit),
             chain_rpc_urls=chain_rpc_urls,
             withdrawal_poll_interval=_get_int(
@@ -174,6 +191,18 @@ def load_settings(refresh: bool = False) -> Settings:
             moonpay_webhook_tolerance_seconds=_get_int(
                 "MOONPAY_WEBHOOK_TOLERANCE_SECONDS",
                 _defaults.moonpay_webhook_tolerance_seconds,
+            ),
+            rofl_bridge_address=_get_str("ROFL_BRIDGE_ADDRESS", _defaults.rofl_bridge_address),
+            xrose_address=_get_str("XROSE_ADDRESS", _defaults.xrose_address),
+            bridge_mint_limit_wei=_get_int(
+                "BRIDGE_MINT_LIMIT_WEI", _defaults.bridge_mint_limit_wei
+            ),
+            bridge_burn_limit_wei=_get_int(
+                "BRIDGE_BURN_LIMIT_WEI", _defaults.bridge_burn_limit_wei
+            ),
+            bridge_route_reconcile_interval=_get_int(
+                "BRIDGE_ROUTE_RECONCILE_INTERVAL",
+                _defaults.bridge_route_reconcile_interval,
             ),
         )
     return _settings

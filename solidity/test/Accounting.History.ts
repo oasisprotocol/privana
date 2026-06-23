@@ -182,12 +182,17 @@ describe('Accounting history', function () {
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {
+    // The Accounting bytecode is large enough that automatic gas estimation
+    // over-predicts this 105-deposit batch and trips the Sapphire block-gas cap on
+    // the in-process network, even though actual usage (~15M) fits. Pin the limit so
+    // the batch is sent against its real cost rather than the inflated estimate.
     const tx = await accounting.mockCreditDepositNTimes(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       1,
       depositKey('deposit-'),
-      105
+      105,
+      { gasLimit: 16_777_215 }
     );
     await tx.wait();
 

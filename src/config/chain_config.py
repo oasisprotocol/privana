@@ -54,12 +54,22 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         min_deposit_erc20_wei=50_000_000,  # ERC-20 base-unit floor (token decimals vary)
         gas_funding_amount_wei=2_000_000_000_000_000,  # 0.002 ETH (~65k gas * 30 gwei)
     ),
+    23295: ChainConfig(
+        chain_id=23295,
+        finality_depth=1,  # Sapphire instant finality (testnet smoke).
+        min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
+        min_deposit_erc20_wei=10_000_000_000_000_000,  # N/A on Sapphire — mirrors native floor
+        gas_funding_amount_wei=5_000_000_000_000_000,  # 0.005 ROSE
+        l2_type=L2Type.NONE,
+    ),
 }
 
 DEFAULT_FINALITY_DEPTH = 32
 
-# Gas limits for sweep transactions (chain-independent)
-SWEEP_GAS_LIMIT_NATIVE = 21_000
+# Sweep gas limits (chain-independent). Native is 25k (not 21k) so Sapphire's
+# ~22.1k confidential-VM transfer does not revert; mirrors `gasLimitNativeSweep`
+# in `solidity/contracts/EVMSignerAndVerifier.sol`.
+SWEEP_GAS_LIMIT_NATIVE = 25_000
 SWEEP_GAS_LIMIT_ERC20 = 65_000
 GAS_FUNDING_GAS_LIMIT = 21_000
 

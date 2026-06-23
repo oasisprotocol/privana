@@ -1,0 +1,62 @@
+services:
+  accounting-module:
+    build: .
+    image: "ghcr.io/rube-de/flexvaults:v31"
+    platform: linux/amd64
+    environment:
+      - API_HOST=${API_HOST:-0.0.0.0}
+      - API_PORT=${API_PORT:-8000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+      - ACCOUNTING_CONTRACT_ADDRESS=${ACCOUNTING_CONTRACT_ADDRESS}
+      - SAPPHIRE_CHAIN_ID=${SAPPHIRE_CHAIN_ID:-23295}
+      - SAPPHIRE_RPC_URL=${SAPPHIRE_RPC_URL:-https://testnet.sapphire.oasis.io}
+      - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
+      - ACCOUNTING_GAS_LIMIT=${ACCOUNTING_GAS_LIMIT:-500000}
+      # Withdrawal processor configuration
+      - WITHDRAWAL_POLL_INTERVAL=${WITHDRAWAL_POLL_INTERVAL:-12}
+      - WITHDRAWAL_RESOLUTION_TIMEOUT=${WITHDRAWAL_RESOLUTION_TIMEOUT:-60}
+      - MIN_WITHDRAWAL_GAS_BALANCE=${MIN_WITHDRAWAL_GAS_BALANCE:-10000000000000}
+      # Bridge
+      - BRIDGE_ROUTE_RECONCILE_INTERVAL=${BRIDGE_ROUTE_RECONCILE_INTERVAL:-30}
+      - ROFL_BRIDGE_ADDRESS=${ROFL_BRIDGE_ADDRESS}
+      - XROSE_ADDRESS=${XROSE_ADDRESS}
+      - BRIDGE_MINT_LIMIT_WEI=${BRIDGE_MINT_LIMIT_WEI}
+      - BRIDGE_BURN_LIMIT_WEI=${BRIDGE_BURN_LIMIT_WEI}
+      # JWT Authentication configuration
+      - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-12}
+      - JWT_REFRESH_EXPIRY_DAYS=${JWT_REFRESH_EXPIRY_DAYS:-7}
+      - JWT_ISSUER=${JWT_ISSUER:-flexvaults}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-flexvaults}
+      # SIWE configuration
+      - SIWE_DOMAINS=${SIWE_DOMAINS}
+      # Auth token storage configuration
+      - AUTH_TOKEN_STORAGE_DIR=${AUTH_TOKEN_STORAGE_DIR:-.auth_tokens}
+      - SIWE_NONCE_EXPIRY_SECONDS=${SIWE_NONCE_EXPIRY_SECONDS:-300}
+      - AUTH_TOKEN_VALIDITY_SECONDS=${AUTH_TOKEN_VALIDITY_SECONDS:-86400}
+      - AUTH_TOKEN_KEY_ID=${AUTH_TOKEN_KEY_ID:-}
+      # Auth client registry for redirect/popup auth flows
+      - AUTH_CLIENTS=${AUTH_CLIENTS:-[]}
+      # Sweep engine state
+      - SWEEP_STATE_DIR=/data/sweep-engine
+      # MoonPay on-ramp configuration
+      - MOONPAY_API_KEY=${MOONPAY_API_KEY:-}
+      - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY:-}
+      - MOONPAY_WEBHOOK_SECRET_KEY=${MOONPAY_WEBHOOK_SECRET_KEY:-}
+      - MOONPAY_ALLOWED_HOSTS=${MOONPAY_ALLOWED_HOSTS:-}
+      - MOONPAY_ALLOWED_CURRENCY_CODES=${MOONPAY_ALLOWED_CURRENCY_CODES:-}
+      - MOONPAY_WEBHOOK_TOLERANCE_SECONDS=${MOONPAY_WEBHOOK_TOLERANCE_SECONDS:-300}
+      # Custody-tx executor state
+      - CUSTODY_TX_STATE_DIR=${CUSTODY_TX_STATE_DIR:-/data/custody-tx-executor}
+    volumes:
+      - /run/rofl-appd.sock:/run/rofl-appd.sock
+      - sweep-engine-data:/data/sweep-engine
+      - custody-tx-executor-data:/data/custody-tx-executor
+    ports:
+      - "8000:8000"
+    restart: on-failure
+
+volumes:
+  sweep-engine-data:
+  custody-tx-executor-data:

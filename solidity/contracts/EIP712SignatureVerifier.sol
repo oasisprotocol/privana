@@ -90,6 +90,14 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             "WithdrawFromLock(address userAddress,address toAddress,uint256 lockId,uint256 amount,uint256 nonce)"
         );
 
+    /// @notice EIP-712 type hash for bridge withdrawals (BridgeAsset → external chain).
+    ///         Shares `withdrawalNonces[user]` with WITHDRAW_TYPEHASH; structurally
+    ///         distinct so the two cannot be replayed against each other.
+    bytes32 private constant BRIDGE_WITHDRAW_TYPEHASH =
+        keccak256(
+            "BridgeWithdraw(address userAddress,address toAddress,uint256 destChainId,address routeAddress,uint256 amount,uint256 maxGasCost,uint256 nonce)"
+        );
+
     /**
      * @notice Verifies a user's EIP-712 signature for withdrawing funds.
      * @dev Internal-only verifier; consumes the recovered signer's nonce so callers
@@ -119,6 +127,58 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         if (nonce != withdrawalNonces[userAddress]) {
             revert InvalidNonce();
         }
+        withdrawalNonces[userAddress]++;
+    }
+
+    /**
+     * @notice Verifies a user's EIP-712 signature for a bridge withdrawal.
+     * @dev Internal to prevent front-running attacks where an attacker could
+     *      call this directly to consume the nonce before requestBridgeWithdrawal.
+     *      Shares `withdrawalNonces[userAddress]` with verifyWithdrawSignature so a
+     *      single auth slot covers both withdrawal types, so the two withdrawal types
+     *      cannot be replayed against each other.
+     *
+     * @param userAddress  The user authorising the bridge withdrawal.
+     * @param toAddress    Destination address on the destination chain.
+     * @param destChainId  Destination chain ID.
+     * @param routeAddress Bridge route contract on Sapphire (validated by caller).
+     * @param amount       Amount to bridge, in token base units.
+     * @param maxGasCost   Cap on total gas cost the user is willing to pay.
+     * @param userNonce    Replay nonce; must equal withdrawalNonces[userAddress].
+     * @param signature    EIP-712 signature over BRIDGE_WITHDRAW_TYPEHASH.
+     */
+    function verifyBridgeWithdrawSignature(
+        address userAddress,
+        address toAddress,
+        uint256 destChainId,
+        address routeAddress,
+        uint256 amount,
+        uint256 maxGasCost,
+        uint256 userNonce,
+        bytes calldata signature
+    ) internal {
+        if (userNonce != withdrawalNonces[userAddress]) {
+            revert InvalidNonce();
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                BRIDGE_WITHDRAW_TYPEHASH,
+                userAddress,
+                toAddress,
+                destChainId,
+                routeAddress,
+                amount,
+                maxGasCost,
+                userNonce
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != userAddress) {
+            revert InvalidSignature();
+        }
+
         withdrawalNonces[userAddress]++;
     }
 

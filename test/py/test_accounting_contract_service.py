@@ -6,11 +6,24 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from hexbytes import HexBytes
 from web3 import Web3
+from web3.constants import ADDRESS_ZERO
 
 from src.clients.rofl import RoflSubmissionResult
+from src.config.tokens import (
+    _reset_rose_token_id_cache,
+    get_rose_token_id,
+)
 from src.models.accounting import HistoryKind
 from src.models.private_read import PrivateReadAuth
-from src.services.accounting_contract import AccountingContractService
+from src.services.accounting_contract import (
+    AccountingContractService,
+    TokenContext,
+    _decode_bridge_tx_identifier,
+)
+from src.services.bridge_startup_check import (
+    BridgeStartupCheckError,
+    verify_bridge_runtime,
+)
 
 
 def _make_service_with_reader(reader: MagicMock) -> AccountingContractService:
@@ -536,6 +549,62 @@ async def test_set_auth_token_enc_key_rejects_wrong_key_length() -> None:
         await service.set_auth_token_enc_key(b"\x11" * 31)
 
 
+@pytest.mark.asyncio
+async def test_request_bridge_withdrawal_encodes_correct_args() -> None:
+    user = "0x1111111111111111111111111111111111111111"
+    to = "0x2222222222222222222222222222222222222222"
+    route = "0x3333333333333333333333333333333333333333"
+    dest_chain_id = 84532
+    amount = 10**18
+    max_gas_cost = 0
+    user_nonce = 7
+    signature_hex = "0x" + "ab" * 65
+
+    contract = MagicMock()
+    encoder = MagicMock()
+    encoder._encode_transaction_data.return_value = b"\xca\xfe\xba\xbe"
+    contract.functions.requestBridgeWithdrawal.return_value = encoder
+
+    rofl_client = MagicMock()
+    rofl_client.submit_tx = AsyncMock(
+        return_value=RoflSubmissionResult(submission_id="sub-bridge", ok_payload=None)
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract = contract
+    service.contract_address = "0x" + "11" * 20
+    service.gas_limit = 500_000
+    service.rofl_client = rofl_client
+
+    result = await service.request_bridge_withdrawal(
+        {
+            "user_address": user,
+            "to_address": to,
+            "dest_chain_id": dest_chain_id,
+            "route_address": route,
+            "amount": amount,
+            "max_gas_cost": max_gas_cost,
+            "user_nonce": user_nonce,
+            "signature": signature_hex,
+        }
+    )
+
+    contract.functions.requestBridgeWithdrawal.assert_called_once_with(
+        Web3.to_checksum_address(user),
+        Web3.to_checksum_address(to),
+        dest_chain_id,
+        Web3.to_checksum_address(route),
+        amount,
+        max_gas_cost,
+        user_nonce,
+        HexBytes(signature_hex),
+    )
+    rofl_client.submit_tx.assert_awaited_once()
+    assert result.submission_id == "sub-bridge"
+    assert f"destChainId={dest_chain_id}" in (result.detail or "")
+    assert "routeAddress=" in (result.detail or "")
+
+
 def _make_service_with_confidential_reader(contract: MagicMock) -> AccountingContractService:
     service = AccountingContractService.__new__(AccountingContractService)
     service._get_confidential_reader_contract = AsyncMock(return_value=contract)
@@ -609,3 +678,479 @@ async def test_generate_gas_funding_tx_calls_view_function() -> None:
     contract.functions.generateGasFundingTx.assert_called_once_with(
         Web3.to_checksum_address(to_addr), 84532, 10_000, 42, 1_000_000_000
     )
+
+
+# --- get_rose_token_id helper -------------------------------------------------
+
+_ROSE_TOKEN_ID_HEX = "ca91975d6c6810eb4077546d4fbdb49fa231f351cddfc915862f7c0dad81a7aa"
+
+
+@pytest.fixture
+def _clear_rose_token_id_cache():
+    _reset_rose_token_id_cache()
+    yield
+    _reset_rose_token_id_cache()
+
+
+@pytest.mark.asyncio
+async def test_rose_token_id_fetches_from_contract(_clear_rose_token_id_cache) -> None:
+    token_id = bytes.fromhex(_ROSE_TOKEN_ID_HEX)
+    reader = MagicMock()
+    reader.functions.ROSE_TOKEN_ID.return_value.call = AsyncMock(return_value=token_id)
+    service = _make_service_with_reader(reader)
+
+    assert await get_rose_token_id(service) == token_id
+
+
+@pytest.mark.asyncio
+async def test_rose_token_id_caches_after_first_call(_clear_rose_token_id_cache) -> None:
+    token_id = bytes.fromhex(_ROSE_TOKEN_ID_HEX)
+    reader = MagicMock()
+    reader.functions.ROSE_TOKEN_ID.return_value.call = AsyncMock(return_value=token_id)
+    service = _make_service_with_reader(reader)
+
+    first = await get_rose_token_id(service)
+    second = await get_rose_token_id(service)
+    third = await get_rose_token_id(service)
+
+    assert first == second == third == token_id
+    reader.functions.ROSE_TOKEN_ID.return_value.call.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rose_token_id_reset_clears_cache(_clear_rose_token_id_cache) -> None:
+    token_id = bytes.fromhex(_ROSE_TOKEN_ID_HEX)
+    reader = MagicMock()
+    reader.functions.ROSE_TOKEN_ID.return_value.call = AsyncMock(return_value=token_id)
+    service = _make_service_with_reader(reader)
+
+    await get_rose_token_id(service)
+    _reset_rose_token_id_cache()
+    await get_rose_token_id(service)
+
+    assert reader.functions.ROSE_TOKEN_ID.return_value.call.await_count == 2
+
+
+# --- _decode_bridge_tx_identifier + get_all_pending_withdrawals BridgeAsset ---
+
+
+_ROFL_BRIDGE_TEST_ADDR = "0x" + "bb" * 20
+_ROSE_TOKEN_ID = bytes.fromhex("ca91975d6c6810eb4077546d4fbdb49fa231f351cddfc915862f7c0dad81a7aa")
+
+
+def _encode_tx_identifier(
+    dest_chain_id: int, dest_tx_nonce: int, route_address: str, max_gas_cost: int
+) -> bytes:
+    from eth_abi import encode as abi_encode
+
+    return abi_encode(
+        ["uint256", "uint64", "address", "uint256"],
+        [dest_chain_id, dest_tx_nonce, route_address, max_gas_cost],
+    )
+
+
+def test_decode_bridge_tx_identifier_base_route() -> None:
+    tx_id = _encode_tx_identifier(84532, 7, _ROFL_BRIDGE_TEST_ADDR, 0)
+
+    dest_chain_id, dest_tx_nonce, route, max_gas_cost = _decode_bridge_tx_identifier(tx_id)
+
+    assert dest_chain_id == 84532
+    assert dest_tx_nonce == 7
+    assert route == Web3.to_checksum_address(_ROFL_BRIDGE_TEST_ADDR)
+    assert max_gas_cost == 0
+
+
+def test_decode_bridge_tx_identifier_sapphire_release() -> None:
+    sapphire_chain = 23295
+    reserve = 10_000_000_000_000_000  # 0.01 ROSE in wei
+    tx_id = _encode_tx_identifier(sapphire_chain, 42, ADDRESS_ZERO, reserve)
+
+    dest_chain_id, dest_tx_nonce, route, max_gas_cost = _decode_bridge_tx_identifier(tx_id)
+
+    assert dest_chain_id == sapphire_chain
+    assert dest_tx_nonce == 42
+    assert route == Web3.to_checksum_address(ADDRESS_ZERO)
+    assert max_gas_cost == reserve
+
+
+@pytest.mark.asyncio
+async def test_get_all_pending_withdrawals_decodes_bridge_record() -> None:
+    """End-to-end: BridgeAsset record carries decoded chain_id from txIdentifier."""
+    user = "0x1234567890123456789012345678901234567890"
+    to_address = "0x9876543210987654321098765432109876543210"
+    tx_id = _encode_tx_identifier(84532, 11, _ROFL_BRIDGE_TEST_ADDR, 0)
+
+    reader = MagicMock()
+    reader.functions.withdrawalCount.return_value.call = AsyncMock(return_value=1)
+    reader.functions.withdrawals.return_value.call = AsyncMock(
+        return_value=(
+            user,
+            to_address,
+            500,
+            42,
+            _ROSE_TOKEN_ID,
+            False,
+            tx_id,
+        )
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract_reader = reader
+    service.reader_w3 = SimpleNamespace(
+        eth=SimpleNamespace(block_number=AsyncMock(return_value=100)())
+    )
+    service._get_reader_contract = MagicMock(return_value=reader)
+    service._get_token_context = AsyncMock(
+        return_value=TokenContext(
+            chain_id=None,
+            token_address=None,
+            is_native=False,
+            is_bridge_asset=True,
+        )
+    )
+
+    parsed = await service.get_all_pending_withdrawals()
+
+    assert len(parsed["pending"]) == 1
+    record = parsed["pending"][0]
+    assert record["chain_id"] == 84532
+    assert record["dest_tx_nonce"] == 11
+    assert record["route_address"] == Web3.to_checksum_address(_ROFL_BRIDGE_TEST_ADDR)
+    assert record["max_gas_cost"] == 0
+    assert record["is_bridge_asset"] is True
+    # Cross-layer naming: bridge records never expose a generic "nonce" key.
+    assert "nonce" not in record
+
+
+@pytest.mark.asyncio
+async def test_get_all_pending_withdrawals_non_bridge_unaffected() -> None:
+    """Non-bridge records keep the legacy shape with chain_id from TokenContext."""
+    user = "0x1234567890123456789012345678901234567890"
+    to_address = "0x9876543210987654321098765432109876543210"
+    token_id = bytes.fromhex("11" * 32)
+
+    reader = MagicMock()
+    reader.functions.withdrawalCount.return_value.call = AsyncMock(return_value=1)
+    reader.functions.withdrawals.return_value.call = AsyncMock(
+        return_value=(
+            user,
+            to_address,
+            500,
+            42,
+            token_id,
+            False,
+            b"",
+        )
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract_reader = reader
+    service.reader_w3 = SimpleNamespace(
+        eth=SimpleNamespace(block_number=AsyncMock(return_value=100)())
+    )
+    service._get_reader_contract = MagicMock(return_value=reader)
+    service._get_token_context = AsyncMock(
+        return_value=TokenContext(
+            chain_id=84532,
+            token_address=None,
+            is_native=True,
+            is_bridge_asset=False,
+        )
+    )
+
+    parsed = await service.get_all_pending_withdrawals()
+
+    assert len(parsed["pending"]) == 1
+    record = parsed["pending"][0]
+    assert record["chain_id"] == 84532
+    assert "dest_tx_nonce" not in record
+    assert "route_address" not in record
+    assert "is_bridge_asset" not in record
+
+
+# --- _fetch_token_context BridgeAsset support ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_token_context_bridge_asset_returns_marker() -> None:
+    token_id = HexBytes("0xca91975d6c6810eb4077546d4fbdb49fa231f351cddfc915862f7c0dad81a7aa")
+    reader = MagicMock()
+    reader.functions.tokens.return_value.call = AsyncMock(
+        return_value=(2, b"ROSE"),
+    )
+    service = _make_service_with_reader(reader)
+
+    context = await service._fetch_token_context(token_id)
+
+    assert context.is_bridge_asset is True
+    assert context.chain_id is None
+    assert context.token_address is None
+    assert context.is_native is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_token_context_native_evm_unchanged() -> None:
+    token_id = HexBytes("0x" + "11" * 32)
+    chain_id = 84532
+    data = chain_id.to_bytes(32, "big")
+    reader = MagicMock()
+    reader.functions.tokens.return_value.call = AsyncMock(return_value=(0, data))
+    service = _make_service_with_reader(reader)
+
+    context = await service._fetch_token_context(token_id)
+
+    assert context.is_bridge_asset is False
+    assert context.is_native is True
+    assert context.chain_id == chain_id
+    assert context.token_address is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_token_context_erc20_unchanged() -> None:
+    token_id = HexBytes("0x" + "22" * 32)
+    chain_id = 84532
+    erc20 = bytes.fromhex("abcdef0123456789abcdef0123456789abcdef01")
+    data = chain_id.to_bytes(32, "big") + erc20
+    reader = MagicMock()
+    reader.functions.tokens.return_value.call = AsyncMock(return_value=(1, data))
+    service = _make_service_with_reader(reader)
+
+    context = await service._fetch_token_context(token_id)
+
+    assert context.is_bridge_asset is False
+    assert context.is_native is False
+    assert context.chain_id == chain_id
+    assert context.token_address is not None
+    assert context.token_address.lower() == "0x" + erc20.hex().lower()
+
+
+# ---------------------------------------------------------------------------
+# Bridge startup sanity checks
+# ---------------------------------------------------------------------------
+
+
+_PROXY_ADDR = "0x" + "aa" * 20
+_ROFL_BRIDGE_ADDR = "0x" + "bb" * 20
+_XROSE_ADDR = "0x" + "cc" * 20
+_CUSTODY_ADDR = "0x" + "ff" * 20
+
+
+def _bridge_settings(**overrides) -> SimpleNamespace:
+    base = dict(
+        accounting_contract_address=_PROXY_ADDR,
+        rofl_bridge_address=_ROFL_BRIDGE_ADDR,
+        xrose_address=_XROSE_ADDR,
+        bridge_mint_limit_wei=10**18,
+        bridge_burn_limit_wei=10**18,
+        sapphire_chain_id=23295,
+        chain_rpc_urls={23295: "http://sapphire", 84532: "http://base"},
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.fixture
+def bridge_check_inputs(monkeypatch):
+    """Wire a service + reader + base provider + xrose + rofl_bridge.
+
+    Defaults pass every check; tests mutate one input per failure mode.
+    """
+    from src.services import bridge_startup_check as bsc
+
+    # Stub the pinned-config delegate so contract checks are the ones
+    # under test; the delegation itself is covered by a dedicated test.
+    monkeypatch.setattr(bsc, "validate_bridge_settings", lambda s: None)
+    _reset_rose_token_id_cache()
+
+    settings = _bridge_settings()
+
+    reader = MagicMock()
+    reader.address = settings.accounting_contract_address
+    reader.abi = [
+        {
+            "type": "function",
+            "name": "roflBridgeAddress",
+            "inputs": [{"type": "uint256"}],
+        },
+        {"type": "function", "name": "requestBridgeWithdrawal", "inputs": []},
+        {"type": "function", "name": "ROSE_TOKEN_ID", "inputs": []},
+    ]
+    reader.functions.roflBridgeAddress.return_value.call = AsyncMock(return_value=_ROFL_BRIDGE_ADDR)
+    reader.functions.evmAddress.return_value.call = AsyncMock(return_value=_CUSTODY_ADDR)
+    reader.functions.ROSE_TOKEN_ID.return_value.call = AsyncMock(return_value=b"\x01" * 32)
+
+    service = _make_service_with_reader(reader)
+    service.reader_w3 = MagicMock()
+    service.reader_w3.eth.get_code = AsyncMock(return_value=b"\x60\x80")
+
+    base_w3 = MagicMock()
+    base_w3.eth.get_code = AsyncMock(return_value=b"\x60\x80")
+
+    xrose_handle = MagicMock()
+    xrose_handle.functions.mintingMaxLimitOf.return_value.call = AsyncMock(
+        return_value=settings.bridge_mint_limit_wei
+    )
+    xrose_handle.functions.burningMaxLimitOf.return_value.call = AsyncMock(
+        return_value=settings.bridge_burn_limit_wei
+    )
+
+    rofl_bridge_handle = MagicMock()
+    rofl_bridge_handle.functions.roflSigner.return_value.call = AsyncMock(
+        return_value=_CUSTODY_ADDR
+    )
+
+    def _contract(address, abi):
+        if address.lower() == settings.xrose_address.lower():
+            return xrose_handle
+        return rofl_bridge_handle
+
+    base_w3.eth.contract = _contract
+
+    service._get_chain_web3 = AsyncMock(return_value=base_w3)
+
+    return SimpleNamespace(
+        service=service,
+        settings=settings,
+        reader=reader,
+        base_w3=base_w3,
+        xrose=xrose_handle,
+        rofl_bridge=rofl_bridge_handle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_happy_path(bridge_check_inputs) -> None:
+    await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_zero_rose_token_id(bridge_check_inputs) -> None:
+    bridge_check_inputs.reader.functions.ROSE_TOKEN_ID.return_value.call = AsyncMock(
+        return_value=b"\x00" * 32
+    )
+    with pytest.raises(BridgeStartupCheckError, match="ROSE_TOKEN_ID returned"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_short_rose_token_id(bridge_check_inputs) -> None:
+    bridge_check_inputs.reader.functions.ROSE_TOKEN_ID.return_value.call = AsyncMock(
+        return_value=b"\x01" * 16
+    )
+    with pytest.raises(BridgeStartupCheckError, match="ROSE_TOKEN_ID returned"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_reader_pointing_at_impl(bridge_check_inputs) -> None:
+    bridge_check_inputs.reader.address = "0x" + "12" * 20
+    with pytest.raises(BridgeStartupCheckError, match="reader bound to"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_abi_missing_selector(bridge_check_inputs) -> None:
+    bridge_check_inputs.reader.abi = [
+        item for item in bridge_check_inputs.reader.abi if item["name"] != "ROSE_TOKEN_ID"
+    ]
+    with pytest.raises(BridgeStartupCheckError, match="missing bridge selector 'ROSE_TOKEN_ID'"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_rofl_bridge_address_mismatch_is_soft(
+    bridge_check_inputs, caplog
+) -> None:
+    """Route divergence no longer aborts startup — the in-TEE reconciler handles it.
+
+    Asserts: ``verify_bridge_runtime`` proceeds without raising and emits a
+    warning that names the reconciler so the operator knows the route will
+    be reconciled rather than treated as a fatal config error.
+    """
+    bridge_check_inputs.reader.functions.roflBridgeAddress.return_value.call = AsyncMock(
+        return_value="0x" + "34" * 20
+    )
+    with caplog.at_level("WARNING", logger="src.services.bridge_startup_check"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+    assert any("reconciler" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_rofl_bridge_address_zero_logs_bootstrap(
+    bridge_check_inputs, caplog
+) -> None:
+    """When on-chain route is zero, startup proceeds and logs a bootstrap hint."""
+    bridge_check_inputs.reader.functions.roflBridgeAddress.return_value.call = AsyncMock(
+        return_value="0x" + "00" * 20
+    )
+    with caplog.at_level("INFO", logger="src.services.bridge_startup_check"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+    assert any("bootstrap" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_xrose_no_code_on_base(bridge_check_inputs) -> None:
+    settings = bridge_check_inputs.settings
+    xrose_addr = Web3.to_checksum_address(settings.xrose_address)
+
+    async def _get_code(addr):
+        return b"" if addr == xrose_addr else b"\x60\x80"
+
+    bridge_check_inputs.base_w3.eth.get_code = AsyncMock(side_effect=_get_code)
+    with pytest.raises(BridgeStartupCheckError, match=r"XROSE_ADDRESS=.* has no code"):
+        await verify_bridge_runtime(bridge_check_inputs.service, settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_rofl_bridge_no_code_on_base(bridge_check_inputs) -> None:
+    settings = bridge_check_inputs.settings
+    rofl_bridge_addr = Web3.to_checksum_address(settings.rofl_bridge_address)
+
+    async def _get_code(addr):
+        return b"" if addr == rofl_bridge_addr else b"\x60\x80"
+
+    bridge_check_inputs.base_w3.eth.get_code = AsyncMock(side_effect=_get_code)
+    with pytest.raises(BridgeStartupCheckError, match=r"ROFL_BRIDGE_ADDRESS=.* has no code"):
+        await verify_bridge_runtime(bridge_check_inputs.service, settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_rofl_signer_mismatch(bridge_check_inputs) -> None:
+    bridge_check_inputs.rofl_bridge.functions.roflSigner.return_value.call = AsyncMock(
+        return_value="0x" + "56" * 20
+    )
+    with pytest.raises(BridgeStartupCheckError, match="cannot authenticate custody"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_minting_limit_mismatch(bridge_check_inputs) -> None:
+    bridge_check_inputs.xrose.functions.mintingMaxLimitOf.return_value.call = AsyncMock(
+        return_value=1
+    )
+    with pytest.raises(BridgeStartupCheckError, match="mintingMaxLimitOf"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_burning_limit_mismatch(bridge_check_inputs) -> None:
+    bridge_check_inputs.xrose.functions.burningMaxLimitOf.return_value.call = AsyncMock(
+        return_value=1
+    )
+    with pytest.raises(BridgeStartupCheckError, match="burningMaxLimitOf"):
+        await verify_bridge_runtime(bridge_check_inputs.service, bridge_check_inputs.settings)
+
+
+@pytest.mark.asyncio
+async def test_startup_sanity_pinned_config_delegated() -> None:
+    """``verify_bridge_runtime`` must call ``validate_bridge_settings``.
+
+    No fixture: ``validate_bridge_settings`` is not stubbed, so a
+    pinned-config violation in the settings object must fail before any
+    contract read.
+    """
+    bad_settings = _bridge_settings(rofl_bridge_address="")
+    service = _make_service_with_reader(MagicMock())
+
+    with pytest.raises(ValueError, match="ROFL_BRIDGE_ADDRESS"):
+        await verify_bridge_runtime(service, bad_settings)

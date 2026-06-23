@@ -9,9 +9,13 @@ enum Chain {
     Sui
 }
 
+/// @dev Append-only. Existing variants encode persisted balances via
+///      keccak256(abi.encode(tokenType, data)); reordering or inserting
+///      orphans every previously-computed tokenId.
 enum TokenType {
     NativeEVM,
-    ERC20
+    ERC20,
+    BridgeAsset
 }
 
 /// @notice Chain family for deposit-address derivation.
@@ -39,6 +43,17 @@ enum HistoryKind {
     ModifyLock,
     UnlockLock
 }
+
+/// @notice Generic zero-address rejection used across deposits, withdrawals, locks, etc.
+error InvalidAddress();
+
+/// @notice Generic zero-amount or out-of-bounds amount rejection used across deposits,
+///         withdrawals, locks, etc.
+error InvalidAmount();
+
+/// @notice Raised when a chain that requires `gasPrices[chainId]` is referenced
+///         while that map entry is unset.
+error GasPriceNotSet(uint256 chainId);
 
 struct TokenInfo {
     TokenType tokenType;

@@ -1,4 +1,4 @@
-.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-lib solidity-clean solidity-coverage format format-check openapi openapi-check
+.PHONY: install dev run test lint typecheck clean solidity solidity-build solidity-test solidity-ci solidity-lib solidity-clean solidity-coverage bridge-local-test format format-check openapi openapi-check
 
 install:
 	uv sync --no-dev
@@ -50,8 +50,22 @@ solidity-build:
 solidity-test:
 	cd solidity && bun run test
 
+# Mirrors the solidity job in .github/workflows/ci.yml: clean compile,
+# size gate, upgrade-safety, full suite.
+# Run before pushing if you want CI-equivalent verification locally.
+solidity-ci: solidity-clean solidity-build
+	cd solidity && bun run check:size
+	cd solidity && npx hardhat run scripts/validate-upgrade.ts
+	cd solidity && bun run test
+
 solidity-clean:
 	cd solidity && rm -rf dist artifacts cache typechain-types ignition/deployments
 
 solidity-coverage:
 	cd solidity && bun run coverage
+
+# Local two-chain ROSE bridge e2e: real Accounting on sapphire-localnet (with the
+# bundled rofl-appd) + real XRose/ROFLBridge on a local anvil Base chain.
+# Start sapphire-localnet first (see docs/bridge-local-testing.md); this manages anvil.
+bridge-local-test:
+	bash scripts/bridge-local-e2e.sh
