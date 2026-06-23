@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "contracts": {
+    "Accounting": {
+      "size": 29299
+    },
+    "XRose": {
+      "size": 5770
+    },
+    "ROFLBridge": {
+      "size": 2356
+    }
+  },
+  "headroomFloor": {}
+}
