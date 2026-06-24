@@ -10,7 +10,6 @@ import pytest
 from web3 import Web3
 
 from src.models.accounting import DepositQuoteResponse, LockedFundsResponse, LockInfo
-from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import AccountingContractService
 
 
@@ -100,14 +99,11 @@ class TestServiceLayerStrAmounts:
 
     def test_lock_to_info_returns_str_amount(self):
         service = AccountingContractService.__new__(AccountingContractService)
-        user = Web3.to_checksum_address("0x1111111111111111111111111111111111111111")
         service_addr = Web3.to_checksum_address("0x2222222222222222222222222222222222222222")
         token_bytes = bytes.fromhex("ab" * 32)
         amount = 5 * 10**18
 
-        result = service._lock_to_info(
-            user, (1, service_addr, token_bytes, amount, 9999999999), 500
-        )
+        result = service._lock_to_info((1, service_addr, token_bytes, amount, 9999999999), 500)
 
         assert isinstance(result["amount"], str)
         assert result["amount"] == str(amount)
@@ -115,7 +111,6 @@ class TestServiceLayerStrAmounts:
     @pytest.mark.asyncio
     async def test_get_locked_funds_returns_str_total_locked(self):
         service = AccountingContractService.__new__(AccountingContractService)
-        user = Web3.to_checksum_address("0x1111111111111111111111111111111111111111")
         service_addr = Web3.to_checksum_address("0x2222222222222222222222222222222222222222")
         token_bytes = bytes.fromhex("ab" * 32)
 
@@ -127,11 +122,10 @@ class TestServiceLayerStrAmounts:
             return_value=[lock1, lock2]
         )
 
-        service._require_address = MagicMock(return_value=user)
         service._get_confidential_reader_contract = AsyncMock(return_value=contract_reader)
         service._get_chain_timestamp = AsyncMock(return_value=500)
 
-        result = await service.get_locked_funds(PrivateReadAuth(token=b"", user_address=user), None)
+        result = await service.get_locked_funds(b"", None)
 
         assert isinstance(result["total_locked"], str)
         assert result["total_locked"] == str(10 * 10**18)
@@ -142,7 +136,6 @@ class TestServiceLayerStrAmounts:
     async def test_get_locked_funds_total_is_sum_not_concatenation(self):
         """Guard against total_locked being string concatenation instead of numeric sum."""
         service = AccountingContractService.__new__(AccountingContractService)
-        user = Web3.to_checksum_address("0x1111111111111111111111111111111111111111")
         service_addr = Web3.to_checksum_address("0x2222222222222222222222222222222222222222")
         token_bytes = bytes.fromhex("ab" * 32)
 
@@ -154,11 +147,10 @@ class TestServiceLayerStrAmounts:
             return_value=[lock1, lock2]
         )
 
-        service._require_address = MagicMock(return_value=user)
         service._get_confidential_reader_contract = AsyncMock(return_value=contract_reader)
         service._get_chain_timestamp = AsyncMock(return_value=500)
 
-        result = await service.get_locked_funds(PrivateReadAuth(token=b"", user_address=user), None)
+        result = await service.get_locked_funds(b"", None)
 
         # Must be "300" (numeric sum), NOT "100200" (string concatenation)
         assert result["total_locked"] == "300"
@@ -167,7 +159,6 @@ class TestServiceLayerStrAmounts:
     async def test_get_expired_locks_returns_str_amounts(self):
         """get_expired_locks also uses _lock_to_info — verify amounts are str."""
         service = AccountingContractService.__new__(AccountingContractService)
-        user = Web3.to_checksum_address("0x1111111111111111111111111111111111111111")
         service_addr = Web3.to_checksum_address("0x2222222222222222222222222222222222222222")
         token_bytes = bytes.fromhex("ab" * 32)
         now = 9999999999 + 1  # after expiry
@@ -179,11 +170,10 @@ class TestServiceLayerStrAmounts:
             return_value=[expired_lock]
         )
 
-        service._require_address = MagicMock(return_value=user)
         service._get_confidential_reader_contract = AsyncMock(return_value=contract_reader)
         service._get_chain_timestamp = AsyncMock(return_value=now)
 
-        result = await service.get_expired_locks(PrivateReadAuth(token=b"", user_address=user))
+        result = await service.get_expired_locks(b"")
 
         assert len(result["expired_locks"]) == 1
         assert isinstance(result["expired_locks"][0]["amount"], str)
