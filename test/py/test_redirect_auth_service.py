@@ -37,7 +37,7 @@ class FakeSiweMessage:
         self.statement = statement
         self.resources = resources or ["https://app.privana.finance/dashboard"]
         self.domain = domain
-        self.verify_calls: list[dict[str, str]] = []
+        self.verify_calls: list[dict[str, object]] = []
 
     def verify(
         self, signature: str, domain: str, nonce: str, provider: object | None = None
