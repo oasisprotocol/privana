@@ -328,6 +328,11 @@ async def check_deposit(
             amount=payload.amount,
             log_index=payload.log_index,
             version=payload.version,
+            lock_authorization=(
+                payload.lock_authorization.model_dump()
+                if payload.lock_authorization is not None
+                else None
+            ),
         )
         resp = DepositCheckResponse(**result)
         if resp.status == "pending":
@@ -639,6 +644,15 @@ async def update_onramp(
             raise OnRampError("token_id does not match signed on-ramp intent")
         if payload.chain_id is not None and payload.chain_id != record.get("chain_id"):
             raise OnRampError("chain_id does not match signed on-ramp intent")
+        if payload.lock_authorization is not None:
+            if payload.lock_authorization.token_id != record.get("token_id"):
+                raise OnRampError(
+                    "lock_authorization token_id does not match signed on-ramp intent"
+                )
+            updates["lock_authorization"] = onramp_service.store_onramp_lock_authorization(
+                transaction_id,
+                payload.lock_authorization.model_dump(),
+            )
         if payload.base_currency_code:
             updates["base_currency_code"] = payload.base_currency_code
         updates["wallet_address"] = deposit_address
@@ -649,7 +663,7 @@ async def update_onramp(
             record["status"] = "completed"
             record["updated_at"] = int(time.time())
         logger.info(
-            "On-ramp metadata accepted without persistence: record=%s",
+            "On-ramp metadata accepted: record=%s",
             onramp_log_summary(record),
         )
         return OnRampRecord(**record)

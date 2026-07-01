@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Accounting} from "../Accounting.sol";
-import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
 
 /**
  * @title MockAccounting
@@ -51,17 +50,27 @@ contract MockAccounting is Accounting {
         uint256 amount,
         bytes32 depositId
     ) external {
-        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
-        if (amount == 0) revert InvalidAmount();
-        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
-        processedDeposits[depositId] = true;
-        balances[beneficiary][tokenId] += amount;
-        _appendHistory(
+        _creditDeposit(beneficiary, tokenId, amount, depositId);
+    }
+
+    /**
+     * @notice Test helper: creditDepositAndCreateLockFromAuthorization without onlyROFL check.
+     * @dev Bypasses ROFL auth for Hardhat testing.
+     */
+    function mockCreditDepositAndCreateLockFromAuthorization(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId,
+        DepositLockAuthorization calldata authorization
+    ) external returns (uint256 lockId, uint256 lockedAmount) {
+        return _creditDepositAndCreateLockFromAuthorization(
             beneficiary,
-            HistoryKind.Deposit,
-            abi.encodePacked(tokenId, amount, depositId)
+            tokenId,
+            amount,
+            depositId,
+            authorization
         );
-        emit Deposit(tokenId, amount, depositId);
     }
 
     /**

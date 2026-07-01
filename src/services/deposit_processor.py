@@ -22,6 +22,7 @@ from src.services.sweep_engine import (
     DepositAccountingProtocol,
     SweepCreditPendingError,
     SweepEngine,
+    SweepState,
     _to_hex,
 )
 
@@ -121,6 +122,7 @@ class DepositProcessor:
         log_index: int,
         version: int,
         auth: PrivateReadAuth,
+        lock_authorization: Dict | None = None,
     ) -> Dict:
         """Verify a deposit and start the sweep in the background.
 
@@ -164,6 +166,11 @@ class DepositProcessor:
             raise ValueError("Deposit does not meet minimum requirements")
 
         token_id = await self._get_token_id(chain_id, verified.token_address)
+        if (
+            lock_authorization is not None
+            and lock_authorization["token_id"].lower() != _to_hex(token_id).lower()
+        ):
+            raise ValueError("lock_authorization token_id does not match verified deposit token")
 
         if not await self._accounting.is_token_registered(token_id):
             raise ValueError("Token not supported")
@@ -174,13 +181,45 @@ class DepositProcessor:
         already_processed = await self._accounting.is_deposit_processed(deposit_id)
         if already_processed:
             logger.info("Deposit already processed: deposit_id=%s", deposit_id_hex)
+            if lock_authorization is not None:
+                if not await self._accounting.has_deposit_lock_authorization_executed(
+                    auth.user_address,
+                    lock_authorization.get("intent_id", ""),
+                ):
+                    return self._deposit_response(
+                        "error",
+                        deposit_id_hex,
+                        verified.amount,
+                        verified.token_address,
+                        detail="deposit already processed without requested lock_authorization",
+                    )
             return self._deposit_response(
                 "credited", deposit_id_hex, verified.amount, verified.token_address
+            )
+
+        if lock_authorization is not None:
+            await self._accounting.validate_deposit_lock_authorization(
+                beneficiary=auth.user_address,
+                private_read_token=auth.token,
+                token_id=token_id,
+                amount=verified.amount,
+                lock_authorization=lock_authorization,
             )
 
         # If a sweep is already in progress for this deposit, return pending
         existing = self._sweep.get_record_by_deposit_id(deposit_id_hex)
         if existing is not None:
+            if lock_authorization is not None:
+                self._sweep.attach_lock_authorization(deposit_id_hex, lock_authorization)
+                existing = self._sweep.get_record_by_deposit_id(deposit_id_hex) or existing
+            if existing.state == SweepState.LOCK_FAILED:
+                return self._deposit_response(
+                    "error",
+                    deposit_id_hex,
+                    verified.amount,
+                    verified.token_address,
+                    detail=existing.error,
+                )
             if existing.error:
                 if existing.sweep_tx_hash:
                     logger.warning(
@@ -198,6 +237,31 @@ class DepositProcessor:
                     "pending", deposit_id_hex, verified.amount, verified.token_address
                 )
 
+        # Register the sweep record synchronously — there is no await between the
+        # existing-record check above and this point, so a concurrent
+        # /deposits/check for the same deposit always finds the record (and can
+        # attach its lock authorization) instead of spawning a second sweep whose
+        # zero-balance path would silently drop the authorization. Skip if another
+        # deposit to the same address is mid-sweep (records are keyed per address):
+        # the background task queues on the per-address lock and registers its
+        # record once the address frees up. Until then this deposit has no record,
+        # so it loses crash-resume and synchronous-attach for that window — the
+        # pre-registration status quo. Removing that gap needs per-deposit record
+        # keying (follow-up), not more claim machinery here.
+        if self._sweep.get_sweep_record(deposit_address, chain_id) is None:
+            self._sweep.register_pending_sweep(
+                deposit_address=deposit_address,
+                chain_id=chain_id,
+                beneficiary=auth.user_address,
+                chain_type=chain_type,
+                version=version,
+                amount=verified.amount,
+                token_id_hex=_to_hex(token_id),
+                token_address=None if verified.is_native else verified.token_address,
+                deposit_id_hex=deposit_id_hex,
+                lock_authorization=lock_authorization,
+            )
+
         # Fire background sweep — returns immediately
         task = asyncio.create_task(
             self._background_sweep(
@@ -211,6 +275,7 @@ class DepositProcessor:
                 amount=verified.amount,
                 deposit_id=deposit_id,
                 is_native=verified.is_native,
+                lock_authorization=lock_authorization,
             )
         )
         self._background_tasks.add(task)
@@ -232,6 +297,7 @@ class DepositProcessor:
         amount: int,
         deposit_id: bytes,
         is_native: bool,
+        lock_authorization: Dict | None = None,
     ) -> None:
         """Run sweep + credit in background. Errors are persisted to the record."""
         deposit_id_hex = _to_hex(deposit_id)
@@ -246,6 +312,7 @@ class DepositProcessor:
                     token_id=token_id,
                     amount=amount,
                     deposit_id=deposit_id,
+                    lock_authorization=lock_authorization,
                 )
             else:
                 await self._sweep.sweep_erc20(
@@ -258,6 +325,7 @@ class DepositProcessor:
                     token_id=token_id,
                     amount=amount,
                     deposit_id=deposit_id,
+                    lock_authorization=lock_authorization,
                 )
             logger.info(
                 "Background sweep completed: deposit_id=%s beneficiary=%s",
@@ -284,6 +352,11 @@ class DepositProcessor:
 
         if record.beneficiary.lower() != beneficiary.lower():
             return None
+
+        if record.state == SweepState.LOCK_FAILED:
+            return self._deposit_response(
+                "error", deposit_id_hex, record.amount, record.token_address, detail=record.error
+            )
 
         if record.error:
             if record.sweep_tx_hash:

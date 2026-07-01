@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.models.accounting import (
+    DepositLockAuthorization,
     LockFundsRequest,
     LockNonceResponse,
     ModifyLockNonceResponse,
@@ -45,6 +46,64 @@ def test_lock_funds_request_rejects_negative_nonce():
             nonce=-1,
             signature="0xabcd",
         )
+
+
+def test_deposit_lock_authorization_normalizes_fields():
+    req = DepositLockAuthorization(
+        service_address="0xabcdef1234567890abcdef1234567890abcdef12",
+        token_id="11" * 32,
+        max_amount="1000000",
+        min_amount="500000",
+        lock_duration="3600",
+        authorization_deadline="9999999999",
+        intent_id="22" * 32,
+        signature="abcd",
+    )
+
+    assert req.service_address.lower() == "0xabcdef1234567890abcdef1234567890abcdef12"
+    assert req.token_id == "0x" + "11" * 32
+    assert req.intent_id == "0x" + "22" * 32
+    assert req.signature == "0xabcd"
+    assert req.max_amount == 1000000
+    assert req.min_amount == 500000
+
+
+def test_deposit_lock_authorization_requires_bytes32_intent_id():
+    with pytest.raises(ValidationError):
+        DepositLockAuthorization(
+            service_address="0xabcdef1234567890abcdef1234567890abcdef12",
+            token_id="11" * 32,
+            max_amount=1000000,
+            lock_duration=3600,
+            authorization_deadline=9999999999,
+            intent_id="0x1234",
+            signature="0xabcd",
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"service_address": "0x0000000000000000000000000000000000000000"},
+        {"intent_id": "0x" + "00" * 32},
+        {"max_amount": 100, "min_amount": 101},
+    ],
+)
+def test_deposit_lock_authorization_rejects_unsatisfiable_policy(overrides):
+    payload = {
+        "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+        "token_id": "11" * 32,
+        "max_amount": 1000000,
+        "min_amount": 0,
+        "lock_duration": 3600,
+        "authorization_deadline": 9999999999,
+        "intent_id": "22" * 32,
+        "signature": "0xabcd",
+    }
+    payload.update(overrides)
+
+    with pytest.raises(ValidationError):
+        DepositLockAuthorization(**payload)
 
 
 def test_modify_lock_request_requires_nonce():

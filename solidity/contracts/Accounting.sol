@@ -97,6 +97,18 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
     error Unauthorized();
     error DepositAlreadyProcessed();
     error InvalidSiweAuth();
+    error LockAmountBelowMinimum();
+    error InvalidIntentId();
+
+    struct DepositLockAuthorization {
+        address serviceAddress;
+        uint256 maxAmount;
+        uint256 minAmount;
+        uint256 lockDuration;
+        uint256 authorizationDeadline;
+        bytes32 intentId;
+        bytes signature;
+    }
 
     struct WithdrawalRequest {
         address userAddress;
@@ -154,6 +166,44 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             return siweAuth.authSender(token);
         }
         return msg.sender;
+    }
+
+    function _validateDepositCredit(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId
+    ) internal view {
+        if (beneficiary == address(0)) revert AddressMismatch();
+        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
+        if (amount == 0) revert InvalidAmount();
+        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
+    }
+
+    function _recordDepositCredit(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId
+    ) internal {
+        processedDeposits[depositId] = true;
+        balances[beneficiary][tokenId] += amount;
+        _appendHistory(
+            beneficiary,
+            HistoryKind.Deposit,
+            abi.encodePacked(tokenId, amount, depositId)
+        );
+        emit Deposit(tokenId, amount, depositId);
+    }
+
+    function _creditDeposit(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId
+    ) internal {
+        _validateDepositCredit(beneficiary, tokenId, amount, depositId);
+        _recordDepositCredit(beneficiary, tokenId, amount, depositId);
     }
 
     function _appendHistory(
@@ -222,18 +272,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         uint256 amount,
         bytes32 depositId
     ) external onlyROFL {
-        if (beneficiary == address(0)) revert AddressMismatch();
-        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
-        if (amount == 0) revert InvalidAmount();
-        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
-        processedDeposits[depositId] = true;
-        balances[beneficiary][tokenId] += amount;
-        _appendHistory(
-            beneficiary,
-            HistoryKind.Deposit,
-            abi.encodePacked(tokenId, amount, depositId)
-        );
-        emit Deposit(tokenId, amount, depositId);
+        _creditDeposit(beneficiary, tokenId, amount, depositId);
     }
 
     // ─── Emergency Withdraw ───────────────────────────────────────────
@@ -405,6 +444,25 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             signature
         );
 
+        _createLockFromBalance(
+            userAddress,
+            serviceAddress,
+            tokenId,
+            amount,
+            expiry
+        );
+    }
+
+    function _createLockFromBalance(
+        address userAddress,
+        address serviceAddress,
+        bytes32 tokenId,
+        uint256 amount,
+        uint256 expiry
+    ) internal returns (uint256 lockId) {
+        if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (amount == 0) revert InvalidAmount();
+
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
 
@@ -415,7 +473,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
 
         balances[userAddress][tokenId] -= amount;
 
-        uint256 lockId = nextLockId++;
+        lockId = nextLockId++;
         locks.push(
             FundLock({
                 lockId: lockId,
@@ -433,6 +491,74 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
             amount,
             serviceAddress
         );
+    }
+
+    /**
+     * @notice Credits a verified deposit and locks up to the signed maximum amount.
+     * @dev ROFL-only atomic primitive for deposit flows where the exact received
+     *      amount is only known after the source-chain deposit lands.
+     */
+    function creditDepositAndCreateLockFromAuthorization(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId,
+        DepositLockAuthorization calldata authorization
+    ) external onlyROFL returns (uint256 lockId, uint256 lockedAmount) {
+        return _creditDepositAndCreateLockFromAuthorization(
+            beneficiary,
+            tokenId,
+            amount,
+            depositId,
+            authorization
+        );
+    }
+
+    function _creditDepositAndCreateLockFromAuthorization(
+        address beneficiary,
+        bytes32 tokenId,
+        uint256 amount,
+        bytes32 depositId,
+        DepositLockAuthorization calldata authorization
+    ) internal returns (uint256 lockId, uint256 lockedAmount) {
+        _validateDepositCredit(beneficiary, tokenId, amount, depositId);
+
+        if (authorization.serviceAddress == address(0)) revert AddressMismatch();
+        if (authorization.maxAmount == 0) revert InvalidAmount();
+        if (authorization.minAmount > authorization.maxAmount)
+            revert InvalidAmount();
+        if (authorization.lockDuration == 0) revert InvalidExpiry();
+        if (authorization.authorizationDeadline <= block.timestamp)
+            revert InvalidExpiry();
+        if (authorization.intentId == bytes32(0)) revert InvalidIntentId();
+
+        lockedAmount = amount < authorization.maxAmount
+            ? amount
+            : authorization.maxAmount;
+        if (lockedAmount < authorization.minAmount)
+            revert LockAmountBelowMinimum();
+
+        EIP712SignatureVerifier.verifyDepositLockAuthorizationSignature(
+            beneficiary,
+            authorization.serviceAddress,
+            tokenId,
+            authorization.maxAmount,
+            authorization.minAmount,
+            authorization.lockDuration,
+            authorization.authorizationDeadline,
+            authorization.intentId,
+            authorization.signature
+        );
+
+        _recordDepositCredit(beneficiary, tokenId, amount, depositId);
+        lockId = _createLockFromBalance(
+            beneficiary,
+            authorization.serviceAddress,
+            tokenId,
+            lockedAmount,
+            block.timestamp + authorization.lockDuration
+        );
+        depositLockIntentLockIds[beneficiary][authorization.intentId] = lockId;
     }
 
     function _findLockIndex(
@@ -1158,9 +1284,12 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
         }
     }
 
+    mapping(address user => mapping(bytes32 intentId => uint256 lockId))
+        public depositLockIntentLockIds;
+
     /**
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[40] private __gap;
+    uint256[39] private __gap;
 }

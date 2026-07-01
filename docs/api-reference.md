@@ -126,8 +126,9 @@ The deposit path is **address-based**: the contract derives a per-user address (
 Behavior notes:
 
 - `POST /deposits/check` is **idempotent**. If the same `(chain_id, tx_hash, log_index)` is submitted twice, the second call short-circuits — returning `200` with `status="credited"` once the credit has landed on Sapphire, or `202` with `status="pending"` while the sweep is still running.
+- `POST /deposits/check` may include `lock_authorization`, a user-signed post-deposit lock policy. The backend validates the signer, token, deadline, `min/max` bounds, and active-lock capacity before sweeping funds; after the sweep it atomically credits the actual deposited amount and locks `min(actual_amount, max_amount)`.
 - Sweeps run as background tasks. The processor returns within ~2-3s. Don't block on the response — poll `GET /deposits/status/{deposit_id}`.
-- The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
+- The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`). A deterministic post-sweep lock failure returns `status="error"` and requires operator resolution or a same-intent replacement authorization.
 - The `min_deposit` field of the address response is a per-chain map — clients should use it to gate the UI.
 
 ## On-Ramp Flow (MoonPay)
@@ -143,8 +144,9 @@ The fiat on-ramp reuses the deposit path: MoonPay delivers tokens straight to th
 4. POST /onramp/webhook            → MoonPay reports status + on-chain tx hash;
                                      the backend verifies and logs it
 5. GET  /onramp/pending            → query MoonPay by externalCustomerId; clients
-                                     may also pass signed externalTransactionId
-                                     values for exact stale-session recovery
+                                     may pass signed externalTransactionId values
+                                     for exact stale-session recovery; returns
+                                     stored lock_authorization when present
 6. POST /deposits/check            → normal deposit verification using the
                                      MoonPay on-chain tx hash
 7. GET  /deposits/status/{id}      → poll until status="credited"
@@ -154,14 +156,15 @@ The fiat on-ramp reuses the deposit path: MoonPay delivers tokens straight to th
 |---|---|---|
 | `POST /onramp/intent` | required | Mint a signed intent pinning `user_address`, deposit `wallet_address`, `token_id`, `chain_id`, and MoonPay currency before the widget opens. |
 | `POST /onramp/sign-url` | required | Validate an unsigned MoonPay widget URL (allow-listed host, expected `apiKey`, `walletAddress` = caller's deposit address, `externalCustomerId` = caller, signed Privana `externalTransactionId`, allow-listed `currencyCode` matching the intent) and return its HMAC signature. |
-| `GET /onramp/pending` | required | Query MoonPay by the caller's `externalCustomerId` and return completed purchases whose signed Privana intent matches the caller and deposit address and carries enough data (`token_id`, `chain_id`, `on_chain_tx_hash`) for idempotent `/deposits/check` verification. Optionally accepts up to 10 signed `externalTransactionId` query values for exact stale-session recovery. |
-| `POST /onramp/{transaction_id}` | required | Compatibility endpoint that validates caller-owned signed intent metadata and echoes the merged client payload without persisting state. |
+| `GET /onramp/pending` | required | Query MoonPay by the caller's `externalCustomerId` and return completed purchases whose signed Privana intent matches the caller and deposit address and carries enough data (`token_id`, `chain_id`, `on_chain_tx_hash`, and optional `lock_authorization`) for idempotent `/deposits/check` verification. Optionally accepts up to 10 signed `externalTransactionId` query values for exact stale-session recovery. |
+| `POST /onramp/{transaction_id}` | required | Compatibility endpoint that validates caller-owned signed intent metadata and echoes the merged client payload. It persists only optional `lock_authorization`, keyed by the signed intent, so `/onramp/pending` can return it later. |
 | `POST /onramp/webhook` | MoonPay HMAC (`Moonpay-Signature-V2`) | Verify and log MoonPay transaction updates. |
 
 Behavior notes:
 
 - **Signed intents are the authority.** The MoonPay `externalTransactionId` is a signed Privana token. The backend rejects tampered, expired, wrong-user, or wrong-deposit IDs.
 - **MoonPay is the on-ramp transaction source.** `/onramp/pending` does not depend on local on-ramp storage. It fetches MoonPay transactions by `externalCustomerId` and filters locally using the signed intent and delivery wallet. If the widget session was stale, the client can pass the signed `externalTransactionId` minted by `/onramp/intent`; the backend then uses MoonPay's exact external-id lookup and still returns only transactions whose signed intent matches the caller and deposit address.
+- **Locked on-ramp recovery.** If the SDK posts a signed post-deposit `lock_authorization` to `POST /onramp/{transaction_id}` before the MoonPay purchase, the backend stores only that policy keyed by the signed intent. `/onramp/pending` returns it with the matching completed MoonPay row so a reload or new browser session can still call `/deposits/check` with the same policy.
 - **Amounts come from MoonPay reads.** The signed intent carries only Privana correlation metadata (`user`, deposit wallet, `token_id`, `chain_id`, MoonPay currency, nonce, and expiry). Base and quote currency amounts are returned only after MoonPay lookup.
 - **The deposit path is still authoritative for credit.** `/deposits/check` and `/deposits/status/{deposit_id}` remain the only balance-credit path and retain their existing idempotency.
 - **Fail-closed configuration.** `POST /onramp/intent`, `POST /onramp/sign-url`, `GET /onramp/pending`, `POST /onramp/{transaction_id}`, and `POST /onramp/webhook` return `503` until the required `MOONPAY_*` keys are configured.

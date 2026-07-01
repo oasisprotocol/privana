@@ -51,10 +51,16 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /// @notice Mapping to track withdrawFromLock nonces per service
     mapping(address service => uint256 nonce) public withdrawFromLockNonces;
 
+    /// @notice Mapping to track consumed post-deposit lock authorizations per user
+    mapping(address user => mapping(bytes32 intentId => bool used))
+        public depositLockAuthorizationUsed;
+
     /// @notice Thrown when signature recovery fails or signer doesn't match expected address
     error InvalidSignature();
     /// @notice Thrown when the provided nonce doesn't match the expected nonce
     error InvalidNonce();
+    /// @notice Thrown when a post-deposit lock authorization was already consumed
+    error DepositLockAuthorizationAlreadyUsed();
 
     /// @notice EIP-712 type hash for withdraw operations
     bytes32 private constant WITHDRAW_TYPEHASH =
@@ -64,6 +70,12 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     bytes32 private constant LOCK_TYPEHASH =
         keccak256(
             "Lock(address serviceAddress,bytes32 tokenId,uint256 amount,uint256 expiry,uint256 nonce)"
+        );
+
+    /// @notice EIP-712 type hash for post-deposit lock authorizations
+    bytes32 private constant DEPOSIT_LOCK_AUTHORIZATION_TYPEHASH =
+        keccak256(
+            "DepositLockAuthorization(address userAddress,address serviceAddress,bytes32 tokenId,uint256 maxAmount,uint256 minAmount,uint256 lockDuration,uint256 authorizationDeadline,bytes32 intentId)"
         );
 
     /// @notice EIP-712 type hash for transfer operations
@@ -163,6 +175,48 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             revert InvalidNonce();
         }
         createLockNonces[userAddress]++;
+    }
+
+    /**
+     * @notice Verifies a user's EIP-712 signature for a post-deposit lock authorization.
+     * @dev Uses an explicit intentId instead of createLockNonces so multiple pending
+     *      deposit authorizations can execute independently and out of order.
+     */
+    function verifyDepositLockAuthorizationSignature(
+        address userAddress,
+        address serviceAddress,
+        bytes32 tokenId,
+        uint256 maxAmount,
+        uint256 minAmount,
+        uint256 lockDuration,
+        uint256 authorizationDeadline,
+        bytes32 intentId,
+        bytes calldata signature
+    ) internal {
+        if (depositLockAuthorizationUsed[userAddress][intentId]) {
+            revert DepositLockAuthorizationAlreadyUsed();
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                DEPOSIT_LOCK_AUTHORIZATION_TYPEHASH,
+                userAddress,
+                serviceAddress,
+                tokenId,
+                maxAmount,
+                minAmount,
+                lockDuration,
+                authorizationDeadline,
+                intentId
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != userAddress) {
+            revert InvalidSignature();
+        }
+
+        depositLockAuthorizationUsed[userAddress][intentId] = true;
     }
 
     /**
@@ -326,5 +380,5 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[44] private __gap;
+    uint256[43] private __gap;
 }

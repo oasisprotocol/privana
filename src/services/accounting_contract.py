@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -58,6 +59,18 @@ _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
+_DEPOSIT_LOCK_AUTHORIZATION_DEADLINE_BUFFER_SECONDS = 300
+_DEPOSIT_LOCK_MAX_ACTIVE_LOCKS = 10
+_DEPOSIT_LOCK_AUTHORIZATION_TYPES = [
+    {"name": "userAddress", "type": "address"},
+    {"name": "serviceAddress", "type": "address"},
+    {"name": "tokenId", "type": "bytes32"},
+    {"name": "maxAmount", "type": "uint256"},
+    {"name": "minAmount", "type": "uint256"},
+    {"name": "lockDuration", "type": "uint256"},
+    {"name": "authorizationDeadline", "type": "uint256"},
+    {"name": "intentId", "type": "bytes32"},
+]
 
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
@@ -94,6 +107,22 @@ class TokenContext:
     chain_id: int
     token_address: Optional[ChecksumAddress]
     is_native: bool
+
+
+@dataclass
+class DepositLockAuthorizationParts:
+    service: ChecksumAddress
+    token: HexBytes
+    max_amount: int
+    min_amount: int
+    lock_duration: int
+    authorization_deadline: int
+    intent_id: HexBytes
+    signature: HexBytes
+
+
+class DepositLockAuthorizationValidationError(ValueError):
+    """Deterministic validation failure for a signed post-deposit lock policy."""
 
 
 class AccountingContractService:
@@ -563,6 +592,188 @@ class AccountingContractService:
             token_id,
             amount,
             deposit_id,
+        )
+        return await self._submit(fn._encode_transaction_data())
+
+    async def _prepare_deposit_lock_authorization(
+        self,
+        beneficiary: str,
+        token_id: bytes,
+        lock_authorization: Dict[str, Any],
+    ) -> DepositLockAuthorizationParts:
+        """Normalize and verify the signed post-deposit lock authorization."""
+        try:
+            user = self._require_address(beneficiary, "beneficiary")
+            token = HexBytes(token_id)
+            auth_token = self._require_hex(
+                lock_authorization["token_id"], "lock_authorization.token_id", expected_len=32
+            )
+            if bytes(auth_token) != bytes(token):
+                raise ValueError(
+                    "lock_authorization token_id does not match verified deposit token"
+                )
+
+            service = self._require_address(
+                lock_authorization["service_address"], "lock_authorization.service_address"
+            )
+            if str(service).lower() == ADDRESS_ZERO.lower():
+                raise ValueError("lock_authorization service_address must not be zero")
+
+            max_amount = self._require_positive(
+                lock_authorization["max_amount"], "lock_authorization.max_amount"
+            )
+            min_amount = self._require_positive(
+                lock_authorization.get("min_amount", 0),
+                "lock_authorization.min_amount",
+                allow_zero=True,
+            )
+            if min_amount > max_amount:
+                raise ValueError("lock_authorization min_amount must not exceed max_amount")
+
+            lock_duration = self._require_positive(
+                lock_authorization["lock_duration"], "lock_authorization.lock_duration"
+            )
+            authorization_deadline = self._require_positive(
+                lock_authorization["authorization_deadline"],
+                "lock_authorization.authorization_deadline",
+            )
+            intent_id = self._require_hex(
+                lock_authorization["intent_id"], "lock_authorization.intent_id", expected_len=32
+            )
+            if bytes(intent_id) == b"\x00" * 32:
+                raise ValueError("lock_authorization intent_id must not be zero")
+
+            signature = self._require_hex(
+                lock_authorization["signature"], "lock_authorization.signature"
+            )
+
+            signer = await self._recover_eip712_signer(
+                "DepositLockAuthorization",
+                _DEPOSIT_LOCK_AUTHORIZATION_TYPES,
+                {
+                    "userAddress": user,
+                    "serviceAddress": service,
+                    "tokenId": _to_prefixed_hex(token),
+                    "maxAmount": max_amount,
+                    "minAmount": min_amount,
+                    "lockDuration": lock_duration,
+                    "authorizationDeadline": authorization_deadline,
+                    "intentId": _to_prefixed_hex(intent_id),
+                },
+                signature,
+            )
+            if signer != user:
+                raise ValueError("lock_authorization signer does not match beneficiary")
+        except KeyError as exc:
+            raise DepositLockAuthorizationValidationError(
+                f"lock_authorization missing {exc.args[0]}"
+            ) from exc
+        except ValueError as exc:
+            raise DepositLockAuthorizationValidationError(str(exc)) from exc
+
+        return DepositLockAuthorizationParts(
+            service=service,
+            token=token,
+            max_amount=max_amount,
+            min_amount=min_amount,
+            lock_duration=lock_duration,
+            authorization_deadline=authorization_deadline,
+            intent_id=intent_id,
+            signature=signature,
+        )
+
+    @staticmethod
+    def _assert_deposit_lock_authorization_satisfiable(
+        authorization: DepositLockAuthorizationParts,
+        amount: int,
+        deadline_buffer_seconds: int,
+    ) -> None:
+        now = int(time.time())
+        if authorization.authorization_deadline <= now + deadline_buffer_seconds:
+            raise DepositLockAuthorizationValidationError(
+                "lock_authorization authorization_deadline is expired or too close to expiry"
+            )
+
+        locked_amount = min(amount, authorization.max_amount)
+        if locked_amount < authorization.min_amount:
+            raise DepositLockAuthorizationValidationError(
+                "verified deposit amount is below lock_authorization min_amount"
+            )
+
+    async def validate_deposit_lock_authorization(
+        self,
+        beneficiary: str,
+        private_read_token: bytes,
+        token_id: bytes,
+        amount: int,
+        lock_authorization: Dict[str, Any],
+        deadline_buffer_seconds: int = _DEPOSIT_LOCK_AUTHORIZATION_DEADLINE_BUFFER_SECONDS,
+    ) -> None:
+        """Validate lock authorization before the irreversible source-chain sweep."""
+        parsed_amount = self._require_positive(amount, "amount")
+        authorization = await self._prepare_deposit_lock_authorization(
+            beneficiary=beneficiary,
+            token_id=token_id,
+            lock_authorization=lock_authorization,
+        )
+        self._assert_deposit_lock_authorization_satisfiable(
+            authorization,
+            parsed_amount,
+            deadline_buffer_seconds,
+        )
+        if await self.has_deposit_lock_authorization_executed(
+            beneficiary,
+            authorization.intent_id,
+        ):
+            raise DepositLockAuthorizationValidationError(
+                "lock_authorization intent_id has already been used"
+            )
+        active_locks = await self._fetch_user_locks(private_read_token)
+        if len(active_locks) >= _DEPOSIT_LOCK_MAX_ACTIVE_LOCKS:
+            raise DepositLockAuthorizationValidationError("user already has maximum active locks")
+
+    async def has_deposit_lock_authorization_executed(
+        self,
+        beneficiary: str,
+        intent_id: str | bytes,
+    ) -> bool:
+        """Return whether a deposit lock authorization intent already created a lock."""
+        user = self._require_address(beneficiary, "beneficiary")
+        intent = self._require_hex(intent_id, "lock_authorization.intent_id", expected_len=32)
+        contract_reader = self._get_reader_contract()
+        lock_id = await contract_reader.functions.depositLockIntentLockIds(user, intent).call()
+        return int(lock_id) != 0
+
+    async def credit_deposit_and_create_lock(
+        self,
+        beneficiary: str,
+        token_id: bytes,
+        amount: int,
+        deposit_id: bytes,
+        lock_authorization: Dict[str, Any],
+    ) -> SubmissionResult:
+        """Credit a deposit and lock up to the signed authorization cap via ROFL."""
+        user = self._require_address(beneficiary, "beneficiary")
+        authorization = await self._prepare_deposit_lock_authorization(
+            beneficiary=beneficiary,
+            token_id=token_id,
+            lock_authorization=lock_authorization,
+        )
+
+        fn = self.contract.functions.creditDepositAndCreateLockFromAuthorization(
+            user,
+            authorization.token,
+            amount,
+            deposit_id,
+            (
+                authorization.service,
+                authorization.max_amount,
+                authorization.min_amount,
+                authorization.lock_duration,
+                authorization.authorization_deadline,
+                authorization.intent_id,
+                authorization.signature,
+            ),
         )
         return await self._submit(fn._encode_transaction_data())
 

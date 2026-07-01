@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -89,6 +90,105 @@ async def test_resume_swept_record_credits_and_cleans_up(state_dir):
 
     # Record should be cleaned up after successful credit
     assert engine.get_sweep_record("0x" + "aa" * 20, 84532) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_swept_record_retries_credit_and_lock(state_dir):
+    """A SWEPT record with lock auth should retry the atomic credit+lock call."""
+    lock_authorization = {
+        "service_address": "0x" + "cc" * 20,
+        "token_id": "0x" + "11" * 32,
+        "max_amount": "1000000",
+        "min_amount": "0",
+        "lock_duration": "3600",
+        "authorization_deadline": "9999999999",
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.SWEPT,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        lock_authorization=lock_authorization,
+    )
+    _write_record(state_dir, record)
+
+    mock_accounting = AsyncMock()
+    mock_accounting.credit_deposit = AsyncMock()
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock()
+
+    engine = SweepEngine(
+        accounting_service=mock_accounting,
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    await engine.resume_incomplete_sweeps()
+
+    mock_accounting.credit_deposit_and_create_lock.assert_awaited_once()
+    assert (
+        mock_accounting.credit_deposit_and_create_lock.call_args.kwargs["lock_authorization"]
+        == lock_authorization
+    )
+    mock_accounting.credit_deposit.assert_not_called()
+    assert engine.get_sweep_record("0x" + "aa" * 20, 84532) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_swept_record_terminal_lock_failure_marks_lock_failed(state_dir):
+    """A deterministic lock-auth failure after sweep must stop automatic retry."""
+    lock_authorization = {
+        "service_address": "0x" + "cc" * 20,
+        "token_id": "0x" + "11" * 32,
+        "max_amount": "1000000",
+        "min_amount": "0",
+        "lock_duration": "3600",
+        "authorization_deadline": "9999999999",
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.SWEPT,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        lock_authorization=lock_authorization,
+    )
+    _write_record(state_dir, record)
+
+    mock_accounting = AsyncMock()
+    mock_accounting.credit_deposit = AsyncMock()
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: InvalidExpiry",
+            error_name="InvalidExpiry",
+        )
+    )
+
+    engine = SweepEngine(
+        accounting_service=mock_accounting,
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    await engine.resume_incomplete_sweeps()
+
+    persisted = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    assert persisted is not None
+    assert persisted.state == SweepState.LOCK_FAILED
+    assert persisted.error == "Transaction reverted: InvalidExpiry"
+    mock_accounting.credit_deposit.assert_not_called()
 
 
 def _seed_web3(engine: SweepEngine, chain_id: int, receipt_outcome) -> AsyncMock:
@@ -436,6 +536,45 @@ async def test_recovery_loop_persists_error_for_pending_record(state_dir, monkey
 
 
 @pytest.mark.asyncio
+async def test_recovery_loop_skips_lock_failed_record(state_dir, monkeypatch):
+    monkeypatch.setattr(sweep_engine_module, "SWEEP_RECOVERY_INTERVAL", 0.01)
+
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.LOCK_FAILED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        error="Transaction reverted: InvalidExpiry",
+        lock_authorization={"intent_id": "0x" + "33" * 32},
+    )
+    _write_record(state_dir, record)
+
+    mock_accounting = AsyncMock()
+    mock_accounting.credit_deposit = AsyncMock()
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock()
+    engine = SweepEngine(
+        accounting_service=mock_accounting,
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+
+    engine.start_recovery_loop()
+    try:
+        await asyncio.sleep(0.03)
+    finally:
+        await engine.stop_recovery_loop()
+
+    mock_accounting.credit_deposit.assert_not_called()
+    mock_accounting.credit_deposit_and_create_lock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_resume_does_not_overwrite_sweep_tx_hash_on_error(state_dir):
     """If _resume_sweep_from_pending raises AFTER a sweep tx was broadcast, the
     error flag must NOT be set — doing so lets user retries call cleanup_record
@@ -468,3 +607,113 @@ async def test_resume_does_not_overwrite_sweep_tx_hash_on_error(state_dir):
     assert persisted is not None
     assert persisted.error is None, "error must not overwrite a record that has sweep_tx_hash"
     assert persisted.sweep_tx_hash == "0x" + "dd" * 32
+
+
+def _lock_failed_record(credited_without_lock: bool) -> SweepRecord:
+    return SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.LOCK_FAILED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        error="deposit already processed without requested lock_authorization",
+        credited_without_lock=credited_without_lock,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_lock_failed_credited_without_lock_logs_warning(state_dir, caplog):
+    """Credited-without-lock records must not page operators at restart."""
+    _write_record(state_dir, _lock_failed_record(credited_without_lock=True))
+
+    engine = SweepEngine(
+        accounting_service=AsyncMock(),
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    with caplog.at_level(logging.DEBUG, logger="src.services.sweep_engine"):
+        await engine.resume_incomplete_sweeps()
+
+    sweep_logs = [r for r in caplog.records if r.name == "src.services.sweep_engine"]
+    assert any(r.levelname == "WARNING" and "no operator action" in r.message for r in sweep_logs)
+    assert not any(r.levelname == "CRITICAL" for r in sweep_logs)
+
+
+@pytest.mark.asyncio
+async def test_resume_lock_failed_stranded_logs_critical(state_dir, caplog):
+    """Stranded LOCK_FAILED records (funds swept, uncredited) must still page."""
+    _write_record(state_dir, _lock_failed_record(credited_without_lock=False))
+
+    engine = SweepEngine(
+        accounting_service=AsyncMock(),
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    with caplog.at_level(logging.DEBUG, logger="src.services.sweep_engine"):
+        await engine.resume_incomplete_sweeps()
+
+    sweep_logs = [r for r in caplog.records if r.name == "src.services.sweep_engine"]
+    assert any(
+        r.levelname == "CRITICAL" and "manual intervention required" in r.message
+        for r in sweep_logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_credit_race_marks_credited_without_lock_no_pager(state_dir, caplog):
+    """Resume hitting DepositAlreadyProcessed without the lock executed must
+    classify the record and stay out of the uncredited-deposits pager summary."""
+    lock_authorization = {
+        "service_address": "0x" + "cc" * 20,
+        "token_id": "0x" + "11" * 32,
+        "max_amount": "1000000",
+        "min_amount": "0",
+        "lock_duration": "3600",
+        "authorization_deadline": "9999999999",
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.SWEPT,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        lock_authorization=lock_authorization,
+    )
+    _write_record(state_dir, record)
+
+    mock_accounting = AsyncMock()
+    mock_accounting.has_deposit_lock_authorization_executed = AsyncMock(return_value=False)
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: DepositAlreadyProcessed",
+            error_name="DepositAlreadyProcessed",
+        )
+    )
+
+    engine = SweepEngine(
+        accounting_service=mock_accounting,
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    with caplog.at_level(logging.DEBUG, logger="src.services.sweep_engine"):
+        await engine.resume_incomplete_sweeps()
+
+    persisted = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    assert persisted is not None
+    assert persisted.state == SweepState.LOCK_FAILED
+    assert persisted.credited_without_lock is True
+
+    sweep_logs = [r for r in caplog.records if r.name == "src.services.sweep_engine"]
+    assert not any(r.levelname == "CRITICAL" for r in sweep_logs)

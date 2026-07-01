@@ -86,8 +86,8 @@ Key files: `services/deposit_processor.py`, `services/deposit_verifier.py`, `ser
 ### Sweep State Machine
 
 ```
-            sweep_native              gas-fund            sweep tx mined
-              starts                  succeeds            (receipt.status=1)
+          /deposits/check             gas-fund            sweep tx mined
+          verifies deposit            succeeds            (receipt.status=1)
    (no record) ──────▶ PENDING ────────▶ GAS_FUNDED ────────▶ SWEPT
                           │                                       │
                           │                                       │
@@ -95,10 +95,10 @@ Key files: `services/deposit_processor.py`, `services/deposit_verifier.py`, `ser
                           │     deposit-addr balance covers       │
                           │     gas + amount)                     │
                           │                                       ▼
-                          │                                   creditDeposit
+                          │                         creditDeposit / credit+lock
                           │                                       │
                           │                                       ▼
-                          │                                  record deleted
+                          │                         record deleted or LOCK_FAILED
                           │
                           └─ on failure: stay in current state, error stored,
                              recovery loop retries
@@ -111,12 +111,13 @@ Concurrency:
 Persistence: one JSON file per active sweep at `/data/sweep-engine/sweep_<deposit_address>_<chain_id>.json` (matches `SweepRecord` dataclass). On startup, `resume_incomplete_sweeps()` rebuilds the in-memory `deposit_id_hex → (address, chain_id)` index and re-drives any `PENDING` / `GAS_FUNDED` records.
 
 Recovery semantics:
-- `SWEPT` records → retry `creditDeposit` (idempotent via `DepositAlreadyProcessed` revert).
+- `SWEPT` records → retry `creditDeposit` or atomic `creditDepositAndCreateLockFromAuthorization` (idempotent via `DepositAlreadyProcessed` revert).
 - `GAS_FUNDED` with a mined sweep tx → promote to `SWEPT`, then credit.
 - `PENDING` / `GAS_FUNDED` without a sweep tx → re-run sweep from scratch (no nonce-collision risk because no tx was broadcast).
 - `GAS_FUNDED` with an unmined / dropped / reverted sweep tx → logged for manual inspection (the gas-tank nonce may be encumbered).
+- `LOCK_FAILED` means funds were swept but the signed post-deposit lock can no longer be executed automatically. Operators must manually resolve the deposit (typically `creditDeposit`), or the user can retry with a same-intent replacement authorization when applicable. Exception: when the deposit was already credited *without* the requested lock (e.g. a racing plain `/deposits/check` won the credit), the record is still marked `LOCK_FAILED` so status polling reports a deterministic error, but funds are credited and unlocked — no operator action is needed and the user can create the lock with a regular `createLock`.
 
-A periodic recovery loop (`SWEEP_RECOVERY_INTERVAL = 60s`) retries any `SWEPT` records whose credit failed.
+A periodic recovery loop (`SWEEP_RECOVERY_INTERVAL = 60s`) retries any `SWEPT` records whose credit failed. It skips `LOCK_FAILED` records so deterministic lock failures do not burn retry cycles forever.
 
 Key file: `services/sweep_engine.py`.
 
@@ -218,7 +219,7 @@ uv run pytest test/py/ -v
 uv run pytest test/py/test_sweep_engine.py::test_sweep_native_happy_path -v
 ```
 
-Mocking: `services/sweep_engine.py` defines `DepositAccountingProtocol` (a runtime-checkable `Protocol`) — tests can pass any object that conforms to its 10 methods in place of `AccountingContractService`.
+Mocking: `services/sweep_engine.py` defines `DepositAccountingProtocol` (a runtime-checkable `Protocol`) — tests can pass any object that conforms to its methods in place of `AccountingContractService`.
 
 Notable test files:
 

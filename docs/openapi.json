@@ -252,6 +252,17 @@
             "title": "Chain Type",
             "type": "string"
           },
+          "lock_authorization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DepositLockAuthorization"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional signed post-deposit lock policy"
+          },
           "log_index": {
             "default": 0,
             "description": "Log index for ERC20 deposits (0 for native)",
@@ -339,6 +350,60 @@
           "status"
         ],
         "title": "DepositCheckResponse",
+        "type": "object"
+      },
+      "DepositLockAuthorization": {
+        "description": "Signed policy for locking a deposit after the credited amount is known.",
+        "properties": {
+          "authorization_deadline": {
+            "exclusiveMinimum": 0.0,
+            "title": "Authorization Deadline",
+            "type": "integer"
+          },
+          "intent_id": {
+            "title": "Intent Id",
+            "type": "string"
+          },
+          "lock_duration": {
+            "exclusiveMinimum": 0.0,
+            "title": "Lock Duration",
+            "type": "integer"
+          },
+          "max_amount": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Amount",
+            "type": "integer"
+          },
+          "min_amount": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Min Amount",
+            "type": "integer"
+          },
+          "service_address": {
+            "minLength": 1,
+            "title": "Service Address",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "token_id": {
+            "title": "Token Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service_address",
+          "token_id",
+          "max_amount",
+          "lock_duration",
+          "authorization_deadline",
+          "intent_id",
+          "signature"
+        ],
+        "title": "DepositLockAuthorization",
         "type": "object"
       },
       "ExpiredLocksResponse": {
@@ -863,6 +928,16 @@
               }
             ],
             "title": "External Transaction Id"
+          },
+          "lock_authorization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DepositLockAuthorization"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "moonpay_currency_code": {
             "anyOf": [
@@ -1679,6 +1754,16 @@
               }
             ],
             "title": "Deposit Tx Hash"
+          },
+          "lock_authorization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DepositLockAuthorization"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "moonpay_transaction_id": {
             "anyOf": [

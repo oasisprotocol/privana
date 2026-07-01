@@ -4,14 +4,28 @@ Mocks AccountingContractService and web3 to test state transitions
 without hitting real chains.
 """
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.clients.rofl import TransactionRevertedError
+from src.services.accounting_contract import DepositLockAuthorizationValidationError
 from src.services.sweep_engine import SweepEngine, SweepRecord, SweepState
 
 L2_FEE_PATCH = "src.services.sweep_engine.estimate_l1_data_fee"
+SWEEP_LOGGER = "src.services.sweep_engine"
+
+LOCK_AUTHORIZATION = {
+    "service_address": "0x" + "cc" * 20,
+    "token_id": "0x" + "11" * 32,
+    "max_amount": "1000000",
+    "min_amount": "0",
+    "lock_duration": "3600",
+    "authorization_deadline": "9999999999",
+    "intent_id": "0x" + "33" * 32,
+    "signature": "0x" + "ab" * 65,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +59,8 @@ def mock_accounting():
     svc.generate_sweep_erc20 = AsyncMock(return_value=b"\x04\x05\x06")
     svc.generate_gas_funding_tx = AsyncMock(return_value=b"\x07\x08\x09")
     svc.credit_deposit = AsyncMock()
+    svc.credit_deposit_and_create_lock = AsyncMock()
+    svc.has_deposit_lock_authorization_executed = AsyncMock(return_value=False)
     return svc
 
 
@@ -65,6 +81,16 @@ def test_initial_state_is_idle(engine):
 
 def test_state_persistence(engine, state_dir):
     """Sweep records should survive engine restart."""
+    lock_authorization = {
+        "service_address": "0x" + "cc" * 20,
+        "token_id": "0x" + "11" * 32,
+        "max_amount": "1000000",
+        "min_amount": "0",
+        "lock_duration": "3600",
+        "authorization_deadline": "9999999999",
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
     record = SweepRecord(
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
@@ -72,6 +98,7 @@ def test_state_persistence(engine, state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        lock_authorization=lock_authorization,
     )
     engine._save_record(record)
 
@@ -84,6 +111,95 @@ def test_state_persistence(engine, state_dir):
     loaded = engine2.get_sweep_record("0x" + "aa" * 20, 84532)
     assert loaded is not None
     assert loaded.state == SweepState.PENDING
+    assert loaded.lock_authorization == lock_authorization
+
+
+def test_attach_lock_authorization_updates_in_flight_record(engine):
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+    )
+    engine._save_record(record)
+
+    lock_authorization = {
+        "service_address": "0x" + "cc" * 20,
+        "token_id": "0x" + "11" * 32,
+        "max_amount": "1000000",
+        "min_amount": "0",
+        "lock_duration": "3600",
+        "authorization_deadline": "9999999999",
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
+
+    assert engine.attach_lock_authorization("0x" + "22" * 32, lock_authorization) is True
+    loaded = engine.get_record_by_deposit_id("0x" + "22" * 32)
+    assert loaded is not None
+    assert loaded.lock_authorization == lock_authorization
+
+
+def test_attach_lock_authorization_rejects_different_intent(engine):
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        lock_authorization={"intent_id": "0x" + "33" * 32},
+    )
+    engine._save_record(record)
+
+    with pytest.raises(ValueError, match="different lock_authorization"):
+        engine.attach_lock_authorization(
+            "0x" + "22" * 32,
+            {"intent_id": "0x" + "44" * 32},
+        )
+
+
+def test_attach_lock_authorization_reopens_lock_failed_same_intent(engine):
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.LOCK_FAILED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        error="Transaction reverted: InvalidExpiry",
+        lock_authorization={"intent_id": "0x" + "33" * 32},
+    )
+    engine._save_record(record)
+
+    assert engine.attach_lock_authorization(
+        "0x" + "22" * 32,
+        {
+            "intent_id": "0x" + "33" * 32,
+            "signature": "0x" + "ab" * 65,
+        },
+    )
+
+    loaded = engine.get_record_by_deposit_id("0x" + "22" * 32)
+    assert loaded is not None
+    assert loaded.state == SweepState.SWEPT
+    assert loaded.error is None
+    assert loaded.lock_authorization == {
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
 
 
 @pytest.mark.asyncio
@@ -191,6 +307,112 @@ async def test_idempotent_credit_handles_already_processed(engine, mock_accounti
         token_id=b"\x11" * 32,
         amount=10**18,
         deposit_id=b"\x22" * 32,
+    )
+
+
+@pytest.mark.asyncio
+async def test_idempotent_credit_uses_lock_authorization(engine, mock_accounting):
+    """When lock authorization is present, credit+lock is submitted atomically."""
+    lock_authorization = {
+        "service_address": "0x" + "cc" * 20,
+        "token_id": "0x" + "11" * 32,
+        "max_amount": "1000000",
+        "min_amount": "0",
+        "lock_duration": "3600",
+        "authorization_deadline": "9999999999",
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0x" + "ab" * 65,
+    }
+
+    await engine._idempotent_credit(
+        beneficiary="0x" + "bb" * 20,
+        token_id=b"\x11" * 32,
+        amount=10**18,
+        deposit_id=b"\x22" * 32,
+        lock_authorization=lock_authorization,
+    )
+
+    mock_accounting.credit_deposit_and_create_lock.assert_awaited_once()
+    mock_accounting.credit_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idempotent_credit_with_lock_reraises_lock_authorization_revert(
+    engine, mock_accounting
+):
+    """Rejected lock authorization must not downgrade to unlocked credit."""
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: InvalidSignature",
+            error_name="InvalidSignature",
+        )
+    )
+
+    with pytest.raises(TransactionRevertedError, match="InvalidSignature"):
+        await engine._idempotent_credit(
+            beneficiary="0x" + "bb" * 20,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+            lock_authorization={"signature": "bad"},
+        )
+
+    mock_accounting.credit_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idempotent_credit_with_lock_handles_already_processed(engine, mock_accounting):
+    mock_accounting.has_deposit_lock_authorization_executed = AsyncMock(return_value=True)
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: DepositAlreadyProcessed",
+            error_name="DepositAlreadyProcessed",
+        )
+    )
+
+    await engine._idempotent_credit(
+        beneficiary="0x" + "bb" * 20,
+        token_id=b"\x11" * 32,
+        amount=10**18,
+        deposit_id=b"\x22" * 32,
+        lock_authorization={"intent_id": "0x" + "33" * 32, "signature": "already-used"},
+    )
+
+    mock_accounting.credit_deposit.assert_not_called()
+    mock_accounting.has_deposit_lock_authorization_executed.assert_awaited_once_with(
+        "0x" + "bb" * 20,
+        "0x" + "33" * 32,
+    )
+
+
+@pytest.mark.asyncio
+async def test_idempotent_credit_with_lock_rejects_already_processed_without_lock(
+    engine, mock_accounting
+):
+    mock_accounting.has_deposit_lock_authorization_executed = AsyncMock(return_value=False)
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: DepositAlreadyProcessed",
+            error_name="DepositAlreadyProcessed",
+        )
+    )
+
+    with pytest.raises(
+        DepositLockAuthorizationValidationError,
+        match="processed without requested lock_authorization",
+    ):
+        await engine._idempotent_credit(
+            beneficiary="0x" + "bb" * 20,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+            lock_authorization={"intent_id": "0x" + "33" * 32, "signature": "already-used"},
+        )
+
+    mock_accounting.credit_deposit.assert_not_called()
+    mock_accounting.has_deposit_lock_authorization_executed.assert_awaited_once_with(
+        "0x" + "bb" * 20,
+        "0x" + "33" * 32,
     )
 
 
@@ -504,3 +726,255 @@ def test_persist_error_marks_record_without_sweep_tx(engine):
     stored = engine.get_record_by_deposit_id(deposit_id_hex)
     assert stored is not None
     assert stored.error == "gas funding failed"
+
+
+def _register_pending(engine, *, lock_authorization=None, deposit_id_hex="0x" + "22" * 32):
+    """Pre-register a PENDING record the way process_deposit does."""
+    return engine.register_pending_sweep(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        token_address=None,
+        deposit_id_hex=deposit_id_hex,
+        lock_authorization=lock_authorization,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_already_processed_unexecuted_lock_marks_lock_failed(
+    engine, mock_accounting, caplog
+):
+    """balance=0 + already processed + unexecuted lock auth → LOCK_FAILED, warning not page."""
+    deposit_addr = "0x" + "aa" * 20
+    mock_accounting.is_deposit_processed = AsyncMock(return_value=True)
+    mock_accounting.has_deposit_lock_authorization_executed = AsyncMock(return_value=False)
+    _register_pending(engine, lock_authorization=LOCK_AUTHORIZATION)
+
+    with (
+        patch.object(engine, "_get_web3") as mock_get_w3,
+        caplog.at_level(logging.DEBUG, logger=SWEEP_LOGGER),
+    ):
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=0)
+        mock_get_w3.return_value = w3
+
+        await engine.sweep_native(
+            deposit_address=deposit_addr,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+            lock_authorization=LOCK_AUTHORIZATION,
+        )
+
+    record = engine.get_sweep_record(deposit_addr, 84532)
+    assert record is not None
+    assert record.state == SweepState.LOCK_FAILED
+    assert record.credited_without_lock is True
+    assert "without requested lock_authorization" in record.error
+    mock_accounting.credit_deposit.assert_not_called()
+
+    sweep_logs = [r for r in caplog.records if r.name == SWEEP_LOGGER]
+    assert any(r.levelname == "WARNING" for r in sweep_logs)
+    assert not any(r.levelname == "CRITICAL" for r in sweep_logs)
+
+
+@pytest.mark.asyncio
+async def test_resolve_already_processed_executed_lock_deletes_record(engine, mock_accounting):
+    """balance=0 + already processed + lock auth already executed on-chain → record deleted."""
+    deposit_addr = "0x" + "aa" * 20
+    mock_accounting.is_deposit_processed = AsyncMock(return_value=True)
+    mock_accounting.has_deposit_lock_authorization_executed = AsyncMock(return_value=True)
+    _register_pending(engine, lock_authorization=LOCK_AUTHORIZATION)
+
+    with patch.object(engine, "_get_web3") as mock_get_w3:
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=0)
+        mock_get_w3.return_value = w3
+
+        await engine.sweep_native(
+            deposit_address=deposit_addr,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+            lock_authorization=LOCK_AUTHORIZATION,
+        )
+
+    assert engine.get_sweep_record(deposit_addr, 84532) is None
+    mock_accounting.credit_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_already_processed_no_lock_deletes_record(engine, mock_accounting):
+    """balance=0 + already processed + no lock auth → stale PENDING record is deleted."""
+    deposit_addr = "0x" + "aa" * 20
+    mock_accounting.is_deposit_processed = AsyncMock(return_value=True)
+    _register_pending(engine)
+
+    with patch.object(engine, "_get_web3") as mock_get_w3:
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=0)
+        mock_get_w3.return_value = w3
+
+        await engine.sweep_native(
+            deposit_address=deposit_addr,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+        )
+
+    assert engine.get_sweep_record(deposit_addr, 84532) is None
+    mock_accounting.credit_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sweep_reuses_registered_record_and_credits_with_attached_lock(
+    engine, mock_accounting
+):
+    """A record registered without auth, then attached, must credit+lock with that auth."""
+    deposit_addr = "0x" + "aa" * 20
+    _register_pending(engine)
+    assert engine.attach_lock_authorization("0x" + "22" * 32, LOCK_AUTHORIZATION)
+
+    with patch.object(engine, "_get_web3") as mock_get_w3:
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=10**18)
+        w3.eth.get_transaction_count = AsyncMock(return_value=0)
+        w3.eth.gas_price = _AwaitableValue(1_000_000_000)
+        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.send_raw_transaction = AsyncMock(return_value=b"\xdd" * 32)
+        w3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 100})
+        mock_get_w3.return_value = w3
+
+        # No lock_authorization passed here — it must come from the attached record.
+        await engine.sweep_native(
+            deposit_address=deposit_addr,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+        )
+
+    mock_accounting.credit_deposit_and_create_lock.assert_awaited_once()
+    assert (
+        mock_accounting.credit_deposit_and_create_lock.call_args.kwargs["lock_authorization"]
+        == LOCK_AUTHORIZATION
+    )
+    mock_accounting.credit_deposit.assert_not_called()
+    assert engine.get_sweep_record(deposit_addr, 84532) is None
+
+
+def test_get_record_by_deposit_id_ignores_stale_index_after_clobber(engine):
+    """Same-address re-deposit overwrites the file; the old deposit_id must resolve to None."""
+    deposit_a = "0x" + "22" * 32
+    deposit_b = "0x" + "44" * 32
+    _register_pending(engine, deposit_id_hex=deposit_a)
+    _register_pending(engine, deposit_id_hex=deposit_b)
+
+    assert engine.get_record_by_deposit_id(deposit_a) is None
+    record_b = engine.get_record_by_deposit_id(deposit_b)
+    assert record_b is not None
+    assert record_b.deposit_id_hex == deposit_b
+
+
+def test_mark_lock_authorization_failed_logs_critical_for_plain_validation_error(engine, caplog):
+    """A non-DepositCreditedWithoutLock validation failure still pages (CRITICAL)."""
+    record = _register_pending(engine, lock_authorization=LOCK_AUTHORIZATION)
+
+    with caplog.at_level(logging.DEBUG, logger=SWEEP_LOGGER):
+        engine._mark_lock_authorization_failed(
+            record, DepositLockAuthorizationValidationError("bad signature")
+        )
+
+    persisted = engine.get_sweep_record(record.deposit_address, record.chain_id)
+    assert persisted is not None
+    assert persisted.state == SweepState.LOCK_FAILED
+
+    sweep_logs = [r for r in caplog.records if r.name == SWEEP_LOGGER]
+    assert any(r.levelname == "CRITICAL" for r in sweep_logs)
+
+
+def test_attach_lock_authorization_stays_terminal_for_credited_without_lock(engine):
+    """No authorization can execute for an already-credited deposit: never reopen."""
+    record = _register_pending(engine, lock_authorization=LOCK_AUTHORIZATION)
+    record.state = SweepState.LOCK_FAILED
+    record.error = "deposit already processed without requested lock_authorization"
+    record.credited_without_lock = True
+    engine._save_record(record)
+
+    fresh_intent = dict(LOCK_AUTHORIZATION, intent_id="0x" + "55" * 32)
+    assert engine.attach_lock_authorization("0x" + "22" * 32, fresh_intent) is False
+
+    persisted = engine.get_sweep_record(record.deposit_address, record.chain_id)
+    assert persisted.state == SweepState.LOCK_FAILED
+    assert persisted.credited_without_lock is True
+    assert persisted.lock_authorization == LOCK_AUTHORIZATION
+
+
+@pytest.mark.asyncio
+async def test_credited_without_lock_after_sweep_is_terminal_not_credit_pending(
+    engine, mock_accounting, caplog
+):
+    """A race-lost credit+lock after a successful sweep must not report
+    'credit pending' — the deposit is credited, only the lock is missing."""
+    deposit_addr = "0x" + "aa" * 20
+    mock_accounting.has_deposit_lock_authorization_executed = AsyncMock(return_value=False)
+    mock_accounting.credit_deposit_and_create_lock = AsyncMock(
+        side_effect=TransactionRevertedError(
+            "Transaction reverted: DepositAlreadyProcessed",
+            error_name="DepositAlreadyProcessed",
+        )
+    )
+    _register_pending(engine, lock_authorization=LOCK_AUTHORIZATION)
+
+    with (
+        patch.object(engine, "_get_web3") as mock_get_w3,
+        caplog.at_level(logging.DEBUG, logger=SWEEP_LOGGER),
+    ):
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=10**18)
+        w3.eth.get_transaction_count = AsyncMock(return_value=0)
+        w3.eth.gas_price = _AwaitableValue(1_000_000_000)
+        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.send_raw_transaction = AsyncMock(return_value=b"\xdd" * 32)
+        w3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 100})
+        mock_get_w3.return_value = w3
+
+        # Must return cleanly — no SweepCreditPendingError.
+        await engine.sweep_native(
+            deposit_address=deposit_addr,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+        )
+
+    record = engine.get_sweep_record(deposit_addr, 84532)
+    assert record is not None
+    assert record.state == SweepState.LOCK_FAILED
+    assert record.credited_without_lock is True
+
+    sweep_logs = [r for r in caplog.records if r.name == SWEEP_LOGGER]
+    assert not any("Credit failed" in r.message for r in sweep_logs)
+    assert not any(r.levelname == "CRITICAL" for r in sweep_logs)

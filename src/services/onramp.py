@@ -11,15 +11,18 @@ import secrets
 import struct
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
+from diskcache import Cache
 from web3 import Web3
 
 from src.config import load_settings
 
 _ONRAMP_INTENT_PREFIX = "privana_"
+_ONRAMP_LOCK_AUTHORIZATION_PREFIX = "onramp-lock-authorization:"
 _ONRAMP_INTENT_VERSION = 1
 _ONRAMP_INTENT_TTL_SECONDS = 24 * 60 * 60
 _ONRAMP_INTENT_MAX_LENGTH = 255
@@ -27,8 +30,14 @@ _ONRAMP_INTENT_MAX_CURRENCY_CODE_BYTES = 32
 _ONRAMP_INTENT_STRUCT = struct.Struct(">BIII20s20s32s8sB")
 _MOONPAY_TRANSACTION_PAGE_LIMIT = 50
 _MOONPAY_TRANSACTION_MAX_PAGES = 10
+# Cap stored-authorization lifetime: the signed authorization_deadline is
+# client-chosen and unbounded on-chain, so without a cap one intent could pin
+# a cache entry indefinitely. SDK default deadline is 7 days.
+_LOCK_AUTHORIZATION_MAX_TTL_SECONDS = 30 * 24 * 60 * 60
 
 logger = logging.getLogger(__name__)
+
+_onramp_lock_authorization_store_instance: "OnRampLockAuthorizationStore | None" = None
 
 
 class OnRampError(ValueError):
@@ -41,6 +50,79 @@ class OnRampNotConfiguredError(OnRampError):
 
 class MoonPayAPIError(OnRampError):
     """Raised when MoonPay's server API cannot be queried."""
+
+
+class OnRampLockAuthorizationStore:
+    """Disk-backed storage for signed post-deposit lock policies."""
+
+    def __init__(self) -> None:
+        settings = load_settings()
+        storage_root = Path(settings.auth_token_storage_dir)
+        self._cache = Cache(
+            str(storage_root / "onramp_lock_authorizations"),
+            disk_min_file_size=0,
+            sqlite_journal_mode="WAL",
+        )
+
+    def close(self) -> None:
+        """Close the underlying cache."""
+
+        self._cache.close()
+
+    def put(self, transaction_id: str, lock_authorization: dict[str, Any]) -> dict[str, Any]:
+        if not transaction_id:
+            raise OnRampError("Missing transaction id")
+        normalised = _lock_authorization_or_error(lock_authorization)
+        now = int(time.time())
+        existing = self._cache.get(self._key(transaction_id))
+        created_at = int(existing.get("created_at", now)) if isinstance(existing, dict) else now
+        record = {
+            "transaction_id": transaction_id,
+            "lock_authorization": normalised,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        self._cache.set(
+            self._key(transaction_id),
+            record,
+            expire=_lock_authorization_ttl_seconds(normalised, now),
+        )
+        return dict(normalised)
+
+    def get(self, transaction_id: str) -> dict[str, Any] | None:
+        if not transaction_id:
+            return None
+        record = self._cache.get(self._key(transaction_id))
+        if not isinstance(record, dict):
+            return None
+        lock_authorization = record.get("lock_authorization")
+        return dict(lock_authorization) if isinstance(lock_authorization, dict) else None
+
+    @staticmethod
+    def _key(transaction_id: str) -> str:
+        return f"{_ONRAMP_LOCK_AUTHORIZATION_PREFIX}{transaction_id}"
+
+
+def get_onramp_lock_authorization_store() -> OnRampLockAuthorizationStore:
+    global _onramp_lock_authorization_store_instance
+    if _onramp_lock_authorization_store_instance is None:
+        _onramp_lock_authorization_store_instance = OnRampLockAuthorizationStore()
+    return _onramp_lock_authorization_store_instance
+
+
+def store_onramp_lock_authorization(
+    transaction_id: str,
+    lock_authorization: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the signed lock policy associated with a signed on-ramp intent."""
+
+    return get_onramp_lock_authorization_store().put(transaction_id, lock_authorization)
+
+
+def get_onramp_lock_authorization(transaction_id: str) -> dict[str, Any] | None:
+    """Return a stored signed lock policy for an on-ramp intent, when one exists."""
+
+    return get_onramp_lock_authorization_store().get(transaction_id)
 
 
 def create_onramp_intent(
@@ -371,6 +453,9 @@ def moonpay_transaction_to_onramp_record(
     created_at = _timestamp(data.get("createdAt"), fallback=int(intent["iat"]))
     updated_at = _timestamp(data.get("updatedAt"), fallback=created_at)
     record = onramp_record_from_intent(external_transaction_id, intent)
+    lock_authorization = get_onramp_lock_authorization(external_transaction_id)
+    if lock_authorization is not None:
+        record["lock_authorization"] = lock_authorization
     record.update(
         {
             "moonpay_transaction_id": _string_or_none(data.get("id")),
@@ -563,6 +648,81 @@ def _validate_intent_payload(payload: dict[str, Any]) -> None:
     _currency_code_or_error(str(payload["m"]), "moonpay_currency_code")
 
 
+def _lock_authorization_or_error(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise OnRampError("Invalid lock_authorization")
+
+    service_address = value.get("service_address")
+    if not isinstance(service_address, str) or not Web3.is_address(service_address):
+        raise OnRampError("Invalid lock_authorization.service_address")
+    service_address = Web3.to_checksum_address(service_address)
+    if service_address.lower() == "0x0000000000000000000000000000000000000000":
+        raise OnRampError("Invalid lock_authorization.service_address")
+
+    max_amount = _positive_int(value.get("max_amount"), "lock_authorization.max_amount")
+    min_amount = _non_negative_int(value.get("min_amount", 0), "lock_authorization.min_amount")
+    if min_amount > max_amount:
+        raise OnRampError("lock_authorization min_amount must not exceed max_amount")
+
+    return {
+        "service_address": service_address,
+        "token_id": "0x"
+        + _hex_payload(str(value.get("token_id")), byte_length=32, field_name="token_id"),
+        "max_amount": max_amount,
+        "min_amount": min_amount,
+        "lock_duration": _positive_int(
+            value.get("lock_duration"),
+            "lock_authorization.lock_duration",
+        ),
+        "authorization_deadline": _positive_int(
+            value.get("authorization_deadline"),
+            "lock_authorization.authorization_deadline",
+        ),
+        "intent_id": "0x"
+        + _hex_payload(str(value.get("intent_id")), byte_length=32, field_name="intent_id"),
+        "signature": _hex_string_or_error(value.get("signature"), "lock_authorization.signature"),
+    }
+
+
+def _lock_authorization_ttl_seconds(lock_authorization: dict[str, Any], now: int) -> int:
+    deadline = int(lock_authorization["authorization_deadline"])
+    return max(1, min(deadline - now, _LOCK_AUTHORIZATION_MAX_TTL_SECONDS))
+
+
+def _positive_int(value: Any, field_name: str) -> int:
+    parsed = _int_value(value, field_name)
+    if parsed <= 0:
+        raise OnRampError(f"{field_name} must be positive")
+    return parsed
+
+
+def _non_negative_int(value: Any, field_name: str) -> int:
+    parsed = _int_value(value, field_name)
+    if parsed < 0:
+        raise OnRampError(f"{field_name} must be non-negative")
+    return parsed
+
+
+def _int_value(value: Any, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise OnRampError(f"Invalid {field_name}") from exc
+
+
+def _hex_string_or_error(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise OnRampError(f"Invalid {field_name}")
+    body = value.strip().lower().removeprefix("0x")
+    if not body or len(body) % 2 != 0:
+        raise OnRampError(f"Invalid {field_name}")
+    try:
+        bytes.fromhex(body)
+    except ValueError as exc:
+        raise OnRampError(f"Invalid {field_name}") from exc
+    return "0x" + body
+
+
 def _moonpay_response_items(response: httpx.Response) -> list[dict[str, Any]]:
     if response.status_code == 401:
         raise MoonPayAPIError("MoonPay transaction lookup is unauthorized")
@@ -735,6 +895,7 @@ def onramp_log_summary(record: dict[str, Any]) -> dict[str, Any]:
         "status": record.get("status"),
         "wallet_address": short_address(record.get("wallet_address")),
         "has_on_chain_tx_hash": bool(record.get("on_chain_tx_hash")),
+        "has_lock_authorization": bool(record.get("lock_authorization")),
         "has_token_id": bool(record.get("token_id")),
         "chain_id": record.get("chain_id"),
         "moonpay_currency_code": record.get("moonpay_currency_code"),

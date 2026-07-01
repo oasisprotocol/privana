@@ -26,6 +26,16 @@ TOKEN_ID = "0x" + "11" * 32
 TX_HASH = "0x" + "22" * 32
 PRIVATE_READ_TOKEN = b"\x12" * 65
 RESOLVED_PRIVATE_READ_TOKEN = b"\x34" * 65
+LOCK_AUTHORIZATION = {
+    "service_address": Web3.to_checksum_address("0x" + "cc" * 20),
+    "token_id": TOKEN_ID,
+    "max_amount": "100000000",
+    "min_amount": "0",
+    "lock_duration": "3600",
+    "authorization_deadline": "9999999999",
+    "intent_id": "0x" + "33" * 32,
+    "signature": "0x" + "ab" * 65,
+}
 
 
 class _FakeMoonPayResponse:
@@ -100,6 +110,9 @@ def _set_required_env(monkeypatch, tmp_path) -> None:
     if rate_limiter._auth_rate_limiter_instance is not None:
         rate_limiter._auth_rate_limiter_instance.close()
     rate_limiter._auth_rate_limiter_instance = None
+    if onramp._onramp_lock_authorization_store_instance is not None:
+        onramp._onramp_lock_authorization_store_instance.close()
+    onramp._onramp_lock_authorization_store_instance = None
 
 
 def _use_fake_moonpay_client(monkeypatch, responses: list[object]) -> type[_FakeMoonPayClient]:
@@ -310,6 +323,47 @@ def test_sign_url_rejects_expired_intent_but_pending_can_recover(monkeypatch, tm
     assert pending_response.json()["pending"][0]["transaction_id"] == intent["transaction_id"]
 
 
+def test_pending_onramp_returns_stored_lock_authorization(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+
+    intent = _create_intent(client)
+
+    update_response = client.post(
+        f"/v1/accounting/onramp/{intent['transaction_id']}",
+        json={"lock_authorization": LOCK_AUTHORIZATION},
+    )
+    assert update_response.status_code == 200
+    stored_lock_authorization = update_response.json()["lock_authorization"]
+    assert stored_lock_authorization == {
+        **LOCK_AUTHORIZATION,
+        "max_amount": 100_000_000,
+        "min_amount": 0,
+        "lock_duration": 3600,
+        "authorization_deadline": 9_999_999_999,
+    }
+
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(
+            return_value=[
+                _moonpay_transaction(
+                    intent["transaction_id"],
+                    id="moonpay-tx-locked-pending",
+                )
+            ]
+        ),
+    )
+
+    pending_response = client.get("/v1/accounting/onramp/pending")
+
+    assert pending_response.status_code == 200
+    pending = pending_response.json()["pending"]
+    assert len(pending) == 1
+    assert pending[0]["transaction_id"] == intent["transaction_id"]
+    assert pending[0]["lock_authorization"] == stored_lock_authorization
+
+
 def test_pending_queries_moonpay_by_customer_and_filters_signed_intents(
     monkeypatch, tmp_path
 ) -> None:
@@ -360,6 +414,7 @@ def test_pending_queries_moonpay_by_customer_and_filters_signed_intents(
             "on_chain_tx_hash": TX_HASH,
             "deposit_id": None,
             "deposit_tx_hash": None,
+            "lock_authorization": None,
             "deposit_triggered_at": None,
             "credited_at": None,
             "created_at": 1781017200,
@@ -956,3 +1011,18 @@ def test_update_onramp_rejects_wrong_owner_and_locked_field_mismatch(monkeypatch
     )
     assert wrong_token.status_code == 400
     assert wrong_token.json()["detail"] == "token_id does not match signed on-ramp intent"
+
+    wrong_lock_token = client.post(
+        f"/v1/accounting/onramp/{intent['transaction_id']}",
+        json={
+            "lock_authorization": {
+                **LOCK_AUTHORIZATION,
+                "token_id": "0x" + "33" * 32,
+            }
+        },
+    )
+    assert wrong_lock_token.status_code == 400
+    assert (
+        wrong_lock_token.json()["detail"]
+        == "lock_authorization token_id does not match signed on-ramp intent"
+    )

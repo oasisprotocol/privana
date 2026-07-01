@@ -33,6 +33,7 @@ from web3.providers import AsyncHTTPProvider
 
 from src.clients.rofl import TransactionRevertedError
 from src.config.chain_config import GAS_FUNDING_AMOUNT_WEI
+from src.services.accounting_contract import DepositLockAuthorizationValidationError
 from src.services.l2_fee_estimator import estimate_l1_data_fee
 
 logger = logging.getLogger(__name__)
@@ -50,16 +51,40 @@ class SweepCreditPendingError(Exception):
         )
 
 
+class DepositCreditedWithoutLockError(DepositLockAuthorizationValidationError):
+    """Deposit was already credited without executing the requested lock authorization.
+
+    Unlike other terminal lock-authorization failures, funds are NOT stranded:
+    the deposit is credited to the beneficiary's available balance. Only the
+    lock was not applied — the user can still create it with a regular
+    user-signed createLock. Logged as a warning, not an operator page.
+    """
+
+
 # Interval for periodic retry of SWEPT records whose credit failed.
 # Longer than withdrawal polling (12s) because stuck sweeps are rare edge cases.
 SWEEP_RECOVERY_INTERVAL = 60
+# Revert names from creditDepositAndCreateLockFromAuthorization (Accounting.sol /
+# EIP712SignatureVerifier.sol) that no retry can fix. Any revert NOT listed here is
+# treated as transient and retried forever — when adding a revert reason to the
+# credit+lock path in the contracts, decide its retry semantics and update this set.
+TERMINAL_LOCK_AUTHORIZATION_REVERTS = {
+    "AddressMismatch",
+    "DepositLockAuthorizationAlreadyUsed",
+    "InvalidAmount",
+    "InvalidExpiry",
+    "InvalidIntentId",
+    "InvalidSignature",
+    "LockAmountBelowMinimum",
+    "TooManyActiveLocks",
+}
 
 
 @runtime_checkable
 class DepositAccountingProtocol(Protocol):
     """Interface expected by deposit processing from AccountingContractService.
 
-    Formalizes the 10 methods used by SweepEngine and DepositProcessor.
+    Formalizes the methods used by SweepEngine and DepositProcessor.
     """
 
     async def generate_sweep_native(
@@ -104,6 +129,30 @@ class DepositAccountingProtocol(Protocol):
         deposit_id: bytes,
     ) -> Any: ...
 
+    async def credit_deposit_and_create_lock(
+        self,
+        beneficiary: str,
+        token_id: bytes,
+        amount: int,
+        deposit_id: bytes,
+        lock_authorization: Dict[str, Any],
+    ) -> Any: ...
+
+    async def validate_deposit_lock_authorization(
+        self,
+        beneficiary: str,
+        private_read_token: bytes,
+        token_id: bytes,
+        amount: int,
+        lock_authorization: Dict[str, Any],
+    ) -> None: ...
+
+    async def has_deposit_lock_authorization_executed(
+        self,
+        beneficiary: str,
+        intent_id: str | bytes,
+    ) -> bool: ...
+
     async def get_token_id(self, chain_id: int, token_address: str | None) -> bytes: ...
 
     async def get_deposit_address(
@@ -132,6 +181,7 @@ class SweepState(str, Enum):
     PENDING = "pending"
     GAS_FUNDED = "gas_funded"
     SWEPT = "swept"
+    LOCK_FAILED = "lock_failed"
 
 
 @dataclass
@@ -150,11 +200,15 @@ class SweepRecord:
     deposit_id_hex: str = ""  # hex-encoded bytes32
     source_tx_hash: str = ""  # deposit tx on source chain
     deposit_index: int = 0
+    lock_authorization: Optional[Dict[str, Any]] = None
     sweep_tx_hash: Optional[str] = None
     gas_funding_tx_hash: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     retry_count: int = 0
     error: Optional[str] = None
+    # LOCK_FAILED classification: True = credited-but-unlocked
+    # (DepositCreditedWithoutLockError), False = swept-but-uncredited.
+    credited_without_lock: bool = False
 
     def __post_init__(self):
         if self.chain_id <= 0:
@@ -284,7 +338,12 @@ class SweepEngine:
         location = self._deposit_id_index.get(deposit_id_hex.lower())
         if location is None:
             return None
-        return self.get_sweep_record(*location)
+        record = self.get_sweep_record(*location)
+        # Records are stored per (deposit_address, chain_id): a newer deposit to the
+        # same address replaces the file, leaving this index entry stale.
+        if record is not None and record.deposit_id_hex.lower() != deposit_id_hex.lower():
+            return None
+        return record
 
     def cleanup_record(self, deposit_id_hex: str) -> None:
         """Delete a sweep record by deposit_id (public API for DepositProcessor)."""
@@ -292,6 +351,80 @@ class SweepEngine:
         if location is None:
             return
         self._delete_record(*location)
+
+    def attach_lock_authorization(
+        self, deposit_id_hex: str, lock_authorization: Dict[str, Any]
+    ) -> bool:
+        """Attach or replace lock auth on an in-flight sweep record.
+
+        Replacement is limited to the same intent id. This lets a retry fix a bad
+        signature/deadline before credit, without letting one deposit claim a
+        different user's or app's authorization.
+        """
+        record = self.get_record_by_deposit_id(deposit_id_hex)
+        if record is None:
+            return False
+
+        if record.state == SweepState.LOCK_FAILED and record.credited_without_lock:
+            # The deposit is already credited: no authorization (same or new
+            # intent) can ever execute for it — creditDeposit* reverts with
+            # DepositAlreadyProcessed. Stay terminal instead of ping-ponging
+            # through SWEPT.
+            return False
+
+        current = record.lock_authorization
+        if current is not None:
+            current_intent_id = str(current.get("intent_id", "")).lower()
+            next_intent_id = str(lock_authorization.get("intent_id", "")).lower()
+            if current_intent_id and current_intent_id != next_intent_id:
+                raise ValueError("different lock_authorization already exists for deposit")
+
+        record.lock_authorization = lock_authorization
+        if record.state == SweepState.LOCK_FAILED:
+            record.state = SweepState.SWEPT
+            record.error = None
+        elif record.error and not record.sweep_tx_hash:
+            record.error = None
+        self._save_record(record)
+        return True
+
+    def register_pending_sweep(
+        self,
+        deposit_address: str,
+        chain_id: int,
+        beneficiary: str,
+        chain_type: str,
+        version: int,
+        amount: int,
+        token_id_hex: str,
+        token_address: Optional[str],
+        deposit_id_hex: str,
+        lock_authorization: Optional[Dict[str, Any]] = None,
+    ) -> SweepRecord:
+        """Create and persist a PENDING record before the background sweep task starts.
+
+        This is the concurrency claim for a deposit: process_deposit checks for an
+        existing record and calls this in the same no-await span, so a concurrent
+        /deposits/check for the same deposit always finds the record (and can attach
+        its lock authorization) instead of spawning a second sweep whose zero-balance
+        early-return would silently drop the authorization. It also makes the sweep
+        survive a crash between the /deposits/check response and the first sweep step.
+        """
+        record = SweepRecord(
+            deposit_address=deposit_address,
+            chain_id=chain_id,
+            state=SweepState.PENDING,
+            beneficiary=beneficiary,
+            chain_type=chain_type,
+            version=version,
+            amount=amount,
+            token_id_hex=token_id_hex,
+            token_address=token_address,
+            deposit_id_hex=deposit_id_hex,
+            lock_authorization=lock_authorization,
+        )
+        self._save_record(record)
+        return record
 
     def persist_error(self, deposit_id_hex: str, error: str) -> None:
         """Mark a sweep record as failed (public API for DepositProcessor).
@@ -324,6 +457,7 @@ class SweepEngine:
         token_id: bytes,
         amount: int,
         deposit_id: bytes,
+        lock_authorization: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Execute full native sweep: gas fund → sweep → confirm → credit.
 
@@ -336,6 +470,7 @@ class SweepEngine:
         lock = self._get_address_lock(deposit_address, chain_id)
         async with lock:
             w3 = self._get_web3(chain_id)
+            existing = self.get_record_by_deposit_id(_to_hex(deposit_id))
 
             try:
                 balance = await w3.eth.get_balance(deposit_address)
@@ -346,6 +481,9 @@ class SweepEngine:
                             "Deposit address %s already empty and deposit_id already processed on chain %d",
                             deposit_address,
                             chain_id,
+                        )
+                        await self._resolve_already_processed(
+                            existing, beneficiary, lock_authorization
                         )
                         return
                     raise ValueError(
@@ -361,19 +499,18 @@ class SweepEngine:
 
                 gas_price = await self._get_safe_gas_price(w3, chain_id)
 
-                record = SweepRecord(
+                record = self._ensure_pending_record(
                     deposit_address=deposit_address,
                     chain_id=chain_id,
-                    state=SweepState.PENDING,
                     beneficiary=beneficiary,
                     chain_type=chain_type,
                     version=version,
                     amount=amount,
-                    token_id_hex=_to_hex(token_id),
+                    token_id=token_id,
                     token_address=None,  # native
-                    deposit_id_hex=_to_hex(deposit_id),
+                    deposit_id=deposit_id,
+                    lock_authorization=lock_authorization,
                 )
-                self._save_record(record)
 
                 # Step 1: Fund gas to deposit address (same pattern as ERC20)
                 # Base gas covers L2 execution; L1 data fee covers calldata posting
@@ -446,14 +583,25 @@ class SweepEngine:
                 self._save_record(record)
 
                 # Step 3: Credit
+                latest_lock_authorization = self._latest_lock_authorization(
+                    record, lock_authorization
+                )
                 try:
                     await self._idempotent_credit(
                         beneficiary=beneficiary,
                         token_id=token_id,
                         amount=amount,
                         deposit_id=deposit_id,
+                        lock_authorization=latest_lock_authorization,
                     )
                 except Exception as exc:
+                    if latest_lock_authorization is not None and (
+                        self._is_terminal_lock_authorization_error(exc)
+                    ):
+                        self._mark_lock_authorization_failed(record, exc)
+                        if isinstance(exc, DepositCreditedWithoutLockError):
+                            # Already credited — nothing for the recovery loop to retry.
+                            return
                     logger.exception(
                         "Credit failed after successful native sweep for %s on chain %d",
                         deposit_address,
@@ -490,6 +638,7 @@ class SweepEngine:
         token_id: bytes,
         amount: int,
         deposit_id: bytes,
+        lock_authorization: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Execute full ERC20 sweep: gas fund → sweep → confirm → credit.
 
@@ -499,6 +648,7 @@ class SweepEngine:
         lock = self._get_address_lock(deposit_address, chain_id)
         async with lock:
             w3 = self._get_web3(chain_id)
+            existing = self.get_record_by_deposit_id(_to_hex(deposit_id))
 
             try:
                 erc20_balance = await self._get_erc20_balance(w3, token_address, deposit_address)
@@ -509,6 +659,9 @@ class SweepEngine:
                             token_address,
                             deposit_address,
                             chain_id,
+                        )
+                        await self._resolve_already_processed(
+                            existing, beneficiary, lock_authorization
                         )
                         return
                     raise ValueError(
@@ -525,19 +678,18 @@ class SweepEngine:
 
                 gas_price = await self._get_safe_gas_price(w3, chain_id)
 
-                record = SweepRecord(
+                record = self._ensure_pending_record(
                     deposit_address=deposit_address,
                     chain_id=chain_id,
-                    state=SweepState.PENDING,
                     beneficiary=beneficiary,
                     chain_type=chain_type,
                     version=version,
                     amount=amount,
-                    token_id_hex=_to_hex(token_id),
+                    token_id=token_id,
                     token_address=token_address,
-                    deposit_id_hex=_to_hex(deposit_id),
+                    deposit_id=deposit_id,
+                    lock_authorization=lock_authorization,
                 )
-                self._save_record(record)
 
                 # Step 1: Fund gas to deposit address
                 # Base gas covers L2 execution; L1 data fee covers calldata posting
@@ -609,14 +761,25 @@ class SweepEngine:
                 self._save_record(record)
 
                 # Step 3: Credit
+                latest_lock_authorization = self._latest_lock_authorization(
+                    record, lock_authorization
+                )
                 try:
                     await self._idempotent_credit(
                         beneficiary=beneficiary,
                         token_id=token_id,
                         amount=amount,
                         deposit_id=deposit_id,
+                        lock_authorization=latest_lock_authorization,
                     )
                 except Exception as exc:
+                    if latest_lock_authorization is not None and (
+                        self._is_terminal_lock_authorization_error(exc)
+                    ):
+                        self._mark_lock_authorization_failed(record, exc)
+                        if isinstance(exc, DepositCreditedWithoutLockError):
+                            # Already credited — nothing for the recovery loop to retry.
+                            return
                     logger.exception(
                         "Credit failed after successful ERC20 sweep for %s on chain %d",
                         deposit_address,
@@ -657,16 +820,105 @@ class SweepEngine:
         contract = w3.eth.contract(address=w3.to_checksum_address(token_address), abi=erc20_abi)
         return await contract.functions.balanceOf(w3.to_checksum_address(holder)).call()
 
-    async def _idempotent_credit(
-        self, beneficiary: str, token_id: bytes, amount: int, deposit_id: bytes
-    ) -> None:
-        """Credit deposit, treating DepositAlreadyProcessed revert as success.
+    def _latest_lock_authorization(
+        self,
+        record: SweepRecord,
+        fallback: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        current = self.get_sweep_record(record.deposit_address, record.chain_id)
+        if current and current.lock_authorization is not None:
+            return current.lock_authorization
+        return fallback
 
-        Race condition defense: two /deposits/check requests for the same deposit
-        can both pass the processedDeposits pre-check. The first credits successfully;
-        the second hits the on-chain DepositAlreadyProcessed revert. That's not an error —
-        the deposit was credited, just by the other request.
+    def _ensure_pending_record(
+        self,
+        deposit_address: str,
+        chain_id: int,
+        beneficiary: str,
+        chain_type: str,
+        version: int,
+        amount: int,
+        token_id: bytes,
+        token_address: Optional[str],
+        deposit_id: bytes,
+        lock_authorization: Optional[Dict[str, Any]],
+    ) -> SweepRecord:
+        """Reuse the record registered by process_deposit (or loaded by resume),
+        falling back to creating one for direct invocations.
+
+        Reusing preserves a lock authorization attached between registration and
+        the sweep acquiring the per-address lock. Reads the record fresh here —
+        no awaits between read, modify, and save — so an authorization attached
+        during the preceding balance/gas-price awaits is never clobbered.
         """
+        existing = self.get_record_by_deposit_id(_to_hex(deposit_id))
+        if existing is not None:
+            existing.state = SweepState.PENDING
+            existing.error = None
+            if existing.lock_authorization is None:
+                existing.lock_authorization = lock_authorization
+            self._save_record(existing)
+            return existing
+        return self.register_pending_sweep(
+            deposit_address=deposit_address,
+            chain_id=chain_id,
+            beneficiary=beneficiary,
+            chain_type=chain_type,
+            version=version,
+            amount=amount,
+            token_id_hex=_to_hex(token_id),
+            token_address=token_address,
+            deposit_id_hex=_to_hex(deposit_id),
+            lock_authorization=lock_authorization,
+        )
+
+    async def _resolve_already_processed(
+        self,
+        record: Optional[SweepRecord],
+        beneficiary: str,
+        lock_authorization: Optional[Dict[str, Any]],
+    ) -> None:
+        """Handle balance=0 + deposit already credited (an earlier sweep won).
+
+        If a lock authorization was requested but never executed on-chain, mark
+        the record LOCK_FAILED so status polling reports a deterministic error
+        instead of silently presenting the deposit as credited-with-lock. Funds
+        are credited and unlocked, so this is a warning, not an operator page.
+        """
+        effective = lock_authorization
+        if record is not None:
+            effective = self._latest_lock_authorization(record, lock_authorization)
+
+        if effective is not None:
+            executed = await self._accounting.has_deposit_lock_authorization_executed(
+                beneficiary,
+                effective.get("intent_id", ""),
+            )
+            if not executed:
+                exc = DepositCreditedWithoutLockError(
+                    "deposit already processed without requested lock_authorization"
+                )
+                if record is not None:
+                    self._mark_lock_authorization_failed(record, exc)
+                else:
+                    logger.warning(
+                        "Deposit credited without the requested lock authorization "
+                        "(no sweep record to mark): beneficiary=%s intent_id=%s",
+                        beneficiary,
+                        effective.get("intent_id", ""),
+                    )
+                return
+
+        if record is not None:
+            self._delete_record(record.deposit_address, record.chain_id)
+
+    async def _plain_idempotent_credit(
+        self,
+        beneficiary: str,
+        token_id: bytes,
+        amount: int,
+        deposit_id: bytes,
+    ) -> None:
         try:
             await self._accounting.credit_deposit(
                 beneficiary=beneficiary,
@@ -682,6 +934,91 @@ class SweepEngine:
                 )
                 return  # Not an error — deposit was credited by another request
             raise
+
+    async def _idempotent_credit(
+        self,
+        beneficiary: str,
+        token_id: bytes,
+        amount: int,
+        deposit_id: bytes,
+        lock_authorization: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Credit deposit, optionally locking via authorization, idempotently.
+
+        Race condition defense: two /deposits/check requests for the same deposit
+        can both pass the processedDeposits pre-check. The first credits successfully;
+        the second hits the on-chain DepositAlreadyProcessed revert. That's not an error —
+        the deposit was credited, just by the other request.
+        """
+        if lock_authorization is None:
+            await self._plain_idempotent_credit(beneficiary, token_id, amount, deposit_id)
+            return
+
+        try:
+            await self._accounting.credit_deposit_and_create_lock(
+                beneficiary=beneficiary,
+                token_id=token_id,
+                amount=amount,
+                deposit_id=deposit_id,
+                lock_authorization=lock_authorization,
+            )
+            return
+        except TransactionRevertedError as exc:
+            if exc.error_name == "DepositAlreadyProcessed":
+                if await self._accounting.has_deposit_lock_authorization_executed(
+                    beneficiary,
+                    lock_authorization.get("intent_id", ""),
+                ):
+                    logger.info(
+                        "Deposit already processed with requested lock authorization: deposit_id=%s",
+                        _to_hex(deposit_id),
+                    )
+                    return
+                raise DepositCreditedWithoutLockError(
+                    "deposit already processed without requested lock_authorization"
+                ) from exc
+            raise
+
+    @staticmethod
+    def _is_terminal_lock_authorization_error(exc: Exception) -> bool:
+        if isinstance(exc, DepositLockAuthorizationValidationError):
+            return True
+        if isinstance(exc, TransactionRevertedError):
+            return exc.error_name in TERMINAL_LOCK_AUTHORIZATION_REVERTS
+        return False
+
+    def _mark_lock_authorization_failed(self, record: SweepRecord, exc: Exception) -> None:
+        current = self.get_sweep_record(record.deposit_address, record.chain_id)
+        if current is None:
+            return
+
+        current.state = SweepState.LOCK_FAILED
+        current.error = str(exc)
+        current.retry_count += 1
+        current.credited_without_lock = isinstance(exc, DepositCreditedWithoutLockError)
+        self._save_record(current)
+
+        if isinstance(exc, DepositCreditedWithoutLockError):
+            logger.warning(
+                "Deposit credited without the requested lock authorization; "
+                "funds are safe and unlocked: deposit_id=%s beneficiary=%s chain=%d",
+                current.deposit_id_hex,
+                current.beneficiary,
+                current.chain_id,
+            )
+            return
+
+        logger.critical(
+            "Swept deposit cannot be credited with signed lock authorization; "
+            "manual intervention required: deposit_id=%s beneficiary=%s chain=%d "
+            "sweep_tx=%s error_name=%s error=%s",
+            current.deposit_id_hex,
+            current.beneficiary,
+            current.chain_id,
+            current.sweep_tx_hash,
+            getattr(exc, "error_name", None),
+            exc,
+        )
 
     def load_incomplete_sweeps(self) -> list[SweepRecord]:
         """Load all non-idle sweep records (for restart recovery).
@@ -797,6 +1134,7 @@ class SweepEngine:
                 token_id=token_id,
                 amount=record.amount,
                 deposit_id=deposit_id,
+                lock_authorization=record.lock_authorization,
             )
         else:
             await self.sweep_erc20(
@@ -809,6 +1147,7 @@ class SweepEngine:
                 token_id=token_id,
                 amount=record.amount,
                 deposit_id=deposit_id,
+                lock_authorization=record.lock_authorization,
             )
 
     async def resume_incomplete_sweeps(self) -> None:
@@ -834,17 +1173,45 @@ class SweepEngine:
         failed = 0
         for record in records:
             try:
-                if record.state == SweepState.SWEPT:
+                if record.state == SweepState.LOCK_FAILED:
+                    if record.credited_without_lock:
+                        logger.warning(
+                            "Sweep recovery: deposit_id=%s was credited without the "
+                            "requested lock authorization — funds are safe and "
+                            "unlocked, no operator action needed",
+                            record.deposit_id_hex,
+                        )
+                    else:
+                        failed += 1
+                        logger.critical(
+                            "Sweep recovery: deposit_id=%s is lock_failed after sweep_tx=%s — manual intervention required",
+                            record.deposit_id_hex,
+                            record.sweep_tx_hash,
+                        )
+                elif record.state == SweepState.SWEPT:
                     # Sweep confirmed but credit didn't complete — retry credit
                     token_id = bytes.fromhex(record.token_id_hex.removeprefix("0x"))
                     deposit_id = bytes.fromhex(record.deposit_id_hex.removeprefix("0x"))
 
-                    await self._idempotent_credit(
-                        beneficiary=record.beneficiary,
-                        token_id=token_id,
-                        amount=record.amount,
-                        deposit_id=deposit_id,
-                    )
+                    try:
+                        await self._idempotent_credit(
+                            beneficiary=record.beneficiary,
+                            token_id=token_id,
+                            amount=record.amount,
+                            deposit_id=deposit_id,
+                            lock_authorization=record.lock_authorization,
+                        )
+                    except Exception as exc:
+                        if record.lock_authorization is not None and (
+                            self._is_terminal_lock_authorization_error(exc)
+                        ):
+                            self._mark_lock_authorization_failed(record, exc)
+                            if not isinstance(exc, DepositCreditedWithoutLockError):
+                                # Credited-without-lock is not an uncredited
+                                # deposit: keep it out of the pager summary.
+                                failed += 1
+                            continue
+                        raise
                     self._delete_record(record.deposit_address, record.chain_id)
                     succeeded += 1
                     logger.info(
@@ -922,9 +1289,10 @@ class SweepEngine:
 
             # sweep_tx_hash is persisted BEFORE the SWEPT flip, so a non-SWEPT
             # record with sweep_tx_hash set means the deposit nonce is encumbered.
-            swept = [r for r in records if r.state == SweepState.SWEPT]
-            resumable = [r for r in records if r.state != SweepState.SWEPT and not r.sweep_tx_hash]
-            stuck = [r for r in records if r.state != SweepState.SWEPT and r.sweep_tx_hash]
+            active = [r for r in records if r.state != SweepState.LOCK_FAILED]
+            swept = [r for r in active if r.state == SweepState.SWEPT]
+            resumable = [r for r in active if r.state != SweepState.SWEPT and not r.sweep_tx_hash]
+            stuck = [r for r in active if r.state != SweepState.SWEPT and r.sweep_tx_hash]
 
             for record in stuck:
                 logger.warning(
@@ -972,6 +1340,7 @@ class SweepEngine:
                         token_id=token_id,
                         amount=record.amount,
                         deposit_id=deposit_id,
+                        lock_authorization=record.lock_authorization,
                     )
                     self._delete_record(record.deposit_address, record.chain_id)
                     logger.info(
@@ -979,7 +1348,12 @@ class SweepEngine:
                         record.deposit_address,
                         record.chain_id,
                     )
-                except Exception:
+                except Exception as exc:
+                    if record.lock_authorization is not None and (
+                        self._is_terminal_lock_authorization_error(exc)
+                    ):
+                        self._mark_lock_authorization_failed(record, exc)
+                        continue
                     logger.exception(
                         "Recovery loop: credit retry failed for %s on chain %d — will retry in %ds",
                         record.deposit_address,

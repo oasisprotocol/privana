@@ -10,7 +10,7 @@ from web3 import Web3
 from src.clients.rofl import RoflSubmissionResult
 from src.models.accounting import HistoryKind
 from src.models.private_read import PrivateReadAuth
-from src.services.accounting_contract import AccountingContractService
+from src.services.accounting_contract import AccountingContractService, SubmissionResult
 
 
 def _make_service_with_reader(reader: MagicMock) -> AccountingContractService:
@@ -102,6 +102,253 @@ def _history_amount(value: int) -> bytes:
 
 def _history_payload(token_id: bytes, amount: int, tail: bytes) -> bytes:
     return token_id + _history_amount(amount) + tail
+
+
+@pytest.mark.asyncio
+async def test_credit_deposit_and_create_lock_submits_authorization_tuple() -> None:
+    token_id = b"\x11" * 32
+    deposit_id = b"\x22" * 32
+    intent_id = "0x" + "33" * 32
+    service_address = "0xabcdef1234567890abcdef1234567890abcdef12"
+    signature = "0x" + "ab" * 65
+
+    encoder = MagicMock()
+    encoder._encode_transaction_data.return_value = b"\xde\xad\xbe\xef"
+
+    contract = MagicMock()
+    contract.functions.creditDepositAndCreateLockFromAuthorization.return_value = encoder
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract = contract
+    service._recover_eip712_signer = AsyncMock(return_value=Web3.to_checksum_address(USER_A))
+    service._submit = AsyncMock(
+        return_value=SubmissionResult(submission_id="sub-1", status="submitted")
+    )
+
+    result = await service.credit_deposit_and_create_lock(
+        beneficiary=USER_A,
+        token_id=token_id,
+        amount=50_000_000,
+        deposit_id=deposit_id,
+        lock_authorization={
+            "service_address": service_address,
+            "token_id": "0x" + "11" * 32,
+            "max_amount": "100000000",
+            "min_amount": "10000000",
+            "lock_duration": "3600",
+            "authorization_deadline": "9999999999",
+            "intent_id": intent_id,
+            "signature": signature,
+        },
+    )
+
+    assert result.submission_id == "sub-1"
+    contract.functions.creditDepositAndCreateLockFromAuthorization.assert_called_once()
+    call = contract.functions.creditDepositAndCreateLockFromAuthorization.call_args.args
+    assert call[0] == Web3.to_checksum_address(USER_A)
+    assert call[1] == HexBytes(token_id)
+    assert call[2] == 50_000_000
+    assert call[3] == deposit_id
+    authorization_tuple = call[4]
+    assert authorization_tuple[0] == Web3.to_checksum_address(service_address)
+    assert authorization_tuple[1] == 100_000_000
+    assert authorization_tuple[2] == 10_000_000
+    assert authorization_tuple[3] == 3600
+    assert authorization_tuple[4] == 9999999999
+    assert authorization_tuple[5] == HexBytes(intent_id)
+    assert authorization_tuple[6] == HexBytes(signature)
+    service._submit.assert_awaited_once_with(b"\xde\xad\xbe\xef")
+
+
+@pytest.mark.asyncio
+async def test_credit_deposit_and_create_lock_rejects_token_mismatch() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract = MagicMock()
+    service._recover_eip712_signer = AsyncMock()
+
+    with pytest.raises(ValueError, match="token_id does not match"):
+        await service.credit_deposit_and_create_lock(
+            beneficiary=USER_A,
+            token_id=b"\x11" * 32,
+            amount=50_000_000,
+            deposit_id=b"\x22" * 32,
+            lock_authorization={
+                "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "token_id": "0x" + "99" * 32,
+                "max_amount": 100_000_000,
+                "min_amount": 0,
+                "lock_duration": 3600,
+                "authorization_deadline": 9999999999,
+                "intent_id": "0x" + "33" * 32,
+                "signature": "0x" + "ab" * 65,
+            },
+        )
+
+    service.contract.functions.creditDepositAndCreateLockFromAuthorization.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_credit_deposit_and_create_lock_rejects_signer_mismatch() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract = MagicMock()
+    service._recover_eip712_signer = AsyncMock(
+        return_value="0x9876543210987654321098765432109876543210"
+    )
+
+    with pytest.raises(ValueError, match="signer does not match"):
+        await service.credit_deposit_and_create_lock(
+            beneficiary=USER_A,
+            token_id=b"\x11" * 32,
+            amount=50_000_000,
+            deposit_id=b"\x22" * 32,
+            lock_authorization={
+                "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "token_id": "0x" + "11" * 32,
+                "max_amount": 100_000_000,
+                "min_amount": 0,
+                "lock_duration": 3600,
+                "authorization_deadline": 9999999999,
+                "intent_id": "0x" + "33" * 32,
+                "signature": "0x" + "ab" * 65,
+            },
+        )
+
+    service.contract.functions.creditDepositAndCreateLockFromAuthorization.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validate_deposit_lock_authorization_rejects_amount_below_min(monkeypatch) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._recover_eip712_signer = AsyncMock(return_value=Web3.to_checksum_address(USER_A))
+    service._fetch_user_locks = AsyncMock(return_value=[])
+    monkeypatch.setattr("src.services.accounting_contract.time.time", lambda: 1_000)
+
+    with pytest.raises(ValueError, match="below lock_authorization min_amount"):
+        await service.validate_deposit_lock_authorization(
+            beneficiary=USER_A,
+            private_read_token=b"\x01" * 65,
+            token_id=b"\x11" * 32,
+            amount=5_000_000,
+            lock_authorization={
+                "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "token_id": "0x" + "11" * 32,
+                "max_amount": 100_000_000,
+                "min_amount": 10_000_000,
+                "lock_duration": 3600,
+                "authorization_deadline": 9_999_999_999,
+                "intent_id": "0x" + "33" * 32,
+                "signature": "0x" + "ab" * 65,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_validate_deposit_lock_authorization_rejects_deadline_without_buffer(
+    monkeypatch,
+) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._recover_eip712_signer = AsyncMock(return_value=Web3.to_checksum_address(USER_A))
+    service._fetch_user_locks = AsyncMock(return_value=[])
+    monkeypatch.setattr("src.services.accounting_contract.time.time", lambda: 1_000)
+
+    with pytest.raises(ValueError, match="expired or too close"):
+        await service.validate_deposit_lock_authorization(
+            beneficiary=USER_A,
+            private_read_token=b"\x01" * 65,
+            token_id=b"\x11" * 32,
+            amount=50_000_000,
+            lock_authorization={
+                "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "token_id": "0x" + "11" * 32,
+                "max_amount": 100_000_000,
+                "min_amount": 0,
+                "lock_duration": 3600,
+                "authorization_deadline": 1_200,
+                "intent_id": "0x" + "33" * 32,
+                "signature": "0x" + "ab" * 65,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_validate_deposit_lock_authorization_rejects_full_active_lock_list(
+    monkeypatch,
+) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._recover_eip712_signer = AsyncMock(return_value=Web3.to_checksum_address(USER_A))
+    service.has_deposit_lock_authorization_executed = AsyncMock(return_value=False)
+    service._fetch_user_locks = AsyncMock(return_value=[object()] * 10)
+    monkeypatch.setattr("src.services.accounting_contract.time.time", lambda: 1_000)
+
+    private_read_token = b"\x01" * 65
+    with pytest.raises(ValueError, match="maximum active locks"):
+        await service.validate_deposit_lock_authorization(
+            beneficiary=USER_A,
+            private_read_token=private_read_token,
+            token_id=b"\x11" * 32,
+            amount=50_000_000,
+            lock_authorization={
+                "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "token_id": "0x" + "11" * 32,
+                "max_amount": 100_000_000,
+                "min_amount": 0,
+                "lock_duration": 3600,
+                "authorization_deadline": 9_999_999_999,
+                "intent_id": "0x" + "33" * 32,
+                "signature": "0x" + "ab" * 65,
+            },
+        )
+
+    service._fetch_user_locks.assert_awaited_once_with(private_read_token)
+
+
+@pytest.mark.asyncio
+async def test_validate_deposit_lock_authorization_rejects_used_intent(
+    monkeypatch,
+) -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._recover_eip712_signer = AsyncMock(return_value=Web3.to_checksum_address(USER_A))
+    service.has_deposit_lock_authorization_executed = AsyncMock(return_value=True)
+    service._fetch_user_locks = AsyncMock(return_value=[])
+    monkeypatch.setattr("src.services.accounting_contract.time.time", lambda: 1_000)
+
+    with pytest.raises(ValueError, match="intent_id has already been used"):
+        await service.validate_deposit_lock_authorization(
+            beneficiary=USER_A,
+            private_read_token=b"\x01" * 65,
+            token_id=b"\x11" * 32,
+            amount=50_000_000,
+            lock_authorization={
+                "service_address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "token_id": "0x" + "11" * 32,
+                "max_amount": 100_000_000,
+                "min_amount": 0,
+                "lock_duration": 3600,
+                "authorization_deadline": 9_999_999_999,
+                "intent_id": "0x" + "33" * 32,
+                "signature": "0x" + "ab" * 65,
+            },
+        )
+
+    service._fetch_user_locks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_has_deposit_lock_authorization_executed_reads_intent_mapping() -> None:
+    reader = MagicMock()
+    reader.functions.depositLockIntentLockIds.return_value.call = AsyncMock(return_value=42)
+    service = _make_service_with_reader(reader)
+
+    result = await service.has_deposit_lock_authorization_executed(
+        USER_A,
+        "0x" + "33" * 32,
+    )
+
+    assert result is True
+    reader.functions.depositLockIntentLockIds.assert_called_once_with(
+        Web3.to_checksum_address(USER_A),
+        HexBytes("0x" + "33" * 32),
+    )
 
 
 @pytest.mark.asyncio

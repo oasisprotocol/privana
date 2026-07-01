@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import IntEnum
 from typing import ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from web3 import Web3
 
 
@@ -173,6 +173,59 @@ class LockFundsRequest(BaseModel):
     @field_validator("token_id", "signature")
     def _normalise_hex_fields(cls, value: str) -> str:
         return _normalise_hex(value)
+
+
+class DepositLockAuthorization(BaseModel):
+    """Signed policy for locking a deposit after the credited amount is known."""
+
+    service_address: str = Field(..., min_length=1)
+    token_id: str
+    max_amount: int = Field(..., gt=0)
+    min_amount: int = Field(0, ge=0)
+    lock_duration: int = Field(..., gt=0)
+    authorization_deadline: int = Field(..., gt=0)
+    intent_id: str
+    signature: str
+
+    @field_validator("service_address")
+    def _normalise_service_address(cls, value: str) -> str:
+        if not Web3.is_address(value):
+            raise ValueError("Invalid service_address")
+        checksum = Web3.to_checksum_address(value)
+        if checksum.lower() == "0x0000000000000000000000000000000000000000":
+            raise ValueError("service_address must not be zero")
+        return checksum
+
+    @field_validator(
+        "max_amount",
+        "min_amount",
+        "lock_duration",
+        "authorization_deadline",
+        mode="before",
+    )
+    def _parse_numeric_fields(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("token_id")
+    def _normalise_dla_token_id(cls, value: str) -> str:
+        return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
+
+    @field_validator("intent_id")
+    def _normalise_dla_intent_id(cls, value: str) -> str:
+        intent_id = _normalise_fixed_hex(value, byte_length=32, field_name="intent_id")
+        if int(intent_id, 16) == 0:
+            raise ValueError("intent_id must not be zero")
+        return intent_id
+
+    @field_validator("signature")
+    def _normalise_dla_signature(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+    @model_validator(mode="after")
+    def _validate_amount_bounds(self) -> "DepositLockAuthorization":
+        if self.min_amount > self.max_amount:
+            raise ValueError("min_amount must not exceed max_amount")
+        return self
 
 
 class ModifyLockRequest(BaseModel):
@@ -562,6 +615,10 @@ class DepositCheckRequest(BaseModel):
     amount: int = Field(..., gt=0, description="Claimed deposit amount in base units (e.g. wei)")
     log_index: int = Field(0, description="Log index for ERC20 deposits (0 for native)")
     version: int = Field(0, description="Deposit address derivation version")
+    lock_authorization: DepositLockAuthorization | None = Field(
+        None,
+        description="Optional signed post-deposit lock policy",
+    )
 
     @field_validator("amount", mode="before")
     def _parse_amount(cls, value: int | str | float) -> int:
@@ -633,6 +690,7 @@ class UpdateOnRampRequest(BaseModel):
     quote_currency_amount: str | None = None
     on_chain_tx_hash: str | None = None
     deposit_tx_hash: str | None = None
+    lock_authorization: DepositLockAuthorization | None = None
 
     @field_validator("wallet_address")
     def _normalise_wallet_address(cls, value: str | None) -> str | None:
@@ -676,6 +734,7 @@ class OnRampRecord(BaseModel):
     on_chain_tx_hash: str | None = None
     deposit_id: str | None = None
     deposit_tx_hash: str | None = None
+    lock_authorization: DepositLockAuthorization | None = None
     deposit_triggered_at: int | None = None
     credited_at: int | None = None
     created_at: int

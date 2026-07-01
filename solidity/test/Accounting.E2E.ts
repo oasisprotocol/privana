@@ -20,6 +20,16 @@ const types = {
     { name: "expiry", type: "uint256" },
     { name: "nonce", type: "uint256" },
   ],
+  DepositLockAuthorization: [
+    { name: "userAddress", type: "address" },
+    { name: "serviceAddress", type: "address" },
+    { name: "tokenId", type: "bytes32" },
+    { name: "maxAmount", type: "uint256" },
+    { name: "minAmount", type: "uint256" },
+    { name: "lockDuration", type: "uint256" },
+    { name: "authorizationDeadline", type: "uint256" },
+    { name: "intentId", type: "bytes32" },
+  ],
   ModifyLock: [
     { name: "lockId", type: "uint256" },
     { name: "amount", type: "uint256" },
@@ -585,6 +595,457 @@ describe('Accounting', function () {
       await expect(
         accounting.mockCreditDeposit(userWallet1.address, fakeTokenId, parseUsdt("100"), depositId)
       ).to.be.reverted; // WithCustomError(accounting, "UnsupportedTokenType"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    });
+  });
+
+  describe("creditDepositAndCreateLockFromAuthorization (via mock)", function () {
+    function depositId(label: string): string {
+      return keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32", "uint256"],
+        [84532, ethers.id(label), tokenId, 0]
+      ));
+    }
+
+    async function signAuthorization(
+      beneficiary: Wallet,
+      serviceAddress: string,
+      maxAmount: bigint,
+      minAmount: bigint,
+      lockDuration: bigint,
+      authorizationDeadline: bigint,
+      intentId: string,
+      signedTokenId: string = tokenId
+    ): Promise<string> {
+      return beneficiary.signTypedData(
+        domain,
+        { DepositLockAuthorization: types.DepositLockAuthorization },
+        {
+          userAddress: beneficiary.address,
+          serviceAddress,
+          tokenId: signedTokenId,
+          maxAmount,
+          minAmount,
+          lockDuration,
+          authorizationDeadline,
+          intentId,
+        }
+      );
+    }
+
+    it("should credit deposit and lock actual amount when below signed max", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("50");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-below-max");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+
+      await accounting.mockCreditDepositAndCreateLockFromAuthorization(
+        beneficiary.address,
+        tokenId,
+        amount,
+        depositId("post-deposit-lock-below-max"),
+        {
+          serviceAddress: userWallet2.address,
+          maxAmount,
+          minAmount,
+          lockDuration,
+          authorizationDeadline,
+          intentId,
+          signature,
+        }
+      );
+
+      expect(await accounting.getBalance(beneficiary.address, tokenId)).to.equal(0n);
+      const locks = await accounting.getUserLocks(mockAuthToken(beneficiary.address));
+      expect(locks.length).to.equal(1);
+      expect(locks[0][1]).to.equal(userWallet2.address);
+      expect(locks[0][2]).to.equal(tokenId);
+      expect(locks[0][3]).to.equal(amount);
+      expect(await accounting.depositLockIntentLockIds(beneficiary.address, intentId)).to.equal(locks[0][0]);
+      expect(await accounting.depositLockAuthorizationUsed(beneficiary.address, intentId)).to.equal(true);
+    });
+
+    it("should lock only signed max and leave excess as balance", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("120");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-above-max");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+
+      await accounting.mockCreditDepositAndCreateLockFromAuthorization(
+        beneficiary.address,
+        tokenId,
+        amount,
+        depositId("post-deposit-lock-above-max"),
+        {
+          serviceAddress: userWallet2.address,
+          maxAmount,
+          minAmount,
+          lockDuration,
+          authorizationDeadline,
+          intentId,
+          signature,
+        }
+      );
+
+      expect(await accounting.getBalance(beneficiary.address, tokenId)).to.equal(parseUsdt("20"));
+      const locks = await accounting.getUserLocks(mockAuthToken(beneficiary.address));
+      expect(locks.length).to.equal(1);
+      expect(locks[0][3]).to.equal(maxAmount);
+    });
+
+    it("should reject replay of the same intent id", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("50");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-replay");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const authorization = {
+        serviceAddress: userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId,
+        signature,
+      };
+
+      await accounting.mockCreditDepositAndCreateLockFromAuthorization(
+        beneficiary.address,
+        tokenId,
+        amount,
+        depositId("post-deposit-lock-replay-1"),
+        authorization
+      );
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          tokenId,
+          amount,
+          depositId("post-deposit-lock-replay-2"),
+          authorization
+        )
+      ).to.be.reverted;
+    });
+
+    it("should reject authorization signed for a different token", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("50");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-token-binding");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const otherTokenData = ethers.concat([
+        ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+        ethers.zeroPadValue("0x1111111111111111111111111111111111111111", 20)
+      ]);
+      await (await accounting.setTokenInfo({
+        tokenType: TokenType.ERC20,
+        data: otherTokenData
+      })).wait();
+      const otherTokenId = await accounting.getTokenId({
+        tokenType: TokenType.ERC20,
+        data: otherTokenData
+      });
+      const key = keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32", "uint256"],
+        [84532, ethers.id("post-deposit-lock-token-binding"), otherTokenId, 0]
+      ));
+
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          otherTokenId,
+          amount,
+          key,
+          {
+            serviceAddress: userWallet2.address,
+            maxAmount,
+            minAmount,
+            lockDuration,
+            authorizationDeadline,
+            intentId,
+            signature,
+          }
+        )
+      ).to.be.reverted;
+
+      expect(await accounting.processedDeposits(key)).to.equal(false);
+    });
+
+    it("should reject authorization signed by a different wallet", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const wrongSigner = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("50");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-wrong-signer");
+      const signature = await signAuthorization(
+        wrongSigner,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const key = depositId("post-deposit-lock-wrong-signer");
+
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          tokenId,
+          amount,
+          key,
+          {
+            serviceAddress: userWallet2.address,
+            maxAmount,
+            minAmount,
+            lockDuration,
+            authorizationDeadline,
+            intentId,
+            signature,
+          }
+        )
+      ).to.be.reverted;
+
+      expect(await accounting.processedDeposits(key)).to.equal(false);
+    });
+
+    it("should reject expired authorization deadline", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("50");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) - 1);
+      const intentId = ethers.id("post-deposit-lock-expired");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const key = depositId("post-deposit-lock-expired");
+
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          tokenId,
+          amount,
+          key,
+          {
+            serviceAddress: userWallet2.address,
+            maxAmount,
+            minAmount,
+            lockDuration,
+            authorizationDeadline,
+            intentId,
+            signature,
+          }
+        )
+      ).to.be.reverted;
+
+      expect(await accounting.processedDeposits(key)).to.equal(false);
+    });
+
+    it("should reject zero intent id", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("50");
+      const maxAmount = parseUsdt("100");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.ZeroHash;
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const key = depositId("post-deposit-lock-zero-intent");
+
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          tokenId,
+          amount,
+          key,
+          {
+            serviceAddress: userWallet2.address,
+            maxAmount,
+            minAmount,
+            lockDuration,
+            authorizationDeadline,
+            intentId,
+            signature,
+          }
+        )
+      ).to.be.reverted;
+
+      expect(await accounting.processedDeposits(key)).to.equal(false);
+    });
+
+    it("should not process deposit when authorization would exceed active lock limit", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const lockAmount = parseUsdt("1");
+      const expiry = (await getBlockTimestamp()) + 3600;
+      await accounting.setBalance(beneficiary.address, tokenId, parseUsdt("10"));
+
+      for (let i = 0; i < 10; i++) {
+        const nonce = await accounting.createLockNonces(beneficiary.address);
+        const signature = await beneficiary.signTypedData(
+          domain,
+          { Lock: types.Lock },
+          {
+            serviceAddress: userWallet2.address,
+            tokenId,
+            amount: lockAmount,
+            expiry,
+            nonce,
+          }
+        );
+        await accounting.createLock(
+          userWallet2.address,
+          tokenId,
+          lockAmount,
+          expiry,
+          nonce,
+          signature
+        );
+      }
+      expect((await accounting.getUserLocks(mockAuthToken(beneficiary.address))).length).to.equal(10);
+
+      const amount = parseUsdt("1");
+      const maxAmount = parseUsdt("1");
+      const minAmount = 0n;
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-too-many-locks");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const key = depositId("post-deposit-lock-too-many-locks");
+
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          tokenId,
+          amount,
+          key,
+          {
+            serviceAddress: userWallet2.address,
+            maxAmount,
+            minAmount,
+            lockDuration,
+            authorizationDeadline,
+            intentId,
+            signature,
+          }
+        )
+      ).to.be.reverted;
+
+      expect(await accounting.processedDeposits(key)).to.equal(false);
+      expect(await accounting.getBalance(beneficiary.address, tokenId)).to.equal(0n);
+    });
+
+    it("should not process deposit when actual amount is below signed minimum", async function () {
+      const beneficiary = Wallet.createRandom().connect(ethers.provider) as Wallet;
+      const amount = parseUsdt("5");
+      const maxAmount = parseUsdt("100");
+      const minAmount = parseUsdt("10");
+      const lockDuration = 3600n;
+      const authorizationDeadline = BigInt((await getBlockTimestamp()) + 3600);
+      const intentId = ethers.id("post-deposit-lock-below-min");
+      const signature = await signAuthorization(
+        beneficiary,
+        userWallet2.address,
+        maxAmount,
+        minAmount,
+        lockDuration,
+        authorizationDeadline,
+        intentId
+      );
+      const key = depositId("post-deposit-lock-below-min");
+
+      await expect(
+        accounting.mockCreditDepositAndCreateLockFromAuthorization(
+          beneficiary.address,
+          tokenId,
+          amount,
+          key,
+          {
+            serviceAddress: userWallet2.address,
+            maxAmount,
+            minAmount,
+            lockDuration,
+            authorizationDeadline,
+            intentId,
+            signature,
+          }
+        )
+      ).to.be.reverted;
+
+      expect(await accounting.processedDeposits(key)).to.equal(false);
+      expect(await accounting.getBalance(beneficiary.address, tokenId)).to.equal(0n);
+      expect(await accounting.depositLockAuthorizationUsed(beneficiary.address, intentId)).to.equal(false);
     });
   });
 
@@ -1488,6 +1949,8 @@ describe('Upgradability', function () {
     expect(gasPriceAfter).to.equal(gasPriceBefore, "Gas price should be preserved after upgrade");
     expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
     expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");
+    expect(await upgraded.depositLockAuthorizationUsed(user.address, ethers.id("unused-intent"))).to.equal(false);
+    expect(await upgraded.depositLockIntentLockIds(user.address, ethers.id("unused-intent"))).to.equal(0n);
 
     // Verify the proxy address is the same
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");

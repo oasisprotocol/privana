@@ -398,6 +398,53 @@ def test_get_total_locked_balance_route_passes_token_and_echoes_user(monkeypatch
     mock_service.get_total_locked_balance.assert_awaited_once_with(token, TOKEN_ID_HEX)
 
 
+def test_deposit_check_passes_lock_authorization(monkeypatch) -> None:
+    mock_processor = MagicMock(spec=DepositProcessor)
+    mock_processor.process_deposit = AsyncMock(
+        return_value={
+            "status": "pending",
+            "deposit_id": DEPOSIT_ID_HEX,
+            "amount": "50000000",
+            "token_address": "0x" + "cc" * 20,
+        }
+    )
+    monkeypatch.setattr(routes, "get_deposit_processor", lambda: mock_processor)
+
+    client = _make_authed_client(monkeypatch)
+    response = client.post(
+        "/v1/accounting/deposits/check",
+        json={
+            "chain_id": 84532,
+            "tx_hash": "0x" + "aa" * 32,
+            "amount": "50000000",
+            "lock_authorization": {
+                "service_address": SERVICE_ADDRESS.lower(),
+                "token_id": TOKEN_ID_HEX,
+                "max_amount": "100000000",
+                "min_amount": "0",
+                "lock_duration": "3600",
+                "authorization_deadline": "9999999999",
+                "intent_id": "0x" + "33" * 32,
+                "signature": "abcd",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    call_kwargs = mock_processor.process_deposit.call_args.kwargs
+    assert call_kwargs["auth"].user_address == BENEFICIARY
+    assert call_kwargs["lock_authorization"] == {
+        "service_address": SERVICE_ADDRESS,
+        "token_id": TOKEN_ID_HEX,
+        "max_amount": 100000000,
+        "min_amount": 0,
+        "lock_duration": 3600,
+        "authorization_deadline": 9999999999,
+        "intent_id": "0x" + "33" * 32,
+        "signature": "0xabcd",
+    }
+
+
 def test_deposit_status_route_resolves_siwe_token_user(monkeypatch) -> None:
     raw_token = b"\x12\x34\x56"
     resolved_user = "0x" + "33" * 20
