@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import IntEnum
 from typing import ClassVar, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from web3 import Web3
 
 
@@ -601,8 +601,6 @@ class CreateOnRampIntentRequest(BaseModel):
     token_id: str
     chain_id: int
     moonpay_currency_code: str
-    base_currency_code: str | None = None
-    base_currency_amount: str | None = None
 
     @field_validator("wallet_address")
     def _normalise_wallet_address(cls, value: str | None) -> str | None:
@@ -616,13 +614,15 @@ class CreateOnRampIntentRequest(BaseModel):
     def _normalise_token_id(cls, value: str) -> str:
         return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
 
-    @field_validator("moonpay_currency_code", "base_currency_code")
-    def _normalise_currency_codes(cls, value: str | None) -> str | None:
+    @field_validator("moonpay_currency_code")
+    def _normalise_currency_code(cls, value: str | None) -> str | None:
         return _normalise_currency_code(value)
 
 
 class UpdateOnRampRequest(BaseModel):
-    """Client-side on-ramp transaction metadata update."""
+    """Compatibility update for caller-owned on-ramp transaction metadata."""
+
+    model_config = ConfigDict(extra="forbid")
 
     wallet_address: str | None = None
     token_id: str | None = None
@@ -660,7 +660,7 @@ class UpdateOnRampRequest(BaseModel):
 
 
 class OnRampRecord(BaseModel):
-    """Persisted MoonPay on-ramp transaction visible to the SDK."""
+    """MoonPay on-ramp transaction visible to the SDK."""
 
     transaction_id: str
     external_transaction_id: str | None = None

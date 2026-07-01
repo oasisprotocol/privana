@@ -101,6 +101,7 @@ def load_settings(refresh: bool = False) -> Settings:
     if _settings is None or refresh:
         alchemy_api_key = os.getenv("ALCHEMY_API_KEY")
         chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key)
+        auth_token_storage_dir = os.getenv("AUTH_TOKEN_STORAGE_DIR", ".auth_tokens")
 
         _settings = Settings(
             api_host=os.getenv("API_HOST"),
@@ -118,7 +119,7 @@ def load_settings(refresh: bool = False) -> Settings:
             min_withdrawal_gas_balance=_get_int("MIN_WITHDRAWAL_GAS_BALANCE"),
             auth_token_validity_seconds=_get_int("AUTH_TOKEN_VALIDITY_SECONDS"),
             siwe_domains=_parse_siwe_domains(os.getenv("SIWE_DOMAINS")),
-            auth_token_storage_dir=os.getenv("AUTH_TOKEN_STORAGE_DIR"),
+            auth_token_storage_dir=auth_token_storage_dir,
             auth_clients_json=os.getenv("AUTH_CLIENTS"),
             auth_code_ttl_seconds=_get_int("AUTH_CODE_TTL_SECONDS"),
             auth_rate_limit_window_seconds=_get_int("AUTH_RATE_LIMIT_WINDOW_SECONDS"),
@@ -129,6 +130,8 @@ def load_settings(refresh: bool = False) -> Settings:
             trust_x_forwarded_for=_get_bool("TRUST_X_FORWARDED_FOR"),
             moonpay_api_key=os.getenv("MOONPAY_API_KEY"),
             moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY"),
+            moonpay_intent_signing_key=os.getenv("MOONPAY_INTENT_SIGNING_KEY"),
+            moonpay_api_base_url=os.getenv("MOONPAY_API_BASE_URL", "https://api.moonpay.com"),
             moonpay_webhook_secret_key=os.getenv("MOONPAY_WEBHOOK_SECRET_KEY"),
             moonpay_allowed_hosts=(_parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_HOSTS"))),
             moonpay_allowed_currency_codes=(

@@ -7,32 +7,26 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
+import struct
 import time
-from collections import Counter
-from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import parse_qs, urlparse
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import parse_qs, quote, urlparse
 
-from diskcache import Cache
+import httpx
 from web3 import Web3
 
 from src.config import load_settings
 
-_ONRAMP_PREFIX = "onramp:"
-_COMPLETED_CONFLICT_PROTECTED_FIELDS = {
-    "external_transaction_id",
-    "moonpay_transaction_id",
-    "user_address",
-    "wallet_address",
-    "token_id",
-    "chain_id",
-    "moonpay_currency_code",
-    "base_currency_code",
-    "base_currency_amount",
-    "quote_currency_amount",
-    "on_chain_tx_hash",
-    "deposit_id",
-}
+_ONRAMP_INTENT_PREFIX = "privana_"
+_ONRAMP_INTENT_VERSION = 1
+_ONRAMP_INTENT_TTL_SECONDS = 24 * 60 * 60
+_ONRAMP_INTENT_MAX_LENGTH = 255
+_ONRAMP_INTENT_MAX_CURRENCY_CODE_BYTES = 32
+_ONRAMP_INTENT_STRUCT = struct.Struct(">BIII20s20s32s8sB")
+_MOONPAY_TRANSACTION_PAGE_LIMIT = 50
+_MOONPAY_TRANSACTION_MAX_PAGES = 10
 
 logger = logging.getLogger(__name__)
 
@@ -45,289 +39,88 @@ class OnRampNotConfiguredError(OnRampError):
     """Raised when MoonPay config is missing."""
 
 
-class OnRampStore:
-    """Disk-backed MoonPay transaction store.
+class MoonPayAPIError(OnRampError):
+    """Raised when MoonPay's server API cannot be queried."""
 
-    This mirrors the existing auth/rate-limit storage style and keeps the PoC
-    out of a database migration until the product shape is settled.
-    """
 
-    def __init__(self) -> None:
-        settings = load_settings()
-        storage_root = Path(settings.auth_token_storage_dir)
-        self._cache = Cache(
-            str(storage_root / "onramp_transactions"),
-            disk_min_file_size=0,
-            sqlite_journal_mode="WAL",
-        )
+def create_onramp_intent(
+    *,
+    user_address: str,
+    wallet_address: str,
+    token_id: str,
+    chain_id: int,
+    moonpay_currency_code: str,
+) -> dict[str, Any]:
+    """Create a signed, self-contained externalTransactionId record."""
 
-    def close(self) -> None:
-        self._cache.close()
+    now = int(time.time())
+    payload: dict[str, Any] = {
+        "v": _ONRAMP_INTENT_VERSION,
+        "u": _address_payload(user_address),
+        "w": _address_payload(wallet_address),
+        "t": _hex_payload(token_id, byte_length=32, field_name="token_id"),
+        "c": chain_id,
+        "m": _currency_code_or_error(moonpay_currency_code, "moonpay_currency_code"),
+        "iat": now,
+        "exp": now + _ONRAMP_INTENT_TTL_SECONDS,
+        "n": secrets.token_hex(8),
+    }
 
-    def upsert(self, transaction_id: str, updates: dict[str, Any]) -> dict[str, Any]:
-        if not transaction_id:
-            raise OnRampError("Missing transaction id")
+    transaction_id = _encode_intent_payload(payload)
+    if len(transaction_id) > _ONRAMP_INTENT_MAX_LENGTH:
+        raise OnRampError("MoonPay externalTransactionId is too large")
+    return onramp_record_from_intent(transaction_id, payload)
 
-        now = int(time.time())
-        key = self._key(transaction_id)
-        with self._cache.transact():
-            record = self._cache.get(key) or {
-                "transaction_id": transaction_id,
-                "status": "pending",
-                "created_at": now,
-            }
-            completed_record = record.get("status") == "completed"
-            ignore_stale_status = (
-                record.get("status") == "completed"
-                and updates.get("status") is not None
-                and updates["status"] != "completed"
-            )
-            for field, value in updates.items():
-                if value is not None:
-                    # MoonPay webhooks can be duplicated or delivered out of order.
-                    # Once delivery is completed, ignore stale non-completed state
-                    # while still allowing later callbacks to fill missing metadata.
-                    if ignore_stale_status and field in {"status", "failure_reason"}:
-                        continue
-                    if (
-                        completed_record
-                        and field in _COMPLETED_CONFLICT_PROTECTED_FIELDS
-                        and record.get(field) is not None
-                        and record.get(field) != value
-                    ):
-                        logger.warning(
-                            "Ignoring conflicting completed on-ramp update: tx=%s field=%s",
-                            short_identifier(transaction_id),
-                            field,
-                        )
-                        continue
-                    record[field] = value
-            record["updated_at"] = now
-            if record.get("deposit_tx_hash") and not record.get("deposit_triggered_at"):
-                record["deposit_triggered_at"] = now
-            self._cache.set(key, record)
-            return dict(record)
 
-    def get(self, transaction_id: str) -> Optional[dict[str, Any]]:
-        record = self._cache.get(self._key(transaction_id))
-        return dict(record) if isinstance(record, dict) else None
+def decode_onramp_intent(
+    transaction_id: str,
+    *,
+    allow_expired: bool = False,
+) -> dict[str, Any]:
+    """Verify and decode a signed Privana on-ramp externalTransactionId."""
 
-    def delete(self, transaction_id: str) -> None:
-        self._cache.delete(self._key(transaction_id))
+    if not transaction_id.startswith(_ONRAMP_INTENT_PREFIX):
+        raise OnRampError("MoonPay externalTransactionId is not a Privana intent")
+    token = transaction_id.removeprefix(_ONRAMP_INTENT_PREFIX)
+    payload_b64, separator, signature_b64 = token.partition(".")
+    if not separator or not payload_b64 or not signature_b64:
+        raise OnRampError("MoonPay externalTransactionId is malformed")
 
-    def find_by_moonpay_transaction_id(self, moonpay_transaction_id: str) -> list[dict[str, Any]]:
-        if not moonpay_transaction_id:
-            return []
+    expected = _intent_signature(payload_b64)
+    try:
+        provided = _b64url_decode(signature_b64)
+    except ValueError as exc:
+        raise OnRampError("MoonPay externalTransactionId signature is malformed") from exc
+    if not hmac.compare_digest(expected, provided):
+        raise OnRampError("MoonPay externalTransactionId signature mismatch")
 
-        matches: list[dict[str, Any]] = []
-        for key in list(self._cache):
-            if not isinstance(key, str) or not key.startswith(_ONRAMP_PREFIX):
-                continue
-            record = self._cache.get(key)
-            if not isinstance(record, dict):
-                continue
-            if record.get("moonpay_transaction_id") == moonpay_transaction_id:
-                matches.append(dict(record))
-        return matches
+    try:
+        payload = _decode_intent_payload(_b64url_decode(payload_b64))
+    except ValueError:
+        raise OnRampError("MoonPay externalTransactionId payload is malformed")
 
-    def mark_deposit_started_for_source_tx(
-        self,
-        *,
-        user_address: str,
-        chain_id: int,
-        on_chain_tx_hash: str,
-        deposit_id: str,
-    ) -> list[dict[str, Any]]:
-        """Attach the backend deposit id to completed on-ramp rows for a source tx."""
+    _validate_intent_payload(payload)
+    if not allow_expired and int(payload["exp"]) < int(time.time()):
+        raise OnRampError("MoonPay externalTransactionId has expired")
+    return payload
 
-        user = Web3.to_checksum_address(user_address)
-        source_tx_hash = _hex_or_none(on_chain_tx_hash)
-        deposit_id = _hex_or_none(deposit_id)
-        if source_tx_hash is None or deposit_id is None:
-            return []
 
-        now = int(time.time())
-        updated: list[dict[str, Any]] = []
-        with self._cache.transact():
-            for key in list(self._cache):
-                if not isinstance(key, str) or not key.startswith(_ONRAMP_PREFIX):
-                    continue
-                record = self._cache.get(key)
-                if not isinstance(record, dict):
-                    continue
-                if record.get("user_address") != user:
-                    continue
-                if record.get("status") != "completed":
-                    continue
-                if record.get("chain_id") != chain_id:
-                    continue
-                if record.get("on_chain_tx_hash") != source_tx_hash:
-                    continue
+def onramp_record_from_intent(transaction_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an API-visible on-ramp record from a signed intent payload."""
 
-                existing_deposit_id = record.get("deposit_id")
-                if existing_deposit_id and existing_deposit_id != deposit_id:
-                    logger.warning(
-                        "Skipping on-ramp deposit_id overwrite: tx=%s existing=%s incoming=%s",
-                        short_identifier(record.get("transaction_id")),
-                        short_identifier(existing_deposit_id),
-                        short_identifier(deposit_id),
-                    )
-                    continue
-
-                changed = existing_deposit_id != deposit_id
-                if changed:
-                    record["deposit_id"] = deposit_id
-                if not record.get("deposit_triggered_at"):
-                    record["deposit_triggered_at"] = now
-                    changed = True
-                if not changed:
-                    continue
-                record["updated_at"] = now
-                self._cache.set(key, record)
-                updated.append(dict(record))
-        return updated
-
-    def mark_deposit_credited(
-        self,
-        *,
-        user_address: str,
-        deposit_id: str,
-    ) -> list[dict[str, Any]]:
-        """Mark on-ramp rows credited after backend deposit status proves credit."""
-
-        user = Web3.to_checksum_address(user_address)
-        deposit_id = _hex_or_none(deposit_id)
-        if deposit_id is None:
-            return []
-
-        now = int(time.time())
-        updated: list[dict[str, Any]] = []
-        with self._cache.transact():
-            for key in list(self._cache):
-                if not isinstance(key, str) or not key.startswith(_ONRAMP_PREFIX):
-                    continue
-                record = self._cache.get(key)
-                if not isinstance(record, dict):
-                    continue
-                if record.get("user_address") != user:
-                    continue
-                if record.get("status") != "completed":
-                    continue
-                if record.get("deposit_id") != deposit_id:
-                    continue
-
-                if record.get("credited_at"):
-                    continue
-                record["credited_at"] = now
-                record["updated_at"] = now
-                self._cache.set(key, record)
-                updated.append(dict(record))
-        return updated
-
-    def find_open_intents_for_wallet(
-        self,
-        *,
-        wallet_address: str,
-        transaction_id_prefix: str,
-        moonpay_currency_code: str | None = None,
-        max_age_seconds: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Find unbound Privana intents that can safely receive an orphan webhook."""
-
-        wallet = Web3.to_checksum_address(wallet_address)
-        currency = moonpay_currency_code.lower() if moonpay_currency_code else None
-        now = int(time.time())
-        matches: list[dict[str, Any]] = []
-
-        for key in list(self._cache):
-            if not isinstance(key, str) or not key.startswith(_ONRAMP_PREFIX):
-                continue
-            record = self._cache.get(key)
-            if not isinstance(record, dict):
-                continue
-
-            transaction_id = record.get("transaction_id")
-            if not isinstance(transaction_id, str) or not transaction_id.startswith(
-                transaction_id_prefix
-            ):
-                continue
-            if record.get("status") != "pending":
-                continue
-            if record.get("wallet_address") != wallet:
-                continue
-            if record.get("moonpay_transaction_id") or record.get("on_chain_tx_hash"):
-                continue
-            if record.get("deposit_tx_hash"):
-                continue
-            if currency and str(record.get("moonpay_currency_code", "")).lower() != currency:
-                continue
-            if max_age_seconds is not None:
-                created_at = int(record.get("created_at", 0))
-                if created_at <= 0 or now - created_at > max_age_seconds:
-                    continue
-
-            matches.append(dict(record))
-
-        return matches
-
-    def pending_for_user(self, user_address: str, deposit_address: str) -> list[dict[str, Any]]:
-        user = Web3.to_checksum_address(user_address)
-        deposit = Web3.to_checksum_address(deposit_address)
-        pending: list[dict[str, Any]] = []
-        for key in list(self._cache):
-            if not isinstance(key, str) or not key.startswith(_ONRAMP_PREFIX):
-                continue
-            record = self._cache.get(key)
-            if not isinstance(record, dict):
-                continue
-            if record.get("user_address") != user:
-                continue
-            if record.get("wallet_address") != deposit:
-                continue
-            if record.get("status") != "completed":
-                continue
-            if not record.get("on_chain_tx_hash") or record.get("deposit_tx_hash"):
-                continue
-            if record.get("credited_at"):
-                continue
-            if not record.get("token_id") or not record.get("chain_id"):
-                continue
-            pending.append(dict(record))
-        return sorted(pending, key=lambda r: int(r.get("updated_at", 0)), reverse=True)
-
-    def pending_filter_diagnostics(
-        self, user_address: str, deposit_address: str, *, sample_limit: int = 5
-    ) -> dict[str, Any]:
-        """Return redacted reasons why stored on-ramp rows are not pending."""
-
-        user = Web3.to_checksum_address(user_address)
-        deposit = Web3.to_checksum_address(deposit_address)
-        reason_counts: Counter[str] = Counter()
-        samples: list[dict[str, Any]] = []
-        total = 0
-
-        for key in list(self._cache):
-            if not isinstance(key, str) or not key.startswith(_ONRAMP_PREFIX):
-                continue
-            record = self._cache.get(key)
-            if not isinstance(record, dict):
-                continue
-
-            total += 1
-            reason = _pending_exclusion_reason(record, user, deposit)
-            reason_counts[reason or "included"] += 1
-            if reason and len(samples) < sample_limit:
-                samples.append(_redacted_record_sample(record, reason))
-
-        return {
-            "total_records": total,
-            "reason_counts": dict(reason_counts),
-            "samples": samples,
-        }
-
-    @staticmethod
-    def _key(transaction_id: str) -> str:
-        return f"{_ONRAMP_PREFIX}{transaction_id}"
+    created_at = int(payload["iat"])
+    record: dict[str, Any] = {
+        "transaction_id": transaction_id,
+        "external_transaction_id": transaction_id,
+        "status": "pending",
+        "wallet_address": Web3.to_checksum_address("0x" + str(payload["w"])),
+        "token_id": "0x" + str(payload["t"]).lower(),
+        "chain_id": int(payload["c"]),
+        "moonpay_currency_code": str(payload["m"]).lower(),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    return record
 
 
 def sign_moonpay_url(
@@ -335,6 +128,7 @@ def sign_moonpay_url(
     *,
     expected_wallet_address: str,
     user_address: str,
+    expected_external_transaction_id: str,
     expected_currency_code: str | None = None,
 ) -> str:
     """Validate and sign an unsigned MoonPay widget URL."""
@@ -357,7 +151,7 @@ def sign_moonpay_url(
 
     _require_single(params, "apiKey", settings.moonpay_api_key)
     wallet_address = _single(params, "walletAddress")
-    if wallet_address is None:
+    if not wallet_address:
         raise OnRampError("MoonPay URL is missing walletAddress")
     if not Web3.is_address(wallet_address):
         raise OnRampError("MoonPay walletAddress is invalid")
@@ -367,17 +161,19 @@ def sign_moonpay_url(
         raise OnRampError("MoonPay walletAddress must be the Privana deposit address")
 
     external_customer_id = _single(params, "externalCustomerId")
-    if external_customer_id is None:
+    if not external_customer_id:
         raise OnRampError("MoonPay URL is missing externalCustomerId")
-    if external_customer_id.lower() != user_address.lower():
+    if external_customer_id != Web3.to_checksum_address(user_address):
         raise OnRampError("MoonPay externalCustomerId must match authenticated user")
 
     external_transaction_id = _single(params, "externalTransactionId")
     if not external_transaction_id:
         raise OnRampError("MoonPay URL is missing externalTransactionId")
+    if external_transaction_id != expected_external_transaction_id:
+        raise OnRampError("MoonPay externalTransactionId does not match the Privana intent")
 
     currency_code = _single(params, "currencyCode")
-    if currency_code is None:
+    if not currency_code:
         raise OnRampError("MoonPay URL is missing currencyCode")
     allowed = {code.lower() for code in settings.moonpay_allowed_currency_codes}
     if allowed and currency_code.lower() not in allowed:
@@ -400,6 +196,197 @@ def moonpay_url_external_transaction_id(url: str) -> str | None:
     parsed = urlparse(url)
     params = parse_qs(parsed.query, keep_blank_values=True)
     return _single(params, "externalTransactionId")
+
+
+async def fetch_moonpay_buy_transactions(
+    *,
+    external_customer_id: str | None = None,
+    limit: int = _MOONPAY_TRANSACTION_PAGE_LIMIT,
+    max_pages: int = _MOONPAY_TRANSACTION_MAX_PAGES,
+) -> list[dict[str, Any]]:
+    """Fetch MoonPay buy transactions, optionally scoped by external customer id."""
+
+    settings = load_settings()
+    if not settings.moonpay_secret_key:
+        raise OnRampNotConfiguredError("MoonPay transaction lookup is not configured")
+
+    base_url = settings.moonpay_api_base_url.rstrip("/")
+    headers = {"Authorization": f"Api-Key {settings.moonpay_secret_key}"}
+    try:
+        transactions: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            for page in range(max_pages):
+                offset = page * limit
+                params: dict[str, Any] = {
+                    "limit": limit,
+                    "offset": offset,
+                }
+                if external_customer_id:
+                    params["externalCustomerId"] = external_customer_id
+                response = await client.get(
+                    f"{base_url}/v1/transactions",
+                    params=params,
+                    headers=headers,
+                )
+                page_items = _moonpay_response_items(response)
+                transactions.extend(page_items)
+                if len(page_items) < limit:
+                    break
+            else:
+                logger.warning(
+                    "MoonPay transaction lookup hit page cap: external_customer_id=%s "
+                    "limit=%d max_pages=%d returned=%d",
+                    short_address(external_customer_id),
+                    limit,
+                    max_pages,
+                    len(transactions),
+                )
+        return transactions
+    except httpx.HTTPError as exc:
+        raise MoonPayAPIError("MoonPay transaction lookup failed") from exc
+
+
+async def fetch_moonpay_buy_transactions_by_external_id(
+    external_transaction_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch MoonPay buy transactions for one external transaction id."""
+
+    settings = load_settings()
+    if not settings.moonpay_secret_key:
+        raise OnRampNotConfiguredError("MoonPay transaction lookup is not configured")
+
+    base_url = settings.moonpay_api_base_url.rstrip("/")
+    headers = {"Authorization": f"Api-Key {settings.moonpay_secret_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{base_url}/v1/transactions/ext/{quote(external_transaction_id, safe='')}",
+                headers=headers,
+            )
+            return _moonpay_response_items(response)
+    except httpx.HTTPError as exc:
+        raise MoonPayAPIError("MoonPay transaction lookup failed") from exc
+
+
+def dedupe_moonpay_transactions(
+    transactions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Dedupe MoonPay transactions while preserving order."""
+
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for transaction in transactions:
+        data = _transaction_data(transaction)
+        key = (
+            _string_or_none(data.get("id"))
+            or _string_or_none(data.get("externalTransactionId"))
+            or _string_or_none(data.get("cryptoTransactionId"))
+        )
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(transaction)
+    return deduped
+
+
+def pending_records_from_moonpay_transactions(
+    transactions: list[dict[str, Any]],
+    *,
+    expected_user_address: str,
+    expected_wallet_address: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Convert MoonPay transactions into pending Privana on-ramp rows."""
+
+    user = Web3.to_checksum_address(expected_user_address)
+    wallet = Web3.to_checksum_address(expected_wallet_address)
+    pending: list[dict[str, Any]] = []
+    reason_counts: dict[str, int] = {}
+
+    for transaction in transactions:
+        record, reason = moonpay_transaction_to_onramp_record(
+            transaction,
+            expected_user_address=user,
+            expected_wallet_address=wallet,
+        )
+        reason_counts[reason or "included"] = reason_counts.get(reason or "included", 0) + 1
+        if record is not None:
+            pending.append(record)
+
+    pending.sort(key=lambda row: int(row.get("updated_at", 0)), reverse=True)
+    return pending, {"total_records": len(transactions), "reason_counts": reason_counts}
+
+
+def moonpay_transaction_to_onramp_record(
+    transaction: dict[str, Any],
+    *,
+    expected_user_address: str,
+    expected_wallet_address: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Build a pending row from one MoonPay transaction, or return an exclusion reason."""
+
+    data = _transaction_data(transaction)
+    external_transaction_id = _string_or_none(
+        data.get("externalTransactionId") or data.get("externalId")
+    )
+    if not external_transaction_id:
+        return None, "missing_external_transaction_id"
+    try:
+        intent = decode_onramp_intent(external_transaction_id, allow_expired=True)
+    except OnRampNotConfiguredError:
+        raise
+    except OnRampError:
+        return None, "invalid_external_transaction_id"
+
+    intent_user = Web3.to_checksum_address("0x" + str(intent["u"]))
+    if intent_user != Web3.to_checksum_address(expected_user_address):
+        return None, "user_address_mismatch"
+
+    intent_wallet = Web3.to_checksum_address("0x" + str(intent["w"]))
+    if intent_wallet != Web3.to_checksum_address(expected_wallet_address):
+        return None, "wallet_address_mismatch"
+
+    wallet_address = _address_or_none(
+        data.get("walletAddress")
+        or _nested(data, "wallet", "address")
+        or _nested(data, "crypto", "address")
+    )
+    if wallet_address != intent_wallet:
+        return None, "moonpay_wallet_mismatch"
+
+    status = _normalize_status(data.get("status"))
+    if status != "completed":
+        return None, "not_completed"
+
+    on_chain_tx_hash = _hex_or_none(
+        data.get("cryptoTransactionId") or data.get("transactionHash") or data.get("txHash")
+    )
+    if not on_chain_tx_hash:
+        return None, "missing_on_chain_tx_hash"
+
+    currency_code = _currency_code(data.get("currency")) or _currency_code(data.get("crypto"))
+    if currency_code and currency_code != str(intent["m"]).lower():
+        return None, "currency_mismatch"
+
+    created_at = _timestamp(data.get("createdAt"), fallback=int(intent["iat"]))
+    updated_at = _timestamp(data.get("updatedAt"), fallback=created_at)
+    record = onramp_record_from_intent(external_transaction_id, intent)
+    record.update(
+        {
+            "moonpay_transaction_id": _string_or_none(data.get("id")),
+            "status": "completed",
+            "wallet_address": intent_wallet,
+            "base_currency_code": _currency_code(data.get("baseCurrency"))
+            or record.get("base_currency_code"),
+            "base_currency_amount": _string_or_none(data.get("baseCurrencyAmount"))
+            or record.get("base_currency_amount"),
+            "quote_currency_amount": _string_or_none(data.get("quoteCurrencyAmount")),
+            "on_chain_tx_hash": on_chain_tx_hash,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+    )
+    return record, None
 
 
 def verify_moonpay_webhook(raw_body: bytes, signature_header: str) -> None:
@@ -437,13 +424,9 @@ def verify_moonpay_webhook(raw_body: bytes, signature_header: str) -> None:
 
 
 def webhook_updates(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Extract the transaction id and tracked fields from a MoonPay buy webhook."""
+    """Extract tracked fields from a MoonPay buy webhook for logging."""
 
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        transaction = payload.get("transaction")
-        data = transaction if isinstance(transaction, dict) else {}
-
+    data = _transaction_data(payload)
     moonpay_transaction_id = str(data.get("id") or "")
     external_transaction_id = _string_or_none(
         data.get("externalTransactionId") or payload.get("externalTransactionId")
@@ -452,26 +435,27 @@ def webhook_updates(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not transaction_id:
         raise OnRampError("MoonPay webhook missing transaction id")
 
-    user_address = _address_or_none(
-        data.get("externalCustomerId") or payload.get("externalCustomerId")
+    wallet_address = _address_or_none(
+        data.get("walletAddress")
+        or _nested(data, "wallet", "address")
+        or _nested(data, "crypto", "address")
     )
-    wallet_address = _address_or_none(data.get("walletAddress"))
-    on_chain_tx_hash = data.get("cryptoTransactionId")
     currency_raw = data.get("currency")
     currency: dict[str, Any] = currency_raw if isinstance(currency_raw, dict) else {}
-    status = _normalise_status(data.get("status"))
     updates: dict[str, Any] = {
-        "status": status,
+        "status": _normalize_status(data.get("status")),
         "external_transaction_id": external_transaction_id,
         "moonpay_transaction_id": moonpay_transaction_id or None,
-        "user_address": user_address,
+        "user_address": _address_or_none(
+            data.get("externalCustomerId") or payload.get("externalCustomerId")
+        ),
         "wallet_address": wallet_address,
         "base_currency_code": _currency_code(data.get("baseCurrency")),
         "base_currency_amount": _string_or_none(data.get("baseCurrencyAmount")),
         "quote_currency_amount": _string_or_none(data.get("quoteCurrencyAmount")),
-        "on_chain_tx_hash": _hex_or_none(on_chain_tx_hash),
+        "on_chain_tx_hash": _hex_or_none(data.get("cryptoTransactionId")),
     }
-    if status in {"failed", "cancelled"}:
+    if updates["status"] in {"failed", "cancelled"}:
         updates["failure_reason"] = _string_or_none(data.get("failureReason"))
     if currency.get("code") is not None:
         updates["moonpay_currency_code"] = str(currency["code"]).lower()
@@ -487,6 +471,110 @@ def parse_webhook_body(raw_body: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise OnRampError("Invalid MoonPay webhook payload")
     return payload
+
+
+def _encode_intent_payload(payload: dict[str, Any]) -> str:
+    payload_b64 = _b64url_encode(_pack_intent_payload(payload))
+    signature_b64 = _b64url_encode(_intent_signature(payload_b64))
+    return f"{_ONRAMP_INTENT_PREFIX}{payload_b64}.{signature_b64}"
+
+
+def _pack_intent_payload(payload: dict[str, Any]) -> bytes:
+    currency = _currency_code_or_error(
+        str(payload["m"]),
+        "moonpay_currency_code",
+    ).encode("ascii")
+    if len(currency) > _ONRAMP_INTENT_MAX_CURRENCY_CODE_BYTES:
+        raise OnRampError("MoonPay currency code is too large")
+    chain_id = int(payload["c"])
+    if chain_id < 0 or chain_id > 0xFFFFFFFF:
+        raise OnRampError("Invalid chain_id")
+    return (
+        _ONRAMP_INTENT_STRUCT.pack(
+            int(payload["v"]),
+            int(payload["iat"]),
+            int(payload["exp"]),
+            chain_id,
+            bytes.fromhex(str(payload["u"])),
+            bytes.fromhex(str(payload["w"])),
+            bytes.fromhex(str(payload["t"])),
+            bytes.fromhex(str(payload["n"])),
+            len(currency),
+        )
+        + currency
+    )
+
+
+def _decode_intent_payload(payload: bytes) -> dict[str, Any]:
+    if len(payload) < _ONRAMP_INTENT_STRUCT.size:
+        raise ValueError("intent payload too short")
+    (
+        version,
+        issued_at,
+        expires_at,
+        chain_id,
+        user,
+        wallet,
+        token_id,
+        nonce,
+        currency_length,
+    ) = _ONRAMP_INTENT_STRUCT.unpack_from(payload)
+    expected_length = _ONRAMP_INTENT_STRUCT.size + currency_length
+    if len(payload) != expected_length:
+        raise ValueError("intent payload length mismatch")
+    currency = payload[_ONRAMP_INTENT_STRUCT.size : expected_length].decode("ascii")
+    return {
+        "v": version,
+        "u": user.hex(),
+        "w": wallet.hex(),
+        "t": token_id.hex(),
+        "c": chain_id,
+        "m": currency,
+        "iat": issued_at,
+        "exp": expires_at,
+        "n": nonce.hex(),
+    }
+
+
+def _intent_signature(payload_b64: str) -> bytes:
+    settings = load_settings()
+    if not settings.moonpay_intent_signing_key:
+        raise OnRampNotConfiguredError("MoonPay on-ramp intents are not configured")
+    return hmac.new(
+        settings.moonpay_intent_signing_key.encode("utf-8"),
+        f"privana:onramp:intent:v{_ONRAMP_INTENT_VERSION}:{payload_b64}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+
+
+def _validate_intent_payload(payload: dict[str, Any]) -> None:
+    if payload.get("v") != _ONRAMP_INTENT_VERSION:
+        raise OnRampError("MoonPay externalTransactionId version is unsupported")
+    for field in ("u", "w", "t", "c", "m", "iat", "exp", "n"):
+        if payload.get(field) is None:
+            raise OnRampError("MoonPay externalTransactionId payload is incomplete")
+    Web3.to_checksum_address("0x" + str(payload["u"]))
+    Web3.to_checksum_address("0x" + str(payload["w"]))
+    _hex_payload(str(payload["t"]), byte_length=32, field_name="token_id")
+    int(payload["c"])
+    int(payload["iat"])
+    int(payload["exp"])
+    _hex_payload(str(payload["n"]), byte_length=8, field_name="nonce")
+    _currency_code_or_error(str(payload["m"]), "moonpay_currency_code")
+
+
+def _moonpay_response_items(response: httpx.Response) -> list[dict[str, Any]]:
+    if response.status_code == 401:
+        raise MoonPayAPIError("MoonPay transaction lookup is unauthorized")
+    if response.status_code >= 400:
+        raise MoonPayAPIError(
+            f"MoonPay transaction lookup failed with status {response.status_code}"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise MoonPayAPIError("MoonPay transaction lookup returned invalid JSON") from exc
+    return _extract_transaction_items(payload)
 
 
 def _single(params: dict[str, list[str]], key: str) -> str | None:
@@ -510,6 +598,12 @@ def _address_or_none(value: Any) -> str | None:
     return Web3.to_checksum_address(value) if Web3.is_address(value) else None
 
 
+def _address_payload(value: str) -> str:
+    if not Web3.is_address(value):
+        raise OnRampError("Invalid wallet address")
+    return Web3.to_checksum_address(value).removeprefix("0x").lower()
+
+
 def _hex_or_none(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -517,6 +611,17 @@ def _hex_or_none(value: Any) -> str | None:
     if not value.startswith("0x"):
         value = "0x" + value
     return value
+
+
+def _hex_payload(value: str, *, byte_length: int, field_name: str) -> str:
+    stripped = value.lower().removeprefix("0x")
+    if len(stripped) != byte_length * 2:
+        raise OnRampError(f"Invalid {field_name}")
+    try:
+        bytes.fromhex(stripped)
+    except ValueError as exc:
+        raise OnRampError(f"Invalid {field_name}") from exc
+    return stripped
 
 
 def _string_or_none(value: Any) -> str | None:
@@ -531,7 +636,16 @@ def _currency_code(value: Any) -> str | None:
     return None
 
 
-def _normalise_status(value: Any) -> str:
+def _currency_code_or_error(value: str | None, field_name: str) -> str:
+    if not value or not isinstance(value, str):
+        raise OnRampError(f"Invalid {field_name}")
+    code = value.strip().lower()
+    if not code or any(ch.isspace() for ch in code):
+        raise OnRampError(f"Invalid {field_name}")
+    return code
+
+
+def _normalize_status(value: Any) -> str:
     status = str(value or "pending").lower()
     if status in {"completed", "complete"}:
         return "completed"
@@ -540,45 +654,63 @@ def _normalise_status(value: Any) -> str:
     return "pending"
 
 
-def _pending_exclusion_reason(
-    record: dict[str, Any], user_address: str, deposit_address: str
-) -> str | None:
-    if record.get("user_address") != user_address:
-        return "user_address_mismatch"
-    if record.get("wallet_address") != deposit_address:
-        return "wallet_address_mismatch"
-    if record.get("status") != "completed":
-        return "not_completed"
-    if not record.get("on_chain_tx_hash"):
-        return "missing_on_chain_tx_hash"
-    if record.get("deposit_tx_hash"):
-        return "already_deposit_triggered"
-    if record.get("credited_at"):
-        return "already_credited"
-    if not record.get("token_id"):
-        return "missing_token_id"
-    if not record.get("chain_id"):
-        return "missing_chain_id"
-    return None
+def _extract_transaction_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("transactions", "data", "items", "results"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
 
 
-def _redacted_record_sample(record: dict[str, Any], reason: str) -> dict[str, Any]:
-    return {
-        "reason": reason,
-        "transaction_id": short_identifier(record.get("transaction_id")),
-        "external_transaction_id": short_identifier(record.get("external_transaction_id")),
-        "moonpay_transaction_id": short_identifier(record.get("moonpay_transaction_id")),
-        "status": record.get("status"),
-        "user_address": short_address(record.get("user_address")),
-        "wallet_address": short_address(record.get("wallet_address")),
-        "has_on_chain_tx_hash": bool(record.get("on_chain_tx_hash")),
-        "has_deposit_tx_hash": bool(record.get("deposit_tx_hash")),
-        "has_deposit_id": bool(record.get("deposit_id")),
-        "has_credited_at": bool(record.get("credited_at")),
-        "has_token_id": bool(record.get("token_id")),
-        "chain_id": record.get("chain_id"),
-        "moonpay_currency_code": record.get("moonpay_currency_code"),
-    }
+def _transaction_data(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return data
+    transaction = payload.get("transaction")
+    if isinstance(transaction, dict):
+        return transaction
+    return payload
+
+
+def _nested(data: dict[str, Any], *keys: str) -> Any:
+    value: Any = data
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _timestamp(value: Any, *, fallback: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    try:
+        return base64.urlsafe_b64decode(value + padding)
+    except Exception as exc:
+        raise ValueError("invalid base64url") from exc
 
 
 def short_address(value: Any) -> str | None:
@@ -601,23 +733,9 @@ def onramp_log_summary(record: dict[str, Any]) -> dict[str, Any]:
         "external_transaction_id": short_identifier(record.get("external_transaction_id")),
         "moonpay_transaction_id": short_identifier(record.get("moonpay_transaction_id")),
         "status": record.get("status"),
-        "user_address": short_address(record.get("user_address")),
         "wallet_address": short_address(record.get("wallet_address")),
         "has_on_chain_tx_hash": bool(record.get("on_chain_tx_hash")),
-        "has_deposit_tx_hash": bool(record.get("deposit_tx_hash")),
-        "has_deposit_id": bool(record.get("deposit_id")),
-        "has_credited_at": bool(record.get("credited_at")),
         "has_token_id": bool(record.get("token_id")),
         "chain_id": record.get("chain_id"),
         "moonpay_currency_code": record.get("moonpay_currency_code"),
     }
-
-
-_onramp_store_instance: OnRampStore | None = None
-
-
-def get_onramp_store() -> OnRampStore:
-    global _onramp_store_instance
-    if _onramp_store_instance is None:
-        _onramp_store_instance = OnRampStore()
-    return _onramp_store_instance
