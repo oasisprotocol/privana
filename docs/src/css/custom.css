@@ -12,7 +12,7 @@
 :root {
   --ifm-font-family-base: 'Geist Variable', 'Inter', system-ui, sans-serif;
   --ifm-font-family-monospace: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace;
-  --ifm-color-primary: #d97706;
+  --ifm-color-primary: #c99a1e;
   --ifm-color-primary-dark: #b45309;
   --ifm-color-primary-darker: #92400e;
   --ifm-color-primary-darkest: #78350f;
@@ -24,7 +24,7 @@
 }
 
 [data-theme='dark'] {
-  --ifm-color-primary: #fbbf24;
+  --ifm-color-primary: #fcd34d;
   --ifm-color-primary-dark: #f59e0b;
   --ifm-color-primary-darker: #d97706;
   --ifm-color-primary-darkest: #b45309;
