@@ -40,3 +40,73 @@ main header h1,
   font-family: 'Corben', serif;
   font-weight: 400;
 }
+
+.footer{
+  padding: 16px 32px;
+  font-size: 14px;
+}
+
+.footer .container{
+  display: flex;
+  justify-content: space-between;
+}
+
+.footer .container .footer__col{
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.footer .container .footer__links{
+  margin: 0;
+}
+
+.footer .container .footer__col .footer__title{
+  margin: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.footer .container .footer__col .footer__items{
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.footer .footer__copyright{
+  font-size: 12px;
+  color: var(--ifm-footer-link-color);
+}
+
+.footer__bottom{
+  display: flex;
+  align-items: center;
+}
+
+@media (max-width: 996px) {
+    .footer__col {
+        margin-bottom: 0;
+    }
+}
+
+@media (max-width: 767px) {
+  .footer .container {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .footer .container .footer__links {
+    margin-bottom: 0.5rem;
+  }
+}
+
+@media screen and (max-width: 450px) {
+  .footer .container .footer__col {
+    gap: 0.5rem;
+    flex-direction: column;
+  }
+
+  .footer {
+    padding: 16px;
+  }
+}
