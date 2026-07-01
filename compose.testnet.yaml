@@ -11,6 +11,8 @@ services:
       - SWEEP_STATE_DIR=/data/sweep-engine
       - MOONPAY_API_KEY=${MOONPAY_API_KEY}
       - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY}
+      - MOONPAY_INTENT_SIGNING_KEY=${MOONPAY_INTENT_SIGNING_KEY}
+      - MOONPAY_API_BASE_URL=${MOONPAY_API_BASE_URL:-https://api.moonpay.com}
       - MOONPAY_WEBHOOK_SECRET_KEY=${MOONPAY_WEBHOOK_SECRET_KEY}
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock

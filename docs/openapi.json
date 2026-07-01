@@ -146,28 +146,6 @@
       "CreateOnRampIntentRequest": {
         "description": "Authenticated Privana intent created before opening MoonPay.",
         "properties": {
-          "base_currency_amount": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Base Currency Amount"
-          },
-          "base_currency_code": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Base Currency Code"
-          },
           "chain_id": {
             "title": "Chain Id",
             "type": "integer"
@@ -792,7 +770,7 @@
         "type": "object"
       },
       "OnRampRecord": {
-        "description": "Persisted MoonPay on-ramp transaction visible to the SDK.",
+        "description": "MoonPay on-ramp transaction visible to the SDK.",
         "properties": {
           "base_currency_amount": {
             "anyOf": [
@@ -1655,7 +1633,8 @@
         "type": "object"
       },
       "UpdateOnRampRequest": {
-        "description": "Client-side on-ramp transaction metadata update.",
+        "additionalProperties": false,
+        "description": "Compatibility update for caller-owned on-ramp transaction metadata.",
         "properties": {
           "base_currency_amount": {
             "anyOf": [
@@ -3692,7 +3671,7 @@
     },
     "/v1/accounting/onramp/intent": {
       "post": {
-        "description": "Create the Privana-side MoonPay correlation record before opening the widget.",
+        "description": "Create a signed Privana MoonPay intent before opening the widget.",
         "operationId": "create_onramp_intent_v1_accounting_onramp_intent_post",
         "parameters": [
           {
@@ -3761,6 +3740,27 @@
         "operationId": "get_pending_onramps_v1_accounting_onramp_pending_get",
         "parameters": [
           {
+            "description": "Optional signed Privana MoonPay externalTransactionId values to look up exactly when MoonPay customer metadata is stale.",
+            "in": "query",
+            "name": "externalTransactionId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional signed Privana MoonPay externalTransactionId values to look up exactly when MoonPay customer metadata is stale.",
+              "title": "Externaltransactionid"
+            }
+          },
+          {
             "in": "header",
             "name": "X-SIWE-Token",
             "required": false,
@@ -3815,22 +3815,6 @@
         "description": "Sign a validated MoonPay widget URL for the caller's Privana deposit address.",
         "operationId": "sign_onramp_url_v1_accounting_onramp_sign_url_post",
         "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
           {
             "in": "header",
             "name": "X-SIWE-Token",
@@ -3893,7 +3877,7 @@
     },
     "/v1/accounting/onramp/webhook": {
       "post": {
-        "description": "Persist verified MoonPay buy webhooks.\n\nThe webhook never credits balances directly. It only records MoonPay's\ntransaction state and on-chain tx hash; existing deposit verification still\nperforms the credit.",
+        "description": "Verify and log MoonPay buy webhooks.",
         "operationId": "moonpay_onramp_webhook_v1_accounting_onramp_webhook_post",
         "parameters": [
           {
@@ -3940,7 +3924,7 @@
     },
     "/v1/accounting/onramp/{transaction_id}": {
       "post": {
-        "description": "Upsert caller-owned MoonPay transaction metadata.",
+        "description": "Validate and echo caller-owned MoonPay transaction metadata.",
         "operationId": "update_onramp_v1_accounting_onramp__transaction_id__post",
         "parameters": [
           {

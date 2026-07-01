@@ -2,7 +2,6 @@
 
 import logging
 import time
-import uuid
 from typing import Optional
 
 import jwt
@@ -72,18 +71,25 @@ from src.models.accounting import (
     _normalise_hex,
 )
 from src.models.private_read import PrivateReadAuth
+from src.services import onramp as onramp_service
 from src.services.accounting_contract import (
     SubmissionResult,
     get_accounting_contract_service,
 )
 from src.services.deposit_processor import get_deposit_processor
 from src.services.onramp import (
+    MoonPayAPIError,
     OnRampError,
     OnRampNotConfiguredError,
-    get_onramp_store,
+    decode_onramp_intent,
+    dedupe_moonpay_transactions,
+    fetch_moonpay_buy_transactions,
+    fetch_moonpay_buy_transactions_by_external_id,
     moonpay_url_external_transaction_id,
     onramp_log_summary,
+    onramp_record_from_intent,
     parse_webhook_body,
+    pending_records_from_moonpay_transactions,
     short_address,
     short_identifier,
     sign_moonpay_url,
@@ -99,117 +105,33 @@ _service = get_accounting_contract_service()
 
 _SIWE_TOKEN_HEADER = "X-SIWE-Token"
 _ZERO_ADDRESS = Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
-_ONRAMP_INTENT_PREFIX = "privana_"
-_ONRAMP_ORPHAN_INTENT_MATCH_WINDOW_SECONDS = 24 * 60 * 60
 # MoonPay buy webhooks are a few KB; the webhook is unauthenticated, so cap the
 # body before buffering it instead of trusting upstream proxy limits.
 _ONRAMP_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
-_ONRAMP_INTENT_OWNED_FIELDS = {
-    "user_address",
-    "wallet_address",
-    "token_id",
-    "chain_id",
-    "moonpay_currency_code",
-    "base_currency_code",
-}
-_ONRAMP_UPDATE_LOCKED_FIELDS = {"token_id", "chain_id"}
-_ONRAMP_RECORD_METADATA_FIELDS = {
-    "transaction_id",
-    "created_at",
-    "updated_at",
-    "deposit_id",
-    "deposit_triggered_at",
-    "credited_at",
-}
+_ONRAMP_PENDING_MAX_INTENT_LOOKUPS = 10
+_ONRAMP_PENDING_RATE_LIMIT = 20
 
 
-def _redact_onramp_value(field: str, value: object) -> object:
-    if field in {"user_address", "wallet_address"}:
-        return short_address(value)
-    if field.endswith("_id") or field.endswith("_hash"):
-        return short_identifier(value)
-    return value
-
-
-def _preserve_existing_onramp_fields(
-    existing: dict[str, object], updates: dict[str, object], fields: set[str]
-) -> tuple[dict[str, object], list[dict[str, object]]]:
-    preserved = dict(updates)
-    mismatches: list[dict[str, object]] = []
-    for field in fields:
-        existing_value = existing.get(field)
-        incoming_value = preserved.get(field)
-        if existing_value is None or incoming_value is None or existing_value == incoming_value:
-            continue
-        preserved.pop(field, None)
-        mismatches.append(
-            {
-                "field": field,
-                "existing": _redact_onramp_value(field, existing_value),
-                "incoming": _redact_onramp_value(field, incoming_value),
-            }
-        )
-    return preserved, mismatches
-
-
-def _mark_onramp_deposit_started(
+def _validated_onramp_pending_intents(
+    intent_ids: list[str] | None,
     *,
-    beneficiary: str,
-    chain_id: int,
-    source_tx_hash: str,
-    deposit_id: str | None,
-    credited: bool = False,
-) -> None:
-    if not deposit_id:
-        return
-    try:
-        store = get_onramp_store()
-        linked = store.mark_deposit_started_for_source_tx(
-            user_address=beneficiary,
-            chain_id=chain_id,
-            on_chain_tx_hash=source_tx_hash,
-            deposit_id=deposit_id,
-        )
-        if linked:
-            logger.info(
-                "On-ramp deposit linked: user=%s source_tx=%s deposit_id=%s rows=%d",
-                short_address(beneficiary),
-                short_identifier(source_tx_hash),
-                short_identifier(deposit_id),
-                len(linked),
-            )
-        if credited:
-            _mark_onramp_deposit_credited(beneficiary=beneficiary, deposit_id=deposit_id)
-    except Exception:
-        logger.exception(
-            "Failed to link on-ramp deposit: user=%s source_tx=%s deposit_id=%s",
-            short_address(beneficiary),
-            short_identifier(source_tx_hash),
-            short_identifier(deposit_id),
-        )
-
-
-def _mark_onramp_deposit_credited(*, beneficiary: str, deposit_id: str | None) -> None:
-    if not deposit_id:
-        return
-    try:
-        credited = get_onramp_store().mark_deposit_credited(
-            user_address=beneficiary,
-            deposit_id=deposit_id,
-        )
-        if credited:
-            logger.info(
-                "On-ramp deposit credited: user=%s deposit_id=%s rows=%d",
-                short_address(beneficiary),
-                short_identifier(deposit_id),
-                len(credited),
-            )
-    except Exception:
-        logger.exception(
-            "Failed to mark on-ramp deposit credited: user=%s deposit_id=%s",
-            short_address(beneficiary),
-            short_identifier(deposit_id),
-        )
+    user_address: str,
+    deposit_address: str,
+) -> list[str]:
+    if not intent_ids:
+        return []
+    deduped = list(dict.fromkeys(intent_ids))
+    if len(deduped) > _ONRAMP_PENDING_MAX_INTENT_LOOKUPS:
+        raise OnRampError("Too many externalTransactionId values")
+    user = Web3.to_checksum_address(user_address)
+    deposit = Web3.to_checksum_address(deposit_address)
+    for intent_id in deduped:
+        intent = decode_onramp_intent(intent_id, allow_expired=True)
+        if Web3.to_checksum_address("0x" + str(intent["u"])) != user:
+            raise OnRampError("MoonPay externalTransactionId does not belong to the caller")
+        if Web3.to_checksum_address("0x" + str(intent["w"])) != deposit:
+            raise OnRampError("MoonPay externalTransactionId does not match the deposit address")
+    return deduped
 
 
 def _mint_private_read_token(user_address: str, *, valid_until: Optional[int] = None) -> bytes:
@@ -408,14 +330,6 @@ async def check_deposit(
             version=payload.version,
         )
         resp = DepositCheckResponse(**result)
-        if resp.status in {"pending", "credited"}:
-            _mark_onramp_deposit_started(
-                beneficiary=auth.user_address,
-                chain_id=payload.chain_id,
-                source_tx_hash=payload.tx_hash,
-                deposit_id=resp.deposit_id,
-                credited=resp.status == "credited",
-            )
         if resp.status == "pending":
             response.status_code = 202
         return resp
@@ -450,17 +364,13 @@ async def get_deposit_status(
     # Fast path: check in-memory sweep record
     local_status = processor.get_deposit_status(deposit_id_hex, beneficiary)
     if local_status is not None:
-        resp = DepositCheckResponse(**local_status)
-        if resp.status == "credited":
-            _mark_onramp_deposit_credited(beneficiary=beneficiary, deposit_id=resp.deposit_id)
-        return resp
+        return DepositCheckResponse(**local_status)
 
     # No in-flight record — check on-chain
     try:
         deposit_id_bytes = bytes.fromhex(deposit_id_hex.removeprefix("0x"))
         is_processed = await _service.is_deposit_processed(deposit_id_bytes)
         if is_processed:
-            _mark_onramp_deposit_credited(beneficiary=beneficiary, deposit_id=deposit_id_hex)
             return DepositCheckResponse(status="credited", deposit_id=deposit_id_hex)
     except Exception:
         logger.exception("Failed to check deposit status on-chain for %s", deposit_id_hex)
@@ -474,7 +384,7 @@ async def create_onramp_intent(
     payload: CreateOnRampIntentRequest,
     auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> OnRampRecord:
-    """Create the Privana-side MoonPay correlation record before opening the widget."""
+    """Create a signed Privana MoonPay intent before opening the widget."""
     try:
         deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         deposit_address = Web3.to_checksum_address(deposit_address)
@@ -484,12 +394,13 @@ async def create_onramp_intent(
         ):
             raise OnRampError("wallet_address must be the Privana deposit address")
 
-        intent_id = f"{_ONRAMP_INTENT_PREFIX}{uuid.uuid4().hex}"
-        updates = payload.model_dump(exclude_none=True)
-        updates["external_transaction_id"] = intent_id
-        updates["user_address"] = Web3.to_checksum_address(auth.user_address)
-        updates["wallet_address"] = deposit_address
-        record = get_onramp_store().upsert(intent_id, updates)
+        record = onramp_service.create_onramp_intent(
+            user_address=auth.user_address,
+            wallet_address=deposit_address,
+            token_id=payload.token_id,
+            chain_id=payload.chain_id,
+            moonpay_currency_code=payload.moonpay_currency_code,
+        )
         logger.info("On-ramp intent created: %s", onramp_log_summary(record))
         return OnRampRecord(**record)
     except ContractLogicError as exc:
@@ -497,6 +408,8 @@ async def create_onramp_intent(
             raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
         logger.error("Contract revert in on-ramp intent lookup: %s", exc)
         raise HTTPException(status_code=422, detail="Contract call failed") from exc
+    except OnRampNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OnRampError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -504,7 +417,7 @@ async def create_onramp_intent(
 @router.post("/onramp/sign-url", response_model=SignOnRampUrlResponse)
 async def sign_onramp_url(
     payload: SignOnRampUrlRequest,
-    auth: PrivateReadAuth = Depends(_require_private_read_auth),
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> SignOnRampUrlResponse:
     """Sign a validated MoonPay widget URL for the caller's Privana deposit address."""
     try:
@@ -513,32 +426,27 @@ async def sign_onramp_url(
         intent_id = moonpay_url_external_transaction_id(payload.url)
         if not intent_id:
             raise OnRampError("MoonPay URL is missing externalTransactionId")
-        intent = get_onramp_store().get(intent_id)
-        if not intent:
-            raise OnRampError("MoonPay externalTransactionId is not a known Privana intent")
-        if intent.get("user_address") != Web3.to_checksum_address(auth.user_address):
-            raise OnRampError("MoonPay externalTransactionId does not belong to the caller")
-        if intent.get("wallet_address") != deposit_address:
-            raise OnRampError("MoonPay externalTransactionId does not match the deposit address")
-        if (
-            not intent.get("token_id")
-            or not intent.get("chain_id")
-            or not intent.get("moonpay_currency_code")
+        intent = decode_onramp_intent(intent_id)
+        if Web3.to_checksum_address("0x" + str(intent["u"])) != Web3.to_checksum_address(
+            auth.user_address
         ):
-            raise OnRampError("MoonPay externalTransactionId is missing token metadata")
+            raise OnRampError("MoonPay externalTransactionId does not belong to the caller")
+        if Web3.to_checksum_address("0x" + str(intent["w"])) != deposit_address:
+            raise OnRampError("MoonPay externalTransactionId does not match the deposit address")
 
         signature = sign_moonpay_url(
             payload.url,
             expected_wallet_address=deposit_address,
             user_address=auth.user_address,
-            expected_currency_code=str(intent["moonpay_currency_code"]),
+            expected_external_transaction_id=intent_id,
+            expected_currency_code=str(intent["m"]),
         )
         logger.info(
             "On-ramp URL signed: intent=%s user=%s deposit=%s currency=%s",
             short_identifier(intent_id),
             short_address(auth.user_address),
             short_address(deposit_address),
-            intent.get("moonpay_currency_code"),
+            intent.get("m"),
         )
         return SignOnRampUrlResponse(signature=signature)
     except ContractLogicError as exc:
@@ -557,34 +465,95 @@ async def sign_onramp_url(
 
 @router.get("/onramp/pending", response_model=PendingOnRampsResponse)
 async def get_pending_onramps(
+    request: Request,
+    external_transaction_id: list[str] | None = Query(
+        default=None,
+        alias="externalTransactionId",
+        description=(
+            "Optional signed Privana MoonPay externalTransactionId values to look up exactly "
+            "when MoonPay customer metadata is stale."
+        ),
+    ),
     auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> PendingOnRampsResponse:
     """Return completed MoonPay purchases that still need deposit verification."""
     try:
+        _enforce_auth_rate_limit(request, "onramp_pending", _ONRAMP_PENDING_RATE_LIMIT)
         deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
-        store = get_onramp_store()
-        rows = store.pending_for_user(auth.user_address, deposit_address)
-        if rows:
-            logger.info(
-                "On-ramp pending lookup: user=%s deposit=%s returned=%d",
-                short_address(auth.user_address),
-                short_address(deposit_address),
-                len(rows),
+        fallback_intent_ids = _validated_onramp_pending_intents(
+            external_transaction_id,
+            user_address=auth.user_address,
+            deposit_address=deposit_address,
+        )
+        fallback_transactions: list[dict[str, object]] = []
+        fallback_diagnostics: dict[str, object] | None = None
+        fallback_lookup_succeeded = False
+        if fallback_intent_ids:
+            fallback_errors: list[str] = []
+            for intent_id in fallback_intent_ids:
+                try:
+                    fallback_transactions.extend(
+                        await fetch_moonpay_buy_transactions_by_external_id(intent_id)
+                    )
+                    fallback_lookup_succeeded = True
+                except MoonPayAPIError as exc:
+                    fallback_errors.append(str(exc))
+            _, fallback_diagnostics = pending_records_from_moonpay_transactions(
+                fallback_transactions,
+                expected_user_address=auth.user_address,
+                expected_wallet_address=deposit_address,
             )
-        else:
-            diagnostics = store.pending_filter_diagnostics(auth.user_address, deposit_address)
-            logger.info(
-                "On-ramp pending lookup: user=%s deposit=%s returned=0 diagnostics=%s",
-                short_address(auth.user_address),
-                short_address(deposit_address),
-                diagnostics,
+            if fallback_errors:
+                fallback_diagnostics["errors"] = fallback_errors
+
+        customer_transactions: list[dict[str, object]] = []
+        customer_diagnostics: dict[str, object]
+        try:
+            customer_transactions = await fetch_moonpay_buy_transactions(
+                external_customer_id=auth.user_address
             )
+            rows, customer_diagnostics = pending_records_from_moonpay_transactions(
+                customer_transactions,
+                expected_user_address=auth.user_address,
+                expected_wallet_address=deposit_address,
+            )
+        except MoonPayAPIError as exc:
+            if not fallback_lookup_succeeded:
+                raise
+            rows = []
+            customer_diagnostics = {"error": str(exc)}
+
+        diagnostics: dict[str, object] = customer_diagnostics
+        if fallback_intent_ids:
+            rows, combined_diagnostics = pending_records_from_moonpay_transactions(
+                dedupe_moonpay_transactions(customer_transactions + fallback_transactions),
+                expected_user_address=auth.user_address,
+                expected_wallet_address=deposit_address,
+            )
+            diagnostics = {
+                "customer_lookup": customer_diagnostics,
+                "external_transaction_id_lookup": fallback_diagnostics,
+                "combined_lookup": combined_diagnostics,
+            }
+        logger.info(
+            "On-ramp pending lookup: user=%s deposit=%s returned=%d diagnostics=%s",
+            short_address(auth.user_address),
+            short_address(deposit_address),
+            len(rows),
+            diagnostics,
+        )
         return PendingOnRampsResponse(pending=[OnRampRecord(**row) for row in rows])
     except ContractLogicError as exc:
         if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
             raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
         logger.error("Contract revert in pending on-ramp lookup: %s", exc)
         raise HTTPException(status_code=422, detail="Contract call failed") from exc
+    except OnRampNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except MoonPayAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except OnRampError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/onramp/webhook")
@@ -592,12 +561,7 @@ async def moonpay_onramp_webhook(
     request: Request,
     signature: str = Header(..., alias="Moonpay-Signature-V2"),
 ) -> dict[str, bool]:
-    """Persist verified MoonPay buy webhooks.
-
-    The webhook never credits balances directly. It only records MoonPay's
-    transaction state and on-chain tx hash; existing deposit verification still
-    performs the credit.
-    """
+    """Verify and log MoonPay buy webhooks."""
     buffer = bytearray()
     async for chunk in request.stream():
         if len(buffer) + len(chunk) > _ONRAMP_WEBHOOK_MAX_BODY_BYTES:
@@ -615,81 +579,13 @@ async def moonpay_onramp_webhook(
     try:
         payload = parse_webhook_body(raw_body)
         transaction_id, updates = webhook_updates(payload)
-        store = get_onramp_store()
         id_source = (
             "externalTransactionId" if updates.get("external_transaction_id") else "moonpay_id"
         )
-        existing = store.get(transaction_id)
-        joined_by_moonpay_id = False
-        joined_by_open_intent = False
-        moonpay_transaction_id = updates.get("moonpay_transaction_id")
-        if (
-            existing is None
-            and not updates.get("external_transaction_id")
-            and isinstance(moonpay_transaction_id, str)
-        ):
-            matches = store.find_by_moonpay_transaction_id(moonpay_transaction_id)
-            if len(matches) == 1:
-                existing = matches[0]
-                transaction_id = str(existing["transaction_id"])
-                joined_by_moonpay_id = True
-                updates = dict(updates)
-                if existing.get("external_transaction_id"):
-                    updates["external_transaction_id"] = existing.get("external_transaction_id")
-            elif len(matches) > 1:
-                logger.warning(
-                    "On-ramp webhook has ambiguous MoonPay id mapping: moonpay_tx=%s matches=%d",
-                    short_identifier(moonpay_transaction_id),
-                    len(matches),
-                )
-            else:
-                webhook_wallet = updates.get("wallet_address")
-                if isinstance(webhook_wallet, str):
-                    intent_matches = store.find_open_intents_for_wallet(
-                        wallet_address=webhook_wallet,
-                        transaction_id_prefix=_ONRAMP_INTENT_PREFIX,
-                        moonpay_currency_code=(
-                            str(updates["moonpay_currency_code"])
-                            if updates.get("moonpay_currency_code")
-                            else None
-                        ),
-                        max_age_seconds=_ONRAMP_ORPHAN_INTENT_MATCH_WINDOW_SECONDS,
-                    )
-                    if len(intent_matches) == 1:
-                        existing = intent_matches[0]
-                        transaction_id = str(existing["transaction_id"])
-                        joined_by_open_intent = True
-                        updates = dict(updates)
-                        updates["external_transaction_id"] = (
-                            existing.get("external_transaction_id") or transaction_id
-                        )
-                    elif len(intent_matches) > 1:
-                        logger.warning(
-                            "On-ramp webhook has ambiguous open-intent fallback: "
-                            "moonpay_tx=%s wallet=%s currency=%s matches=%d",
-                            short_identifier(moonpay_transaction_id),
-                            short_address(webhook_wallet),
-                            updates.get("moonpay_currency_code"),
-                            len(intent_matches),
-                        )
-
-        intent_mismatches: list[dict[str, object]] = []
-        if existing:
-            updates, intent_mismatches = _preserve_existing_onramp_fields(
-                existing,
-                updates,
-                _ONRAMP_INTENT_OWNED_FIELDS,
-            )
-        record = store.upsert(transaction_id, updates)
         logger.info(
-            "On-ramp webhook accepted: tx=%s id_source=%s joined_by_moonpay_id=%s "
-            "joined_by_open_intent=%s intent_mismatches=%s orphan=%s updates=%s record=%s",
+            "On-ramp webhook accepted: tx=%s id_source=%s updates=%s",
             short_identifier(transaction_id),
             id_source,
-            joined_by_moonpay_id,
-            joined_by_open_intent,
-            intent_mismatches,
-            existing is None,
             {
                 "external_transaction_id": short_identifier(updates.get("external_transaction_id")),
                 "moonpay_transaction_id": short_identifier(updates.get("moonpay_transaction_id")),
@@ -700,7 +596,6 @@ async def moonpay_onramp_webhook(
                 "moonpay_currency_code": updates.get("moonpay_currency_code"),
                 "failure_reason_present": bool(updates.get("failure_reason")),
             },
-            onramp_log_summary(record),
         )
         return {"ok": True}
     except OnRampNotConfiguredError as exc:
@@ -715,7 +610,7 @@ async def update_onramp(
     payload: UpdateOnRampRequest,
     auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> OnRampRecord:
-    """Upsert caller-owned MoonPay transaction metadata."""
+    """Validate and echo caller-owned MoonPay transaction metadata."""
     try:
         deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         deposit_address = Web3.to_checksum_address(deposit_address)
@@ -726,96 +621,35 @@ async def update_onramp(
             raise OnRampError("wallet_address must be the Privana deposit address")
 
         beneficiary = Web3.to_checksum_address(auth.user_address)
-        store = get_onramp_store()
-        existing = store.get(transaction_id)
-        if existing:
-            existing_user = existing.get("user_address")
-            existing_wallet = existing.get("wallet_address")
-            if existing_user and existing_user != beneficiary:
-                raise HTTPException(
-                    status_code=403,
-                    detail="on-ramp transaction does not belong to the caller",
-                )
-            if existing_wallet and existing_wallet != deposit_address:
-                raise HTTPException(
-                    status_code=403,
-                    detail="on-ramp transaction does not match the caller deposit address",
-                )
-            if not existing_user and not existing_wallet:
-                raise HTTPException(
-                    status_code=409,
-                    detail="orphan on-ramp transaction cannot be claimed without wallet address",
-                )
-        elif transaction_id.startswith(_ONRAMP_INTENT_PREFIX):
-            raise OnRampError("Unknown Privana on-ramp intent")
-
-        updates = payload.model_dump(exclude_none=True)
-        if existing:
-            for field in _ONRAMP_UPDATE_LOCKED_FIELDS:
-                existing_value = existing.get(field)
-                incoming_value = updates.get(field)
-                if (
-                    existing_value is not None
-                    and incoming_value is not None
-                    and existing_value != incoming_value
-                ):
-                    raise OnRampError(f"{field} does not match existing on-ramp")
-
-        merged_orphan_transaction_id: str | None = None
-        if existing and isinstance(updates.get("moonpay_transaction_id"), str):
-            moonpay_transaction_id = str(updates["moonpay_transaction_id"])
-            orphan = store.get(moonpay_transaction_id)
-            if orphan and orphan.get("transaction_id") == moonpay_transaction_id:
-                orphan_wallet = orphan.get("wallet_address")
-                if orphan_wallet != deposit_address:
-                    logger.warning(
-                        "Skipping on-ramp orphan merge due wallet mismatch: intent=%s "
-                        "orphan=%s orphan_wallet=%s deposit=%s",
-                        short_identifier(transaction_id),
-                        short_identifier(moonpay_transaction_id),
-                        short_address(orphan_wallet),
-                        short_address(deposit_address),
-                    )
-                else:
-                    orphan_user = orphan.get("user_address")
-                    if orphan_user and orphan_user != beneficiary:
-                        logger.info(
-                            "Merging on-ramp orphan with mismatched MoonPay customer: "
-                            "intent=%s orphan=%s orphan_user=%s intent_user=%s",
-                            short_identifier(transaction_id),
-                            short_identifier(moonpay_transaction_id),
-                            short_address(orphan_user),
-                            short_address(beneficiary),
-                        )
-                    orphan_updates = {
-                        key: value
-                        for key, value in orphan.items()
-                        if key not in _ONRAMP_RECORD_METADATA_FIELDS
-                    }
-                    updates = {**orphan_updates, **updates}
-                    merged_status = updates.get("status") or existing.get("status")
-                    if merged_status not in {"failed", "cancelled"}:
-                        updates.pop("failure_reason", None)
-                    if existing.get("external_transaction_id"):
-                        updates["external_transaction_id"] = existing["external_transaction_id"]
-                    merged_orphan_transaction_id = moonpay_transaction_id
-
-        updates["user_address"] = beneficiary
-        updates["wallet_address"] = deposit_address
-        intent_mismatches: list[dict[str, object]] = []
-        if existing:
-            updates, intent_mismatches = _preserve_existing_onramp_fields(
-                existing,
-                updates,
-                _ONRAMP_INTENT_OWNED_FIELDS,
+        intent = decode_onramp_intent(transaction_id, allow_expired=True)
+        if Web3.to_checksum_address("0x" + str(intent["u"])) != beneficiary:
+            raise HTTPException(
+                status_code=403,
+                detail="on-ramp transaction does not belong to the caller",
             )
-        record = store.upsert(transaction_id, updates)
-        if merged_orphan_transaction_id:
-            store.delete(merged_orphan_transaction_id)
+        if Web3.to_checksum_address("0x" + str(intent["w"])) != deposit_address:
+            raise HTTPException(
+                status_code=403,
+                detail="on-ramp transaction does not match the caller deposit address",
+            )
+
+        record = onramp_record_from_intent(transaction_id, intent)
+        updates = payload.model_dump(exclude_none=True)
+        if payload.token_id is not None and payload.token_id != record.get("token_id"):
+            raise OnRampError("token_id does not match signed on-ramp intent")
+        if payload.chain_id is not None and payload.chain_id != record.get("chain_id"):
+            raise OnRampError("chain_id does not match signed on-ramp intent")
+        if payload.base_currency_code:
+            updates["base_currency_code"] = payload.base_currency_code
+        updates["wallet_address"] = deposit_address
+        record.update(updates)
+        if payload.deposit_tx_hash and not record.get("deposit_triggered_at"):
+            record["deposit_triggered_at"] = int(time.time())
+        if payload.on_chain_tx_hash:
+            record["status"] = "completed"
+            record["updated_at"] = int(time.time())
         logger.info(
-            "On-ramp metadata updated: merged_orphan=%s intent_mismatches=%s record=%s",
-            short_identifier(merged_orphan_transaction_id),
-            intent_mismatches,
+            "On-ramp metadata accepted without persistence: record=%s",
             onramp_log_summary(record),
         )
         return OnRampRecord(**record)
@@ -824,6 +658,8 @@ async def update_onramp(
             raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
         logger.error("Contract revert in on-ramp update: %s", exc)
         raise HTTPException(status_code=422, detail="Contract call failed") from exc
+    except OnRampNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OnRampError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

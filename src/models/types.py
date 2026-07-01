@@ -40,6 +40,8 @@ class Settings:
 
     moonpay_api_key: str
     moonpay_secret_key: str
+    moonpay_intent_signing_key: str
+    moonpay_api_base_url: str
     moonpay_webhook_secret_key: str
     moonpay_allowed_hosts: Tuple[str, ...]
     moonpay_allowed_currency_codes: Tuple[str, ...]

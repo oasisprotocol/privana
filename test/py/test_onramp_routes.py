@@ -7,50 +7,120 @@ import json
 import time
 from unittest.mock import AsyncMock, MagicMock, call
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from web3 import Web3
 
 import src.api.routes as routes
+import src.auth.rate_limiter as rate_limiter
 import src.config
 import src.services.onramp as onramp
 from src.models.private_read import PrivateReadAuth
 
 BENEFICIARY = Web3.to_checksum_address("0x" + "bb" * 20)
+OTHER_BENEFICIARY = Web3.to_checksum_address("0x" + "cc" * 20)
 DEPOSIT_ADDRESS = Web3.to_checksum_address("0x" + "aa" * 20)
+OTHER_DEPOSIT_ADDRESS = Web3.to_checksum_address("0x" + "dd" * 20)
 TOKEN_ID = "0x" + "11" * 32
 TX_HASH = "0x" + "22" * 32
 PRIVATE_READ_TOKEN = b"\x12" * 65
 RESOLVED_PRIVATE_READ_TOKEN = b"\x34" * 65
 
 
-def _webhook_signature(raw: bytes) -> str:
-    timestamp = str(int(time.time()))
-    signature = hmac.new(
-        b"wh_test_key",
-        timestamp.encode() + b"." + raw,
-        hashlib.sha256,
-    ).hexdigest()
-    return f"t={timestamp},s={signature}"
+class _FakeMoonPayResponse:
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> object:
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
 
 
-def _reset_onramp_store() -> None:
-    if onramp._onramp_store_instance is not None:
-        onramp._onramp_store_instance.close()
-    onramp._onramp_store_instance = None
+class _FakeMoonPayClient:
+    requests: list[dict[str, object]] = []
+    responses: list[object] = []
+
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+        return None
+
+    async def get(self, url: str, **kwargs):
+        self.requests.append({"url": url, **kwargs})
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _set_required_env(monkeypatch, tmp_path) -> None:
+    env = {
+        "API_HOST": "0.0.0.0",
+        "API_PORT": "8000",
+        "LOG_LEVEL": "INFO",
+        "ENVIRONMENT": "test",
+        "CORS_ALLOWED_ORIGINS": "http://localhost:3000",
+        "ACCOUNTING_CONTRACT_ADDRESS": "0x" + "01" * 20,
+        "SAPPHIRE_CHAIN_ID": "23295",
+        "SAPPHIRE_RPC_URL": "https://testnet.sapphire.oasis.io",
+        "ACCOUNTING_GAS_LIMIT": "500000",
+        "WITHDRAWAL_POLL_INTERVAL": "12",
+        "WITHDRAWAL_RESOLUTION_TIMEOUT": "60",
+        "MIN_WITHDRAWAL_GAS_BALANCE": "10000000000000",
+        "AUTH_TOKEN_VALIDITY_SECONDS": "86400",
+        "AUTH_TOKEN_STORAGE_DIR": str(tmp_path / "auth_store"),
+        "SIWE_DOMAINS": "http://localhost:3000",
+        "AUTH_CLIENTS": "[]",
+        "AUTH_CODE_TTL_SECONDS": "120",
+        "AUTH_RATE_LIMIT_WINDOW_SECONDS": "60",
+        "AUTH_NONCE_RATE_LIMIT": "30",
+        "AUTH_LOGIN_RATE_LIMIT": "10",
+        "AUTH_AUTHORIZE_RATE_LIMIT": "10",
+        "AUTH_TOKEN_RATE_LIMIT": "20",
+        "TRUST_X_FORWARDED_FOR": "false",
+        "MOONPAY_API_KEY": "pk_test_key",
+        "MOONPAY_SECRET_KEY": "sk_test_key",
+        "MOONPAY_INTENT_SIGNING_KEY": "intent_test_key",
+        "MOONPAY_API_BASE_URL": "https://api.moonpay.com",
+        "MOONPAY_WEBHOOK_SECRET_KEY": "wh_test_key",
+        "MOONPAY_ALLOWED_HOSTS": "buy.moonpay.com,buy-sandbox.moonpay.com",
+        "MOONPAY_ALLOWED_CURRENCY_CODES": "usdc",
+        "MOONPAY_WEBHOOK_TOLERANCE_SECONDS": "300",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    src.config._settings = None
+    if rate_limiter._auth_rate_limiter_instance is not None:
+        rate_limiter._auth_rate_limiter_instance.close()
+    rate_limiter._auth_rate_limiter_instance = None
+
+
+def _use_fake_moonpay_client(monkeypatch, responses: list[object]) -> type[_FakeMoonPayClient]:
+    _FakeMoonPayClient.requests = []
+    _FakeMoonPayClient.responses = list(responses)
+    monkeypatch.setattr(onramp.httpx, "AsyncClient", _FakeMoonPayClient)
+    return _FakeMoonPayClient
 
 
 def _make_client(monkeypatch, tmp_path) -> tuple[TestClient, MagicMock]:
-    monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(tmp_path / "auth_store"))
-    monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_key")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_key")
-    monkeypatch.setenv("MOONPAY_WEBHOOK_SECRET_KEY", "wh_test_key")
-    src.config._settings = None
-    _reset_onramp_store()
+    _set_required_env(monkeypatch, tmp_path)
 
     mock_service = MagicMock()
     mock_service.get_deposit_address = AsyncMock(return_value=DEPOSIT_ADDRESS)
     monkeypatch.setattr(routes, "_service", mock_service)
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        AsyncMock(return_value=[]),
+    )
 
     app = FastAPI()
     app.include_router(routes.router)
@@ -65,32 +135,81 @@ def _make_client(monkeypatch, tmp_path) -> tuple[TestClient, MagicMock]:
     return TestClient(app), mock_service
 
 
-def test_sign_onramp_url_returns_moonpay_signature(monkeypatch, tmp_path) -> None:
-    client, mock_service = _make_client(monkeypatch, tmp_path)
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent_id = intent_response.json()["transaction_id"]
-    query = (
-        "apiKey=pk_test_key"
-        "&currencyCode=usdc"
-        f"&walletAddress={DEPOSIT_ADDRESS}"
-        f"&externalCustomerId={BENEFICIARY}"
-        f"&externalTransactionId={intent_id}"
-    )
+def _create_intent(client: TestClient, **overrides) -> dict:
+    payload = {
+        "token_id": TOKEN_ID,
+        "chain_id": 11155111,
+        "moonpay_currency_code": "usdc",
+    }
+    payload.update(overrides)
+    response = client.post("/v1/accounting/onramp/intent", json=payload)
+    assert response.status_code == 200, response.text
+    return response.json()
 
-    response = client.post(
-        "/v1/accounting/onramp/sign-url",
-        json={"url": f"https://buy-sandbox.moonpay.com?{query}"},
-    )
+
+def _moonpay_url(intent_id: str, **overrides) -> str:
+    params = {
+        "apiKey": "pk_test_key",
+        "currencyCode": "usdc",
+        "walletAddress": DEPOSIT_ADDRESS,
+        "externalCustomerId": BENEFICIARY,
+        "externalTransactionId": intent_id,
+    }
+    params.update(overrides)
+    query = "&".join(f"{key}={value}" for key, value in params.items())
+    return f"https://buy-sandbox.moonpay.com?{query}"
+
+
+def _moonpay_transaction(intent_id: str, **overrides) -> dict:
+    transaction = {
+        "id": "moonpay-tx-1",
+        "status": "completed",
+        "walletAddress": DEPOSIT_ADDRESS,
+        "cryptoTransactionId": TX_HASH,
+        "externalTransactionId": intent_id,
+        "externalCustomerId": BENEFICIARY,
+        "baseCurrencyAmount": "95.78",
+        "quoteCurrencyAmount": "94.26",
+        "baseCurrency": {"code": "usd"},
+        "currency": {"code": "usdc"},
+        "createdAt": "2026-06-09T15:00:00.000Z",
+        "updatedAt": "2026-06-09T15:01:00.000Z",
+    }
+    transaction.update(overrides)
+    return transaction
+
+
+def _webhook_signature(raw: bytes, *, timestamp: int | None = None) -> str:
+    timestamp = timestamp or int(time.time())
+    timestamp_text = str(timestamp)
+    signature = hmac.new(
+        b"wh_test_key",
+        timestamp_text.encode() + b"." + raw,
+        hashlib.sha256,
+    ).hexdigest()
+    return f"t={timestamp_text},s={signature}"
+
+
+def _tamper(identifier: str) -> str:
+    pivot = identifier.index(".") - 1
+    replacement = "A" if identifier[pivot] != "A" else "B"
+    return identifier[:pivot] + replacement + identifier[pivot + 1 :]
+
+
+def test_intent_is_signed_and_sign_url_returns_moonpay_signature(monkeypatch, tmp_path) -> None:
+    client, mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    intent_id = intent["transaction_id"]
+
+    assert len(intent_id) <= 255
+    decoded = onramp.decode_onramp_intent(intent_id)
+    assert Web3.to_checksum_address("0x" + decoded["u"]) == BENEFICIARY
+    assert Web3.to_checksum_address("0x" + decoded["w"]) == DEPOSIT_ADDRESS
+    assert intent["on_chain_tx_hash"] is None
+
+    unsigned_url = _moonpay_url(intent_id)
+    query = unsigned_url.split("?", 1)[1]
+    response = client.post("/v1/accounting/onramp/sign-url", json={"url": unsigned_url})
 
     assert response.status_code == 200
     expected = base64.b64encode(
@@ -99,1129 +218,741 @@ def test_sign_onramp_url_returns_moonpay_signature(monkeypatch, tmp_path) -> Non
     assert response.json() == {"signature": expected}
     assert mock_service.get_deposit_address.await_args_list == [
         call("evm", 0, RESOLVED_PRIVATE_READ_TOKEN),
-        call("evm", 0, PRIVATE_READ_TOKEN),
+        call("evm", 0, RESOLVED_PRIVATE_READ_TOKEN),
     ]
 
 
-def test_sign_onramp_url_rejects_currency_mismatched_intent(monkeypatch, tmp_path) -> None:
+def test_sign_url_rejects_tampered_or_wrong_currency_intent(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent_id = intent_response.json()["transaction_id"]
+    intent = _create_intent(client)
 
-    response = client.post(
+    tampered = client.post(
+        "/v1/accounting/onramp/sign-url",
+        json={"url": _moonpay_url(_tamper(intent["transaction_id"]))},
+    )
+    assert tampered.status_code == 400
+    assert "signature mismatch" in tampered.json()["detail"]
+
+    wrong_currency = client.post(
+        "/v1/accounting/onramp/sign-url",
+        json={"url": _moonpay_url(intent["transaction_id"], currencyCode="eth")},
+    )
+    assert wrong_currency.status_code == 400
+    assert wrong_currency.json()["detail"] == "MoonPay currencyCode is not allowed"
+
+
+def test_sign_url_rejects_missing_customer_and_non_deposit_wallet(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+
+    missing_customer = client.post(
+        "/v1/accounting/onramp/sign-url",
+        json={"url": _moonpay_url(intent["transaction_id"], externalCustomerId="")},
+    )
+    assert missing_customer.status_code == 400
+    assert missing_customer.json()["detail"] == "MoonPay URL is missing externalCustomerId"
+
+    lowercase_customer = client.post(
         "/v1/accounting/onramp/sign-url",
         json={
-            "url": (
-                "https://buy-sandbox.moonpay.com"
-                "?apiKey=pk_test_key"
-                "&currencyCode=usdc_base"
-                f"&walletAddress={DEPOSIT_ADDRESS}"
-                f"&externalCustomerId={BENEFICIARY}"
-                f"&externalTransactionId={intent_id}"
+            "url": _moonpay_url(intent["transaction_id"], externalCustomerId=BENEFICIARY.lower())
+        },
+    )
+    assert lowercase_customer.status_code == 400
+    assert (
+        lowercase_customer.json()["detail"]
+        == "MoonPay externalCustomerId must match authenticated user"
+    )
+
+    wrong_wallet = client.post(
+        "/v1/accounting/onramp/sign-url",
+        json={
+            "url": _moonpay_url(
+                intent["transaction_id"],
+                walletAddress=OTHER_DEPOSIT_ADDRESS,
             )
         },
     )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "MoonPay currencyCode does not match the Privana intent"
-
-
-def test_sign_onramp_url_rejects_non_deposit_wallet(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    wrong_wallet = Web3.to_checksum_address("0x" + "cc" * 20)
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
+    assert wrong_wallet.status_code == 400
+    assert (
+        wrong_wallet.json()["detail"] == "MoonPay walletAddress must be the Privana deposit address"
     )
-    assert intent_response.status_code == 200
-    intent_id = intent_response.json()["transaction_id"]
 
-    response = client.post(
+
+def test_sign_url_rejects_expired_intent_but_pending_can_recover(monkeypatch, tmp_path) -> None:
+    base_time = 1_781_000_000
+    monkeypatch.setattr(onramp.time, "time", lambda: base_time)
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+
+    monkeypatch.setattr(
+        onramp.time,
+        "time",
+        lambda: base_time + onramp._ONRAMP_INTENT_TTL_SECONDS + 1,
+    )
+    sign_response = client.post(
         "/v1/accounting/onramp/sign-url",
-        json={
-            "url": (
-                "https://buy-sandbox.moonpay.com"
-                "?apiKey=pk_test_key"
-                "&currencyCode=usdc"
-                f"&walletAddress={wrong_wallet}"
-                f"&externalCustomerId={BENEFICIARY}"
-                f"&externalTransactionId={intent_id}"
-            )
-        },
+        json={"url": _moonpay_url(intent["transaction_id"])},
     )
+    assert sign_response.status_code == 400
+    assert sign_response.json()["detail"] == "MoonPay externalTransactionId has expired"
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "MoonPay walletAddress must be the Privana deposit address"
-
-
-def test_sign_onramp_url_requires_external_customer_id(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        AsyncMock(return_value=[_moonpay_transaction(intent["transaction_id"])]),
     )
-    assert intent_response.status_code == 200
-    intent_id = intent_response.json()["transaction_id"]
-
-    response = client.post(
-        "/v1/accounting/onramp/sign-url",
-        json={
-            "url": (
-                "https://buy-sandbox.moonpay.com"
-                "?apiKey=pk_test_key"
-                "&currencyCode=usdc"
-                f"&walletAddress={DEPOSIT_ADDRESS}"
-                f"&externalTransactionId={intent_id}"
-            )
-        },
+    pending_response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={intent['transaction_id']}"
     )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "MoonPay URL is missing externalCustomerId"
-
-
-def test_webhook_completion_surfaces_pending_onramp(monkeypatch, tmp_path) -> None:
-    client, mock_service = _make_client(monkeypatch, tmp_path)
-
-    create_response = client.post(
-        "/v1/accounting/onramp/moonpay-tx-1",
-        json={
-            "wallet_address": DEPOSIT_ADDRESS,
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert create_response.status_code == 200
-
-    payload = {
-        "type": "transaction_updated",
-        "externalCustomerId": BENEFICIARY,
-        "data": {
-            "id": "moonpay-tx-1",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "baseCurrencyAmount": 100,
-            "quoteCurrencyAmount": 99.12,
-            "externalCustomerId": BENEFICIARY,
-            "baseCurrency": {"code": "usd"},
-            "currency": {
-                "code": "usdc",
-                "metadata": {"chainId": "1", "networkCode": "ethereum"},
-            },
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    mock_service.get_deposit_address.reset_mock()
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
     assert pending_response.status_code == 200
-    mock_service.get_deposit_address.assert_awaited_once_with("evm", 0, RESOLVED_PRIVATE_READ_TOKEN)
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == "moonpay-tx-1"
-    assert pending[0]["status"] == "completed"
-    assert pending[0]["wallet_address"] == DEPOSIT_ADDRESS
-    assert pending[0]["token_id"] == TOKEN_ID
-    assert pending[0]["chain_id"] == 11155111
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-    assert pending[0]["quote_currency_amount"] == "99.12"
+    assert pending_response.json()["pending"][0]["transaction_id"] == intent["transaction_id"]
 
 
-def test_webhook_completion_uses_external_transaction_id_intent(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-2",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "baseCurrencyAmount": 100,
-            "quoteCurrencyAmount": 0.9613,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "baseCurrency": {"code": "usd"},
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intent["transaction_id"]
-    assert pending[0]["external_transaction_id"] == intent["transaction_id"]
-    assert pending[0]["moonpay_transaction_id"] == "moonpay-tx-2"
-    assert pending[0]["status"] == "completed"
-    assert pending[0]["wallet_address"] == DEPOSIT_ADDRESS
-    assert pending[0]["token_id"] == TOKEN_ID
-    assert pending[0]["chain_id"] == 11155111
-    assert pending[0]["moonpay_currency_code"] == "usdc"
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-    assert pending[0]["quote_currency_amount"] == "0.9613"
-
-
-def test_webhook_completion_keeps_existing_intent_owner(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    moonpay_customer_id = Web3.to_checksum_address("0x" + "cc" * 20)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-embedded",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "baseCurrencyAmount": 95.79,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": moonpay_customer_id,
-            "externalTransactionId": intent["transaction_id"],
-            "baseCurrency": {"code": "usd"},
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intent["transaction_id"]
-    assert pending[0]["moonpay_transaction_id"] == "moonpay-tx-embedded"
-    assert pending[0]["status"] == "completed"
-    assert pending[0]["wallet_address"] == DEPOSIT_ADDRESS
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-    assert pending[0]["quote_currency_amount"] == "94.28"
-
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored["user_address"] == BENEFICIARY
-
-
-def test_webhook_completion_keeps_existing_intent_wallet(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    stale_wallet = Web3.to_checksum_address("0x" + "cc" * 20)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-stale-wallet",
-            "status": "completed",
-            "walletAddress": stale_wallet,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intent["transaction_id"]
-    assert pending[0]["wallet_address"] == DEPOSIT_ADDRESS
-
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored["wallet_address"] == DEPOSIT_ADDRESS
-
-
-def test_webhook_without_external_transaction_id_joins_moonpay_mapping(
+def test_pending_queries_moonpay_by_customer_and_filters_signed_intents(
     monkeypatch, tmp_path
 ) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
+    intent = _create_intent(client)
+    other_intent = onramp.create_onramp_intent(
+        user_address=OTHER_BENEFICIARY,
+        wallet_address=DEPOSIT_ADDRESS,
+        token_id=TOKEN_ID,
+        chain_id=11155111,
+        moonpay_currency_code="usdc",
+    )["transaction_id"]
+    mock_fetch = AsyncMock(
+        return_value=[
+            _moonpay_transaction(intent["transaction_id"]),
+            _moonpay_transaction(
+                intent["transaction_id"],
+                id="moonpay-tx-pending",
+                status="pending",
+            ),
+            _moonpay_transaction(
+                intent["transaction_id"],
+                id="moonpay-tx-wrong-wallet",
+                walletAddress=OTHER_DEPOSIT_ADDRESS,
+            ),
+            _moonpay_transaction(other_intent, id="moonpay-tx-wrong-user"),
+            _moonpay_transaction(_tamper(intent["transaction_id"]), id="moonpay-tx-tampered"),
+        ]
     )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", mock_fetch)
 
-    mapping_response = client.post(
-        f"/v1/accounting/onramp/{intent['transaction_id']}",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_transaction_id": "moonpay-tx-no-external-id",
-        },
-    )
-    assert mapping_response.status_code == 200
+    response = client.get("/v1/accounting/onramp/pending")
 
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-no-external-id",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": BENEFICIARY,
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intent["transaction_id"]
-    assert pending[0]["external_transaction_id"] == intent["transaction_id"]
-    assert pending[0]["moonpay_transaction_id"] == "moonpay-tx-no-external-id"
-
-    assert onramp.get_onramp_store().get("moonpay-tx-no-external-id") is None
-
-
-def test_webhook_without_external_transaction_id_matches_single_open_intent(
-    monkeypatch, tmp_path
-) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    stale_moonpay_customer = Web3.to_checksum_address("0x" + "cc" * 20)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-no-external-no-mapping",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": stale_moonpay_customer,
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intent["transaction_id"]
-    assert pending[0]["external_transaction_id"] == intent["transaction_id"]
-    assert pending[0]["moonpay_transaction_id"] == "moonpay-tx-no-external-no-mapping"
-    assert pending[0]["wallet_address"] == DEPOSIT_ADDRESS
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-
-    assert onramp.get_onramp_store().get("moonpay-tx-no-external-no-mapping") is None
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored["user_address"] == BENEFICIARY
-
-
-def test_webhook_without_external_transaction_id_keeps_ambiguous_intents_orphaned(
-    monkeypatch, tmp_path
-) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-
-    for _ in range(2):
-        response = client.post(
-            "/v1/accounting/onramp/intent",
-            json={
-                "token_id": TOKEN_ID,
-                "chain_id": 11155111,
-                "moonpay_currency_code": "usdc",
-                "base_currency_code": "usd",
-                "base_currency_amount": "100",
-            },
-        )
-        assert response.status_code == 200
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-ambiguous-intent",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": BENEFICIARY,
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    assert client.get("/v1/accounting/onramp/pending").json()["pending"] == []
-    orphan = onramp.get_onramp_store().get("moonpay-tx-ambiguous-intent")
-    assert orphan is not None
-    assert orphan["on_chain_tx_hash"] == TX_HASH
-
-
-def test_late_moonpay_mapping_merges_existing_orphan_webhook(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-
-    intents = []
-    for _ in range(2):
-        intent_response = client.post(
-            "/v1/accounting/onramp/intent",
-            json={
-                "token_id": TOKEN_ID,
-                "chain_id": 11155111,
-                "moonpay_currency_code": "usdc",
-                "base_currency_code": "usd",
-                "base_currency_amount": "100",
-            },
-        )
-        assert intent_response.status_code == 200
-        intents.append(intent_response.json())
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-orphan-first",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": BENEFICIARY,
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-    assert client.get("/v1/accounting/onramp/pending").json()["pending"] == []
-
-    mapping_response = client.post(
-        f"/v1/accounting/onramp/{intents[0]['transaction_id']}",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_transaction_id": "moonpay-tx-orphan-first",
-        },
-    )
-    assert mapping_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intents[0]["transaction_id"]
-    assert pending[0]["external_transaction_id"] == intents[0]["transaction_id"]
-    assert pending[0]["moonpay_transaction_id"] == "moonpay-tx-orphan-first"
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-
-    assert onramp.get_onramp_store().get("moonpay-tx-orphan-first") is None
-
-
-def test_late_moonpay_mapping_drops_stale_orphan_failure_reason(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-stale-reason",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "failureReason": "stale failure",
-            "externalCustomerId": BENEFICIARY,
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    mapping_response = client.post(
-        f"/v1/accounting/onramp/{intent['transaction_id']}",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_transaction_id": "moonpay-tx-stale-reason",
-        },
-    )
-    assert mapping_response.status_code == 200
-
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored["status"] == "completed"
-    assert stored.get("failure_reason") is None
-
-
-def test_late_moonpay_mapping_does_not_delete_wallet_mismatched_orphan(
-    monkeypatch, tmp_path
-) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    other_wallet = Web3.to_checksum_address("0x" + "cc" * 20)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-            "base_currency_code": "usd",
-            "base_currency_amount": "100",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-mismatched-orphan",
-            "status": "completed",
-            "walletAddress": other_wallet,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 94.28,
-            "externalCustomerId": BENEFICIARY,
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    mapping_response = client.post(
-        f"/v1/accounting/onramp/{intent['transaction_id']}",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_transaction_id": "moonpay-tx-mismatched-orphan",
-        },
-    )
-    assert mapping_response.status_code == 200
-
-    assert client.get("/v1/accounting/onramp/pending").json()["pending"] == []
-    orphan = onramp.get_onramp_store().get("moonpay-tx-mismatched-orphan")
-    assert orphan is not None
-    assert orphan["wallet_address"] == other_wallet
-
-    stored_intent = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored_intent is not None
-    assert stored_intent["wallet_address"] == DEPOSIT_ADDRESS
-    assert stored_intent.get("on_chain_tx_hash") is None
-
-
-def test_update_onramp_rejects_cross_user_rebind(monkeypatch, tmp_path) -> None:
-    client, mock_service = _make_client(monkeypatch, tmp_path)
-    other_user = Web3.to_checksum_address("0x" + "cc" * 20)
-    transaction_id = "privana_existing"
-    onramp.get_onramp_store().upsert(
-        transaction_id,
+    assert response.status_code == 200
+    assert response.json()["pending"] == [
         {
-            "external_transaction_id": transaction_id,
-            "user_address": other_user,
+            "transaction_id": intent["transaction_id"],
+            "external_transaction_id": intent["transaction_id"],
+            "moonpay_transaction_id": "moonpay-tx-1",
+            "status": "completed",
             "wallet_address": DEPOSIT_ADDRESS,
             "token_id": TOKEN_ID,
             "chain_id": 11155111,
             "moonpay_currency_code": "usdc",
-        },
-    )
+            "base_currency_code": "usd",
+            "base_currency_amount": "95.78",
+            "quote_currency_amount": "94.26",
+            "on_chain_tx_hash": TX_HASH,
+            "deposit_id": None,
+            "deposit_tx_hash": None,
+            "deposit_triggered_at": None,
+            "credited_at": None,
+            "created_at": 1781017200,
+            "updated_at": 1781017260,
+        }
+    ]
+    mock_fetch.assert_awaited_once_with(external_customer_id=BENEFICIARY)
 
-    response = client.post(
-        f"/v1/accounting/onramp/{transaction_id}",
-        json={"token_id": TOKEN_ID, "chain_id": 11155111},
-    )
 
-    assert response.status_code == 403
-    mock_service.get_deposit_address.assert_awaited_once_with("evm", 0, RESOLVED_PRIVATE_READ_TOKEN)
-    stored = onramp.get_onramp_store().get(transaction_id)
-    assert stored is not None
-    assert stored["user_address"] == other_user
-
-
-def test_update_onramp_rejects_unknown_privana_intent(monkeypatch, tmp_path) -> None:
+def test_pending_filters_currency_mismatch(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(
+            return_value=[
+                _moonpay_transaction(
+                    intent["transaction_id"],
+                    currency={"code": "eth"},
+                )
+            ]
+        ),
+    )
 
-    response = client.post(
-        "/v1/accounting/onramp/privana_missing",
-        json={"token_id": TOKEN_ID, "chain_id": 11155111},
+    response = client.get("/v1/accounting/onramp/pending")
+
+    assert response.status_code == 200
+    assert response.json() == {"pending": []}
+
+
+def test_pending_filters_missing_on_chain_hash(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(
+            return_value=[
+                _moonpay_transaction(
+                    intent["transaction_id"],
+                    cryptoTransactionId=None,
+                )
+            ]
+        ),
+    )
+
+    response = client.get("/v1/accounting/onramp/pending")
+
+    assert response.status_code == 200
+    assert response.json() == {"pending": []}
+
+
+def test_pending_uses_exact_intent_lookup_for_stale_moonpay_customer_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    other_intent = onramp.create_onramp_intent(
+        user_address=OTHER_BENEFICIARY,
+        wallet_address=DEPOSIT_ADDRESS,
+        token_id=TOKEN_ID,
+        chain_id=11155111,
+        moonpay_currency_code="usdc",
+    )["transaction_id"]
+    tx = _moonpay_transaction(
+        intent["transaction_id"],
+        externalCustomerId=OTHER_BENEFICIARY,
+    )
+    mock_fetch_customer = AsyncMock(return_value=[])
+    mock_fetch_external = AsyncMock(
+        return_value=[
+            tx,
+            _moonpay_transaction(other_intent, id="moonpay-tx-other-user"),
+        ]
+    )
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", mock_fetch_customer)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        mock_fetch_external,
+    )
+
+    response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={intent['transaction_id']}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pending"][0]["moonpay_transaction_id"] == "moonpay-tx-1"
+    mock_fetch_customer.assert_awaited_once_with(external_customer_id=BENEFICIARY)
+    mock_fetch_external.assert_awaited_once_with(intent["transaction_id"])
+
+
+def test_pending_runs_exact_intent_lookup_even_when_customer_lookup_has_rows(
+    monkeypatch, tmp_path
+) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    customer_intent = _create_intent(client)
+    exact_intent = _create_intent(client)
+    mock_fetch_customer = AsyncMock(
+        return_value=[
+            _moonpay_transaction(customer_intent["transaction_id"], id="moonpay-customer")
+        ]
+    )
+    mock_fetch_external = AsyncMock(
+        return_value=[
+            _moonpay_transaction(
+                exact_intent["transaction_id"],
+                id="moonpay-exact",
+                updatedAt="2026-06-09T15:02:00.000Z",
+            )
+        ]
+    )
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", mock_fetch_customer)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        mock_fetch_external,
+    )
+
+    response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={exact_intent['transaction_id']}"
+    )
+
+    assert response.status_code == 200
+    pending = response.json()["pending"]
+    assert [row["moonpay_transaction_id"] for row in pending] == [
+        "moonpay-exact",
+        "moonpay-customer",
+    ]
+    mock_fetch_customer.assert_awaited_once_with(external_customer_id=BENEFICIARY)
+    mock_fetch_external.assert_awaited_once_with(exact_intent["transaction_id"])
+
+
+def test_pending_does_not_run_fallback_without_explicit_intent(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    mock_fetch_customer = AsyncMock(return_value=[])
+    mock_fetch_external = AsyncMock(return_value=[_moonpay_transaction("unused")])
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", mock_fetch_customer)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        mock_fetch_external,
+    )
+
+    response = client.get("/v1/accounting/onramp/pending")
+
+    assert response.status_code == 200
+    assert response.json() == {"pending": []}
+    mock_fetch_customer.assert_awaited_once_with(external_customer_id=BENEFICIARY)
+    mock_fetch_external.assert_not_awaited()
+
+
+def test_pending_is_rate_limited_before_moonpay_lookup(monkeypatch, tmp_path) -> None:
+    client, mock_service = _make_client(monkeypatch, tmp_path)
+
+    class DenyRateLimiter:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def hit(self, **kwargs) -> int:
+            self.calls.append(kwargs)
+            return 1
+
+    limiter = DenyRateLimiter()
+    monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: limiter)
+
+    response = client.get("/v1/accounting/onramp/pending")
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "1"
+    assert limiter.calls[0]["bucket"] == "onramp_pending"
+    assert limiter.calls[0]["limit"] == routes._ONRAMP_PENDING_RATE_LIMIT
+    mock_service.get_deposit_address.assert_not_awaited()
+
+
+def test_pending_returns_502_when_moonpay_lookup_fails(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(side_effect=onramp.MoonPayAPIError("MoonPay transaction lookup failed")),
+    )
+
+    response = client.get("/v1/accounting/onramp/pending")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "MoonPay transaction lookup failed"
+
+
+def test_pending_exact_lookup_survives_customer_lookup_failure(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(side_effect=onramp.MoonPayAPIError("MoonPay customer lookup failed")),
+    )
+    mock_fetch_external = AsyncMock(
+        return_value=[_moonpay_transaction(intent["transaction_id"], id="moonpay-exact")]
+    )
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        mock_fetch_external,
+    )
+
+    response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={intent['transaction_id']}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pending"][0]["moonpay_transaction_id"] == "moonpay-exact"
+    mock_fetch_external.assert_awaited_once_with(intent["transaction_id"])
+
+
+def test_pending_customer_lookup_survives_exact_lookup_failure(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    customer_intent = _create_intent(client)
+    exact_intent = _create_intent(client)
+    mock_fetch_customer = AsyncMock(
+        return_value=[_moonpay_transaction(customer_intent["transaction_id"])]
+    )
+    mock_fetch_external = AsyncMock(
+        side_effect=onramp.MoonPayAPIError("MoonPay exact lookup failed")
+    )
+    monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", mock_fetch_customer)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        mock_fetch_external,
+    )
+
+    response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={exact_intent['transaction_id']}"
+    )
+
+    assert response.status_code == 200
+    pending = response.json()["pending"]
+    assert [row["moonpay_transaction_id"] for row in pending] == ["moonpay-tx-1"]
+    mock_fetch_customer.assert_awaited_once_with(external_customer_id=BENEFICIARY)
+    mock_fetch_external.assert_awaited_once_with(exact_intent["transaction_id"])
+
+
+def test_pending_returns_502_when_all_moonpay_lookups_fail(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(side_effect=onramp.MoonPayAPIError("MoonPay customer lookup failed")),
+    )
+    mock_fetch_external = AsyncMock(
+        side_effect=onramp.MoonPayAPIError("MoonPay exact lookup failed")
+    )
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions_by_external_id",
+        mock_fetch_external,
+    )
+
+    response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={intent['transaction_id']}"
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "MoonPay customer lookup failed"
+    mock_fetch_external.assert_awaited_once_with(intent["transaction_id"])
+
+
+def test_pending_returns_503_when_intent_signing_key_is_missing(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(return_value=[_moonpay_transaction(intent["transaction_id"])]),
+    )
+    monkeypatch.delenv("MOONPAY_INTENT_SIGNING_KEY")
+    src.config._settings = None
+
+    response = client.get("/v1/accounting/onramp/pending")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "MoonPay on-ramp intents are not configured"
+
+
+def test_pending_rejects_too_many_exact_intent_lookups(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent_ids = [
+        onramp.create_onramp_intent(
+            user_address=BENEFICIARY,
+            wallet_address=DEPOSIT_ADDRESS,
+            token_id=TOKEN_ID,
+            chain_id=11155111,
+            moonpay_currency_code="usdc",
+        )["transaction_id"]
+        for _ in range(routes._ONRAMP_PENDING_MAX_INTENT_LOOKUPS + 1)
+    ]
+
+    response = client.get(
+        "/v1/accounting/onramp/pending",
+        params=[("externalTransactionId", intent_id) for intent_id in intent_ids],
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Unknown Privana on-ramp intent"
+    assert response.json()["detail"] == "Too many externalTransactionId values"
 
 
-def test_duplicate_completed_webhook_does_not_overwrite_delivery(monkeypatch, tmp_path) -> None:
+async def test_fetch_moonpay_transactions_uses_customer_filter_and_paginates(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+    first_page = [{"id": f"moonpay-{index}"} for index in range(50)]
+    second_page = [{"id": "moonpay-50"}]
+    fake_client = _use_fake_moonpay_client(
+        monkeypatch,
+        [
+            _FakeMoonPayResponse(200, first_page),
+            _FakeMoonPayResponse(200, {"data": second_page}),
+        ],
+    )
+
+    transactions = await onramp.fetch_moonpay_buy_transactions(external_customer_id=BENEFICIARY)
+
+    assert transactions == first_page + second_page
+    assert fake_client.requests == [
+        {
+            "url": "https://api.moonpay.com/v1/transactions",
+            "params": {
+                "limit": 50,
+                "offset": 0,
+                "externalCustomerId": BENEFICIARY,
+            },
+            "headers": {"Authorization": "Api-Key sk_test_key"},
+        },
+        {
+            "url": "https://api.moonpay.com/v1/transactions",
+            "params": {
+                "limit": 50,
+                "offset": 50,
+                "externalCustomerId": BENEFICIARY,
+            },
+            "headers": {"Authorization": "Api-Key sk_test_key"},
+        },
+    ]
+
+
+async def test_fetch_moonpay_transactions_logs_page_cap(monkeypatch, tmp_path, caplog) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+    _use_fake_moonpay_client(
+        monkeypatch,
+        [_FakeMoonPayResponse(200, [{"id": "moonpay-1"}, {"id": "moonpay-2"}])],
+    )
+
+    with caplog.at_level("WARNING", logger=onramp.logger.name):
+        transactions = await onramp.fetch_moonpay_buy_transactions(
+            external_customer_id=BENEFICIARY,
+            limit=2,
+            max_pages=1,
+        )
+
+    assert transactions == [{"id": "moonpay-1"}, {"id": "moonpay-2"}]
+    assert "MoonPay transaction lookup hit page cap" in caplog.text
+
+
+def test_dedupe_moonpay_transactions_preserves_order() -> None:
+    assert onramp.dedupe_moonpay_transactions(
+        [
+            {"id": "moonpay-1"},
+            {"id": "moonpay-1", "externalTransactionId": "ignored"},
+            {"externalTransactionId": "intent-1"},
+            {"externalTransactionId": "intent-1"},
+            {"cryptoTransactionId": TX_HASH},
+            {"cryptoTransactionId": TX_HASH},
+            {"status": "completed"},
+            {"status": "completed"},
+        ]
+    ) == [
+        {"id": "moonpay-1"},
+        {"externalTransactionId": "intent-1"},
+        {"cryptoTransactionId": TX_HASH},
+        {"status": "completed"},
+        {"status": "completed"},
+    ]
+
+
+async def test_fetch_moonpay_transactions_by_external_id_uses_exact_endpoint(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+    intent_id = "privana_a.b/c?"
+    fake_client = _use_fake_moonpay_client(
+        monkeypatch,
+        [_FakeMoonPayResponse(200, {"transactions": [{"id": "moonpay-exact"}]})],
+    )
+
+    transactions = await onramp.fetch_moonpay_buy_transactions_by_external_id(intent_id)
+
+    assert transactions == [{"id": "moonpay-exact"}]
+    assert fake_client.requests == [
+        {
+            "url": "https://api.moonpay.com/v1/transactions/ext/privana_a.b%2Fc%3F",
+            "headers": {"Authorization": "Api-Key sk_test_key"},
+        }
+    ]
+
+
+async def test_fetch_moonpay_transactions_maps_auth_and_transport_errors(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+    _use_fake_moonpay_client(monkeypatch, [_FakeMoonPayResponse(401, {"message": "bad key"})])
+
+    try:
+        await onramp.fetch_moonpay_buy_transactions(external_customer_id=BENEFICIARY)
+    except onramp.MoonPayAPIError as exc:
+        assert str(exc) == "MoonPay transaction lookup is unauthorized"
+    else:
+        raise AssertionError("expected MoonPayAPIError")
+
+    _use_fake_moonpay_client(
+        monkeypatch,
+        [httpx.ConnectError("network unavailable")],
+    )
+    try:
+        await onramp.fetch_moonpay_buy_transactions_by_external_id("privana_test")
+    except onramp.MoonPayAPIError as exc:
+        assert str(exc) == "MoonPay transaction lookup failed"
+    else:
+        raise AssertionError("expected MoonPayAPIError")
+
+
+def test_pending_rejects_wrong_owner_exact_intent(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
-    conflicting_tx_hash = "0x" + "99" * 32
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
+    wrong_user_intent = onramp.create_onramp_intent(
+        user_address=OTHER_BENEFICIARY,
+        wallet_address=DEPOSIT_ADDRESS,
+        token_id=TOKEN_ID,
+        chain_id=11155111,
+        moonpay_currency_code="usdc",
     )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
 
-    completed_payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-duplicate-completed",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 0.9613,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw_completed = json.dumps(completed_payload, separators=(",", ":")).encode()
-    completed_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw_completed,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw_completed),
-        },
+    response = client.get(
+        f"/v1/accounting/onramp/pending?externalTransactionId={wrong_user_intent['transaction_id']}"
     )
-    assert completed_response.status_code == 200
 
-    duplicate_payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-duplicate-completed",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": conflicting_tx_hash,
-            "quoteCurrencyAmount": 123.45,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw_duplicate = json.dumps(duplicate_payload, separators=(",", ":")).encode()
-    duplicate_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw_duplicate,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw_duplicate),
-        },
+    assert response.status_code == 400
+    assert (
+        response.json()["detail"] == "MoonPay externalTransactionId does not belong to the caller"
     )
-    assert duplicate_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-    assert pending[0]["quote_currency_amount"] == "0.9613"
 
 
-def test_deposit_tx_hash_marks_triggered_but_not_credited(monkeypatch, tmp_path) -> None:
+def test_webhook_is_verified_but_pending_comes_from_moonpay_lookup(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
-    deposit_tx_hash = "0x" + "33" * 32
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
+    intent = _create_intent(client)
+    raw = json.dumps(
+        {
+            "type": "transaction_updated",
+            "data": _moonpay_transaction(intent["transaction_id"]),
         },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
+        separators=(",", ":"),
+    ).encode()
 
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-credit-semantics",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 0.9613,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    webhook_response = client.post(
+    webhook = client.post(
         "/v1/accounting/onramp/webhook",
         content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
+        headers={"Moonpay-Signature-V2": _webhook_signature(raw)},
     )
-    assert webhook_response.status_code == 200
+    assert webhook.status_code == 200
+    assert webhook.json() == {"ok": True}
 
-    update_response = client.post(
-        f"/v1/accounting/onramp/{intent['transaction_id']}",
-        json={"deposit_tx_hash": deposit_tx_hash},
+    no_lookup_rows = client.get("/v1/accounting/onramp/pending")
+    assert no_lookup_rows.status_code == 200
+    assert no_lookup_rows.json() == {"pending": []}
+
+    monkeypatch.setattr(
+        routes,
+        "fetch_moonpay_buy_transactions",
+        AsyncMock(return_value=[_moonpay_transaction(intent["transaction_id"])]),
     )
-
-    assert update_response.status_code == 200
-    updated = update_response.json()
-    assert updated["deposit_tx_hash"] == deposit_tx_hash
-    assert updated["deposit_triggered_at"] is not None
-    assert updated["credited_at"] is None
+    pending = client.get("/v1/accounting/onramp/pending")
+    assert pending.status_code == 200
+    assert len(pending.json()["pending"]) == 1
 
 
-def test_update_onramp_rejects_malformed_deposit_tx_hash(monkeypatch, tmp_path) -> None:
+def test_webhook_rejects_bad_signature_and_large_payload(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
+    raw = json.dumps({"data": {"id": "moonpay-tx-1"}}).encode()
 
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
+    bad_signature = client.post(
+        "/v1/accounting/onramp/webhook",
+        content=raw,
+        headers={"Moonpay-Signature-V2": "t=1,s=bad"},
     )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
+    assert bad_signature.status_code == 401
+
+    stale_signature = client.post(
+        "/v1/accounting/onramp/webhook",
+        content=raw,
+        headers={"Moonpay-Signature-V2": _webhook_signature(raw, timestamp=1)},
+    )
+    assert stale_signature.status_code == 401
+    assert stale_signature.json()["detail"] == "MoonPay signature timestamp is outside tolerance"
+
+    too_large = client.post(
+        "/v1/accounting/onramp/webhook",
+        content=b"x" * (routes._ONRAMP_WEBHOOK_MAX_BODY_BYTES + 1),
+        headers={"Moonpay-Signature-V2": _webhook_signature(b"x")},
+    )
+    assert too_large.status_code == 413
+
+
+def test_update_onramp_compatibility_validates_and_echoes_signed_intent(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(routes.time, "time", lambda: 1_781_017_400)
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
 
     response = client.post(
         f"/v1/accounting/onramp/{intent['transaction_id']}",
-        json={"deposit_tx_hash": "0x1234"},
+        json={
+            "wallet_address": DEPOSIT_ADDRESS,
+            "token_id": TOKEN_ID,
+            "chain_id": 11155111,
+            "moonpay_transaction_id": "moonpay-tx-1",
+            "quote_currency_amount": "94.26",
+            "on_chain_tx_hash": TX_HASH,
+            "deposit_tx_hash": "0x" + "44" * 32,
+        },
+    )
+
+    assert response.status_code == 200
+    record = response.json()
+    assert record["transaction_id"] == intent["transaction_id"]
+    assert record["moonpay_transaction_id"] == "moonpay-tx-1"
+    assert record["status"] == "completed"
+    assert record["on_chain_tx_hash"] == TX_HASH
+    assert record["deposit_id"] is None
+    assert record["deposit_tx_hash"] == "0x" + "44" * 32
+    assert record["deposit_triggered_at"] == 1781017400
+    assert record["credited_at"] is None
+
+
+def test_update_onramp_rejects_ignored_compatibility_fields(monkeypatch, tmp_path) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+
+    response = client.post(
+        f"/v1/accounting/onramp/{intent['transaction_id']}",
+        json={"deposit_id": "0x" + "55" * 32},
     )
 
     assert response.status_code == 422
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored.get("deposit_tx_hash") is None
 
 
-def test_deposit_status_marks_onramp_credited_server_side(monkeypatch, tmp_path) -> None:
-    client, mock_service = _make_client(monkeypatch, tmp_path)
-    deposit_id = "0x" + "dd" * 32
-
-    wrong_chain_intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 84532,
-            "moonpay_currency_code": "usdc",
-        },
-    )
-    assert wrong_chain_intent_response.status_code == 200
-    wrong_chain_intent = wrong_chain_intent_response.json()
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-server-credit",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 0.9613,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
-    )
-    assert webhook_response.status_code == 200
-
-    wrong_chain_payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-wrong-chain",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 0.9613,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": wrong_chain_intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    wrong_chain_raw = json.dumps(wrong_chain_payload, separators=(",", ":")).encode()
-    wrong_chain_webhook_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=wrong_chain_raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(wrong_chain_raw),
-        },
-    )
-    assert wrong_chain_webhook_response.status_code == 200
-
-    mock_processor = MagicMock()
-    mock_processor.process_deposit = AsyncMock(
-        return_value={
-            "status": "pending",
-            "deposit_id": deposit_id,
-            "amount": "961300000000000000",
-            "token_address": "0x" + "cc" * 20,
-        }
-    )
-    mock_processor.get_deposit_status = MagicMock(return_value=None)
-    monkeypatch.setattr(routes, "get_deposit_processor", lambda: mock_processor)
-    mock_service.is_deposit_processed = AsyncMock(return_value=True)
-
-    check_response = client.post(
-        "/v1/accounting/deposits/check",
-        json={
-            "chain_id": 11155111,
-            "tx_hash": TX_HASH,
-            "amount": "961300000000000000",
-        },
-    )
-    assert check_response.status_code == 202
-
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored["deposit_id"] == deposit_id
-    assert stored["deposit_triggered_at"] is not None
-    assert stored.get("credited_at") is None
-    wrong_chain_stored = onramp.get_onramp_store().get(wrong_chain_intent["transaction_id"])
-    assert wrong_chain_stored is not None
-    assert wrong_chain_stored.get("deposit_id") is None
-    pending = client.get("/v1/accounting/onramp/pending").json()["pending"]
-    assert sorted(row["chain_id"] for row in pending) == [84532, 11155111]
-    matching = [row for row in pending if row["chain_id"] == 11155111]
-    assert len(matching) == 1
-    assert matching[0]["deposit_id"] == deposit_id
-
-    status_response = client.get(f"/v1/accounting/deposits/status/{deposit_id}")
-    assert status_response.status_code == 200
-    assert status_response.json()["status"] == "credited"
-
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored["credited_at"] is not None
-    pending_after_credit = client.get("/v1/accounting/onramp/pending").json()["pending"]
-    assert len(pending_after_credit) == 1
-    assert pending_after_credit[0]["transaction_id"] == wrong_chain_intent["transaction_id"]
-
-
-def test_webhook_stale_status_does_not_mutate_completed_intent(monkeypatch, tmp_path) -> None:
+def test_update_onramp_rejects_wrong_owner_and_locked_field_mismatch(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
-
-    intent_response = client.post(
-        "/v1/accounting/onramp/intent",
-        json={
-            "token_id": TOKEN_ID,
-            "chain_id": 11155111,
-            "moonpay_currency_code": "usdc",
-        },
-    )
-    assert intent_response.status_code == 200
-    intent = intent_response.json()
-
-    completed_payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-3",
-            "status": "completed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": TX_HASH,
-            "quoteCurrencyAmount": 0.9613,
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw_completed = json.dumps(completed_payload, separators=(",", ":")).encode()
-    completed_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw_completed,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw_completed),
-        },
-    )
-    assert completed_response.status_code == 200
-
-    stale_payload = {
-        "type": "transaction_updated",
-        "data": {
-            "id": "moonpay-tx-3",
-            "status": "failed",
-            "walletAddress": DEPOSIT_ADDRESS,
-            "cryptoTransactionId": "0x" + "99" * 32,
-            "quoteCurrencyAmount": 123.45,
-            "failureReason": "stale failure",
-            "externalCustomerId": BENEFICIARY,
-            "externalTransactionId": intent["transaction_id"],
-            "currency": {"code": "usdc"},
-        },
-    }
-    raw_stale = json.dumps(stale_payload, separators=(",", ":")).encode()
-    stale_response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw_stale,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw_stale),
-        },
-    )
-    assert stale_response.status_code == 200
-
-    pending_response = client.get("/v1/accounting/onramp/pending")
-
-    assert pending_response.status_code == 200
-    pending = pending_response.json()["pending"]
-    assert len(pending) == 1
-    assert pending[0]["transaction_id"] == intent["transaction_id"]
-    assert pending[0]["status"] == "completed"
-    assert pending[0]["on_chain_tx_hash"] == TX_HASH
-    assert pending[0]["quote_currency_amount"] == "0.9613"
-    stored = onramp.get_onramp_store().get(intent["transaction_id"])
-    assert stored is not None
-    assert stored.get("failure_reason") is None
-
-
-def test_webhook_rejects_bad_signature(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    raw = b'{"type":"transaction_updated","data":{"id":"moonpay-tx-1"}}'
-
-    response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={"Content-Type": "application/json", "Moonpay-Signature-V2": "t=1,s=bad"},
+    wrong_user_intent = onramp.create_onramp_intent(
+        user_address=OTHER_BENEFICIARY,
+        wallet_address=DEPOSIT_ADDRESS,
+        token_id=TOKEN_ID,
+        chain_id=11155111,
+        moonpay_currency_code="usdc",
     )
 
-    assert response.status_code == 401
-
-
-def test_webhook_rejects_malformed_payload_with_valid_signature(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    raw = b"not-json"
-
-    response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(raw),
-        },
+    wrong_owner = client.post(
+        f"/v1/accounting/onramp/{wrong_user_intent['transaction_id']}",
+        json={"wallet_address": DEPOSIT_ADDRESS},
     )
+    assert wrong_owner.status_code == 403
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid MoonPay webhook JSON"
-
-
-def test_webhook_rejects_oversized_body(monkeypatch, tmp_path) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    oversized = b"{" + b"a" * (1024 * 1024 + 1)
-
-    response = client.post(
-        "/v1/accounting/onramp/webhook",
-        content=oversized,
-        headers={
-            "Content-Type": "application/json",
-            "Moonpay-Signature-V2": _webhook_signature(oversized),
-        },
+    wrong_wallet_intent = onramp.create_onramp_intent(
+        user_address=BENEFICIARY,
+        wallet_address=OTHER_DEPOSIT_ADDRESS,
+        token_id=TOKEN_ID,
+        chain_id=11155111,
+        moonpay_currency_code="usdc",
     )
+    wrong_wallet = client.post(
+        f"/v1/accounting/onramp/{wrong_wallet_intent['transaction_id']}",
+        json={"wallet_address": DEPOSIT_ADDRESS},
+    )
+    assert wrong_wallet.status_code == 403
 
-    assert response.status_code == 413
-    assert response.json()["detail"] == "MoonPay webhook payload is too large"
+    intent = _create_intent(client)
+    wrong_token = client.post(
+        f"/v1/accounting/onramp/{intent['transaction_id']}",
+        json={"token_id": "0x" + "33" * 32},
+    )
+    assert wrong_token.status_code == 400
+    assert wrong_token.json()["detail"] == "token_id does not match signed on-ramp intent"
