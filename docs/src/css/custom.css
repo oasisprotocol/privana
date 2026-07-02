@@ -83,6 +83,33 @@ main header h1,
   align-items: center;
 }
 
+.pagination-nav__label{
+  font-weight: 600;
+}
+
+.menu__caret:before {
+    background: var(--ifm-menu-link-sublist-icon) 50% / 1.5rem 1.5rem;
+}
+
+tbody{
+  line-height: 1.4;
+}
+
+article{
+  margin-bottom: 1rem!important;
+}
+
+.markdown h1, .markdown h2 {
+  margin-bottom: 0.5rem!important;
+}
+
+.markdown h3{
+  font-weight: 600;
+  margin-bottom: 0.5rem!important;
+}
+
+
+
 @media (max-width: 996px) {
     .footer__col {
         margin-bottom: 0;
