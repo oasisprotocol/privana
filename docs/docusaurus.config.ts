@@ -7,6 +7,7 @@ const config: Config = {
   tagline: 'Private, non-custodial DeFi on Oasis Sapphire',
   url: 'https://docs.privana.finance',
   baseUrl: '/',
+  favicon: 'img/favicon/favicon.ico',
 
   organizationName: 'oasisprotocol',
   projectName: 'privana',
@@ -73,7 +74,7 @@ const config: Config = {
       ],
     },
     footer: {
-      style: 'dark',
+      style: 'light',
       links: [
         {
           title: 'Resources',
