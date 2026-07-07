@@ -19,8 +19,16 @@ def state_dir(tmp_path):
 
 def _write_record(state_dir, record):
     """Helper to persist a SweepRecord to the state directory."""
+    key = record.deposit_id_hex.lower().removeprefix("0x")
+    path = Path(state_dir) / f"sweep_{key}.json"
+    path.write_text(json.dumps(record.to_dict()))
+
+
+def _write_legacy_record(state_dir, record):
+    """Persist a record under the pre-deposit_id address-keyed filename."""
     path = Path(state_dir) / f"sweep_{record.deposit_address.lower()}_{record.chain_id}.json"
     path.write_text(json.dumps(record.to_dict()))
+    return path
 
 
 def test_load_incomplete_sweeps(state_dir):
@@ -52,6 +60,74 @@ def test_load_incomplete_sweeps(state_dir):
     assert incomplete[0].amount == 10**18
     assert incomplete[0].token_id_hex == "0x" + "11" * 32
     assert incomplete[0].deposit_id_hex == "0x" + "22" * 32
+
+
+def test_load_migrates_legacy_address_keyed_record(state_dir):
+    """A pre-deposit_id file is rewritten under the deposit_id key exactly once.
+
+    The old path must be unlinked, or the legacy file would resurrect the
+    record on every restart.
+    """
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+    )
+    legacy_path = _write_legacy_record(state_dir, record)
+
+    engine = SweepEngine(
+        accounting_service=AsyncMock(),
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    incomplete = engine.load_incomplete_sweeps()
+    assert len(incomplete) == 1
+    assert not legacy_path.exists()
+    migrated = engine.get_record_by_deposit_id("0x" + "22" * 32)
+    assert migrated is not None
+    assert migrated.state == SweepState.GAS_FUNDED
+
+    # A second load must see exactly one record, not a resurrected duplicate.
+    assert len(engine.load_incomplete_sweeps()) == 1
+
+
+def test_load_dedupes_legacy_and_new_keyed_files(state_dir):
+    """Legacy and deposit_id-keyed files for the same deposit load as one record.
+
+    This happens when new code wrote the deposit_id file before the legacy
+    file from an older deploy was cleaned up: the newer copy must win and the
+    legacy file must be dropped without double-counting the deposit.
+    """
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+    )
+    legacy_path = _write_legacy_record(state_dir, record)
+    newer = SweepRecord.from_dict({**record.to_dict(), "state": SweepState.SWEPT.value})
+    _write_record(state_dir, newer)
+
+    engine = SweepEngine(
+        accounting_service=AsyncMock(),
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    incomplete = engine.load_incomplete_sweeps()
+    assert len(incomplete) == 1
+    assert incomplete[0].state == SweepState.SWEPT
+    assert not legacy_path.exists()
 
 
 @pytest.mark.asyncio
@@ -88,7 +164,7 @@ async def test_resume_swept_record_credits_and_cleans_up(state_dir):
     assert call_kwargs[1]["amount"] == 10**18
 
     # Record should be cleaned up after successful credit
-    assert engine.get_sweep_record("0x" + "aa" * 20, 84532) is None
+    assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
 
 
 def _seed_web3(engine: SweepEngine, chain_id: int, receipt_outcome) -> AsyncMock:
@@ -142,7 +218,7 @@ async def test_resume_gas_funded_with_mined_sweep_tx_is_promoted_and_credited(st
     await engine.resume_incomplete_sweeps()
 
     mock_accounting.credit_deposit.assert_called_once()
-    assert engine.get_sweep_record("0x" + "aa" * 20, 84532) is None
+    assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
 
 
 @pytest.mark.asyncio
@@ -175,7 +251,7 @@ async def test_resume_gas_funded_with_unmined_sweep_tx_is_left_alone(state_dir):
     await engine.resume_incomplete_sweeps()
 
     mock_accounting.credit_deposit.assert_not_called()
-    persisted = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    persisted = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert persisted is not None
     assert persisted.state == SweepState.GAS_FUNDED
 
@@ -210,7 +286,7 @@ async def test_resume_gas_funded_with_reverted_sweep_tx_not_promoted(state_dir):
     await engine.resume_incomplete_sweeps()
 
     mock_accounting.credit_deposit.assert_not_called()
-    persisted = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    persisted = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert persisted is not None
     assert persisted.state == SweepState.GAS_FUNDED
 
@@ -346,7 +422,7 @@ async def test_resume_swept_record_already_processed(state_dir):
     await engine.resume_incomplete_sweeps()
 
     # Record still cleaned up — DepositAlreadyProcessed means credit already happened
-    assert engine.get_sweep_record("0x" + "aa" * 20, 84532) is None
+    assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
 
 
 @pytest.mark.asyncio
@@ -430,7 +506,7 @@ async def test_recovery_loop_persists_error_for_pending_record(state_dir, monkey
     finally:
         await engine.stop_recovery_loop()
 
-    persisted = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    persisted = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert persisted is not None
     assert persisted.error == "gas tank empty"
 
@@ -464,7 +540,7 @@ async def test_resume_does_not_overwrite_sweep_tx_hash_on_error(state_dir):
 
     engine._persist_resume_error(record, RuntimeError("boom"))
 
-    persisted = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    persisted = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert persisted is not None
     assert persisted.error is None, "error must not overwrite a record that has sweep_tx_hash"
     assert persisted.sweep_tx_hash == "0x" + "dd" * 32
