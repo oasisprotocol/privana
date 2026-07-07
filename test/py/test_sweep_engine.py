@@ -59,7 +59,7 @@ def engine(state_dir, mock_accounting):
 
 
 def test_initial_state_is_idle(engine):
-    record = engine.get_sweep_record("0x" + "aa" * 20, 84532)
+    record = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert record is None  # no record = idle
 
 
@@ -72,6 +72,7 @@ def test_state_persistence(engine, state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        deposit_id_hex="0x" + "22" * 32,
     )
     engine._save_record(record)
 
@@ -81,7 +82,7 @@ def test_state_persistence(engine, state_dir):
         chain_rpc_urls={84532: "https://fake-rpc.example.com"},
         state_dir=state_dir,
     )
-    loaded = engine2.get_sweep_record("0x" + "aa" * 20, 84532)
+    loaded = engine2.get_record_by_deposit_id("0x" + "22" * 32)
     assert loaded is not None
     assert loaded.state == SweepState.PENDING
 
@@ -120,7 +121,7 @@ async def test_sweep_native_full_cycle(engine, mock_accounting):
     # Credit was called after sweep
     mock_accounting.credit_deposit.assert_called_once()
     # State is back to idle (record cleaned up)
-    assert engine.get_sweep_record(deposit_addr, 84532) is None
+    assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
 
 
 @pytest.mark.asyncio
@@ -271,7 +272,7 @@ async def test_sweep_erc20_full_cycle(engine, mock_accounting):
     gas_tx_hash_hex = "0x" + "aa" * 32
     assert gas_tx_hash_hex.lower() in engine._gas_funding_tx_hashes
     # Record cleaned up (back to idle)
-    assert engine.get_sweep_record(deposit_addr, 84532) is None
+    assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
 
 
 @pytest.mark.asyncio
@@ -504,3 +505,69 @@ def test_persist_error_marks_record_without_sweep_tx(engine):
     stored = engine.get_record_by_deposit_id(deposit_id_hex)
     assert stored is not None
     assert stored.error == "gas funding failed"
+
+
+def _same_address_record(deposit_id_hex: str) -> SweepRecord:
+    return SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.PENDING,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        deposit_id_hex=deposit_id_hex,
+    )
+
+
+def test_same_address_records_coexist(engine):
+    """Two deposits to the same address keep independent records.
+
+    Records are keyed by deposit_id, so a later same-address deposit must
+    not overwrite or shadow an earlier one's persisted state.
+    """
+    id_a = "0x" + "1a" * 32
+    id_b = "0x" + "2b" * 32
+    engine._save_record(_same_address_record(id_a))
+    engine._save_record(_same_address_record(id_b))
+
+    stored_a = engine.get_record_by_deposit_id(id_a)
+    stored_b = engine.get_record_by_deposit_id(id_b)
+    assert stored_a is not None and stored_a.deposit_id_hex == id_a
+    assert stored_b is not None and stored_b.deposit_id_hex == id_b
+
+
+def test_cleanup_record_leaves_same_address_sibling(engine):
+    id_a = "0x" + "1a" * 32
+    id_b = "0x" + "2b" * 32
+    engine._save_record(_same_address_record(id_a))
+    engine._save_record(_same_address_record(id_b))
+
+    engine.cleanup_record(id_a)
+
+    assert engine.get_record_by_deposit_id(id_a) is None
+    assert engine.get_record_by_deposit_id(id_b) is not None
+
+
+def test_persist_error_targets_only_its_deposit(engine):
+    """An error on one deposit must not land on a same-address sibling."""
+    id_a = "0x" + "1a" * 32
+    id_b = "0x" + "2b" * 32
+    engine._save_record(_same_address_record(id_a))
+    engine._save_record(_same_address_record(id_b))
+
+    engine.persist_error(id_a, "gas funding failed")
+
+    stored_a = engine.get_record_by_deposit_id(id_a)
+    stored_b = engine.get_record_by_deposit_id(id_b)
+    assert stored_a is not None and stored_a.error == "gas funding failed"
+    assert stored_b is not None and stored_b.error is None
+
+
+def test_save_record_requires_deposit_id(engine):
+    record = _same_address_record("0x" + "1a" * 32)
+    for bad_id in ("", "0x12", "0x" + "zz" * 32, "0x../" + "22" * 31):
+        record.deposit_id_hex = bad_id
+        with pytest.raises(ValueError):
+            engine._save_record(record)
+    # Malformed ids on the read path are a client error, not ours: not-found.
+    assert engine.get_record_by_deposit_id("0x../etc/passwd") is None

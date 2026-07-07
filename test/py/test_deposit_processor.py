@@ -23,7 +23,6 @@ def mock_verifier():
 def mock_sweep_engine():
     engine = AsyncMock()
     engine.gas_funding_tx_hashes = set()
-    engine.get_sweep_record = MagicMock(return_value=None)
     engine.get_record_by_deposit_id = MagicMock(return_value=None)
     engine.cleanup_record = MagicMock()
     engine.persist_error = MagicMock()

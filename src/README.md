@@ -21,7 +21,7 @@ src/
 ├── services/                  # Business logic
 │   ├── deposit_processor.py   #   Orchestrates verify → sweep → credit
 │   ├── deposit_verifier.py    #   RPC-based source-chain verification
-│   ├── sweep_engine.py        #   Per-address state machine, persistence, recovery
+│   ├── sweep_engine.py        #   Per-deposit state machine, persistence, recovery
 │   ├── withdrawal_processor.py#   Polls Sapphire, resolves, broadcasts
 │   ├── accounting_contract.py #   Sapphire client (ROFL or direct-key path)
 │   ├── rofl_signer_bootstrap.py # Publish roflSignerAddress at startup
@@ -108,7 +108,7 @@ Concurrency:
 - One `asyncio.Lock` per `(deposit_address, chain_id)` — concurrent claims for the same address queue.
 - One global lock around gas-tank nonce reads (prevents concurrent sweeps from reusing the same nonce on the gas tank).
 
-Persistence: one JSON file per active sweep at `/data/sweep-engine/sweep_<deposit_address>_<chain_id>.json` (matches `SweepRecord` dataclass). On startup, `resume_incomplete_sweeps()` rebuilds the in-memory `deposit_id_hex → (address, chain_id)` index and re-drives any `PENDING` / `GAS_FUNDED` records.
+Persistence: one JSON file per active sweep at `/data/sweep-engine/sweep_<deposit_id>.json` (matches `SweepRecord` dataclass; keyed by the unique deposit_id so same-address deposits never clobber each other). On startup, `resume_incomplete_sweeps()` migrates any legacy `sweep_<address>_<chain_id>.json` files to the deposit_id key and re-drives any `PENDING` / `GAS_FUNDED` records.
 
 Recovery semantics:
 - `SWEPT` records → retry `creditDeposit` (idempotent via `DepositAlreadyProcessed` revert).
@@ -165,7 +165,7 @@ Key file: `services/rofl_signer_bootstrap.py`.
 
 | What | Where | Lifecycle |
 |------|-------|-----------|
-| Sweep records | `/data/sweep-engine/sweep_<addr>_<chain>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
+| Sweep records | `/data/sweep-engine/sweep_<deposit_id>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
 | JWT signing key | Derived in-memory from ROFL TEE seed at startup | Re-derived on each start; deterministic per ROFL app. |
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
 | Withdrawal high-water marks | In-memory only (`WithdrawalProcessor._chain_high_water_mark`) | Rebuilt on restart via the catch-up pass. |

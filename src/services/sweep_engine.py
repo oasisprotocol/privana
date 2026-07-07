@@ -1,6 +1,7 @@
 """Sweep engine: state machine for sweeping deposit addresses to the encumbered wallet.
 
-State machine per (deposit_address, chain_id):
+State machine per deposit (records keyed by the unique 32-byte deposit_id;
+sweeps for the same address serialize on the per-address lock):
     (no record) → PENDING → GAS_FUNDED → SWEPT → (credit) → record deleted
 
     SWEPT is only set after the sweep tx is confirmed on-chain (receipt status=1).
@@ -202,9 +203,6 @@ class SweepEngine:
         self._gas_tank_lock = asyncio.Lock()
         # Track gas funding tx hashes to exclude from deposit verification
         self._gas_funding_tx_hashes: Set[str] = set()
-        # Reverse index: deposit_id_hex → (deposit_address, chain_id)
-        # Rebuilt from disk on startup via load_incomplete_sweeps()
-        self._deposit_id_index: Dict[str, tuple[str, int]] = {}
         # Recovery loop state
         self._recovery_running = False
         self._recovery_task: Optional[asyncio.Task] = None
@@ -248,50 +246,47 @@ class SweepEngine:
         )
         return gas_price
 
-    def _record_path(self, deposit_address: str, chain_id: int) -> Path:
-        key = f"{deposit_address.lower()}_{chain_id}"
+    def _record_path(self, deposit_id_hex: str) -> Path:
+        # deposit_id is the unique 32-byte id, so one file per deposit: two
+        # deposits to the same address can never clobber each other's state.
+        # Concurrency stays with the per-address asyncio lock, not the file key.
+        # Strict validation keeps caller-supplied ids from escaping the
+        # state dir via path separators in the filename.
+        key = deposit_id_hex.lower().removeprefix("0x")
+        if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+            raise ValueError(f"deposit_id_hex must be 32 bytes of hex, got {deposit_id_hex!r}")
         return self._state_dir / f"sweep_{key}.json"
 
     def _save_record(self, record: SweepRecord) -> None:
-        path = self._record_path(record.deposit_address, record.chain_id)
+        path = self._record_path(record.deposit_id_hex)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(record.to_dict(), indent=2))
         os.replace(str(tmp), str(path))
-        if record.deposit_id_hex:
-            self._deposit_id_index[record.deposit_id_hex.lower()] = (
-                record.deposit_address,
-                record.chain_id,
-            )
 
-    def _delete_record(self, deposit_address: str, chain_id: int) -> None:
-        # Use the index to find deposit_id_hex without a disk read
-        for key, (addr, cid) in self._deposit_id_index.items():
-            if addr.lower() == deposit_address.lower() and cid == chain_id:
-                self._deposit_id_index.pop(key, None)
-                break
-        path = self._record_path(deposit_address, chain_id)
-        path.unlink(missing_ok=True)
+    def _delete_record(self, deposit_id_hex: str) -> None:
+        self._record_path(deposit_id_hex).unlink(missing_ok=True)
 
-    def get_sweep_record(self, deposit_address: str, chain_id: int) -> Optional[SweepRecord]:
-        path = self._record_path(deposit_address, chain_id)
+    def get_record_by_deposit_id(self, deposit_id_hex: str) -> Optional[SweepRecord]:
+        """Look up a SweepRecord by deposit_id_hex (used by polling endpoint).
+
+        Malformed ids read as not-found rather than raising: this sits on the
+        status-polling path, where a bad id is a client error, not ours.
+        """
+        try:
+            path = self._record_path(deposit_id_hex)
+        except ValueError:
+            return None
         if not path.exists():
             return None
         data = json.loads(path.read_text())
         return SweepRecord.from_dict(data)
 
-    def get_record_by_deposit_id(self, deposit_id_hex: str) -> Optional[SweepRecord]:
-        """Look up a SweepRecord by deposit_id_hex (used by polling endpoint)."""
-        location = self._deposit_id_index.get(deposit_id_hex.lower())
-        if location is None:
-            return None
-        return self.get_sweep_record(*location)
-
     def cleanup_record(self, deposit_id_hex: str) -> None:
         """Delete a sweep record by deposit_id (public API for DepositProcessor)."""
-        location = self._deposit_id_index.get(deposit_id_hex.lower())
-        if location is None:
+        try:
+            self._delete_record(deposit_id_hex)
+        except ValueError:
             return
-        self._delete_record(*location)
 
     def persist_error(self, deposit_id_hex: str, error: str) -> None:
         """Mark a sweep record as failed (public API for DepositProcessor).
@@ -469,7 +464,7 @@ class SweepEngine:
 
                 # Only clean up on full success — partial failures (sweep ok, credit failed)
                 # leave the record for recovery
-                self._delete_record(deposit_address, chain_id)
+                self._delete_record(record.deposit_id_hex)
 
             except SweepCreditPendingError:
                 raise
@@ -631,7 +626,7 @@ class SweepEngine:
                 )
 
                 # Only clean up on full success
-                self._delete_record(deposit_address, chain_id)
+                self._delete_record(record.deposit_id_hex)
 
             except SweepCreditPendingError:
                 raise
@@ -688,20 +683,31 @@ class SweepEngine:
 
         Also re-populates gas_funding_tx_hashes from persisted records
         to prevent gas funding txs from being claimed as deposits after restart.
+
+        Migrates legacy address-keyed files (sweep_<address>_<chain>.json) to
+        the deposit_id key, unlinking the old path so it can't resurrect on
+        the next restart.
         """
         records = []
-        for path in self._state_dir.glob("sweep_*.json"):
+        # Materialize the glob before renaming inside the loop: a lazy
+        # iterator could yield a just-migrated file a second time.
+        for path in sorted(self._state_dir.glob("sweep_*.json")):
             try:
                 data = json.loads(path.read_text())
                 record = SweepRecord.from_dict(data)
+                expected = self._record_path(record.deposit_id_hex)
+                if path != expected:
+                    if expected.exists():
+                        # A deposit_id-keyed copy already exists; it was
+                        # written by newer code, so the legacy file is the
+                        # duplicate to drop — and the kept copy is loaded by
+                        # its own glob entry, so don't double-count it here.
+                        path.unlink()
+                        continue
+                    path.rename(expected)
                 records.append(record)
                 if record.gas_funding_tx_hash:
                     self._gas_funding_tx_hashes.add(record.gas_funding_tx_hash.lower())
-                if record.deposit_id_hex:
-                    self._deposit_id_index[record.deposit_id_hex.lower()] = (
-                        record.deposit_address,
-                        record.chain_id,
-                    )
             except Exception as exc:
                 raw = path.read_text()
                 logger.critical(
@@ -771,7 +777,7 @@ class SweepEngine:
         cleanup_record and orphan the pending tx. Re-read disk — the local
         record is stale after _resume_sweep_from_pending ran.
         """
-        current = self.get_sweep_record(record.deposit_address, record.chain_id)
+        current = self.get_record_by_deposit_id(record.deposit_id_hex)
         if current is None or current.sweep_tx_hash:
             return
         current.error = str(exc)
@@ -845,7 +851,7 @@ class SweepEngine:
                         amount=record.amount,
                         deposit_id=deposit_id,
                     )
-                    self._delete_record(record.deposit_address, record.chain_id)
+                    self._delete_record(record.deposit_id_hex)
                     succeeded += 1
                     logger.info(
                         "Recovered sweep for %s on chain %d — credit completed",
@@ -973,7 +979,7 @@ class SweepEngine:
                         amount=record.amount,
                         deposit_id=deposit_id,
                     )
-                    self._delete_record(record.deposit_address, record.chain_id)
+                    self._delete_record(record.deposit_id_hex)
                     logger.info(
                         "Recovery loop: credit completed for %s on chain %d",
                         record.deposit_address,
