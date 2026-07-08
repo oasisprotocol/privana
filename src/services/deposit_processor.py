@@ -62,6 +62,11 @@ class DepositProcessor:
         # Strong refs — asyncio.create_task returns can be GC'd without one.
         self._background_tasks: set[asyncio.Task] = set()
 
+    @property
+    def sweep_engine(self) -> SweepEngine:
+        """In-flight sweep state, shared with read-only consumers like discovery."""
+        return self._sweep
+
     async def resume_incomplete_sweeps(self) -> None:
         """Resume incomplete sweeps after TEE restart."""
         await self._sweep.resume_incomplete_sweeps()

@@ -24,6 +24,11 @@ class ChainConfig:
     min_deposit_erc20_wei: int
     gas_funding_amount_wei: int
     l2_type: L2Type = L2Type.NONE
+    # Deposit discovery (GET /deposits/pending) scan bounds, in blocks.
+    # Defaults suit ~12s blocks; override per chain for faster block times.
+    discovery_lookback_blocks: int = 300  # ~1h default scan window
+    discovery_max_lookback_blocks: int = 7_200  # ~24h clamp for client requests
+    discovery_scan_chunk_blocks: int = 5_000  # per eth_getLogs call (Alchemy-safe)
 
     def __post_init__(self):
         if self.gas_funding_amount_wei >= self.min_deposit_native_wei:
@@ -34,6 +39,13 @@ class ChainConfig:
                 "otherwise a gas-funding transfer could satisfy the min-deposit "
                 "threshold and be claimed via /deposits/check after restart."
             )
+        if not (0 < self.discovery_lookback_blocks <= self.discovery_max_lookback_blocks):
+            raise ValueError(
+                f"chain {self.chain_id}: discovery_lookback_blocks must be in "
+                f"[1, discovery_max_lookback_blocks]"
+            )
+        if self.discovery_scan_chunk_blocks <= 0:
+            raise ValueError(f"chain {self.chain_id}: discovery_scan_chunk_blocks must be positive")
 
 
 # ─── Chain definitions (single source of truth) ────────────────────────
@@ -46,6 +58,8 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
         gas_funding_amount_wei=200_000_000_000_000,  # 0.0002 ETH (~65k gas * 3 gwei)
         l2_type=L2Type.OP_STACK,
+        discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
+        discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
     ),
     11155111: ChainConfig(
         chain_id=11155111,
