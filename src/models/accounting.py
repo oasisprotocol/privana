@@ -582,6 +582,35 @@ class DepositCheckResponse(BaseModel):
     detail: str | None = None
 
 
+class PendingDeposit(BaseModel):
+    """Uncredited inbound ERC20 transfer discovered on a source chain.
+
+    Carries the POST /deposits/check submission fields unchanged, plus display
+    metadata (token, block, status). status "processing" means a sweep is
+    already in flight — poll GET /deposits/status/{deposit_id} instead of
+    re-submitting.
+    """
+
+    chain_id: int
+    tx_hash: str
+    log_index: int
+    amount: str  # base units
+    token_address: str
+    token_id: str
+    block_number: int
+    version: int
+    status: Literal["discovered", "processing"]
+    deposit_id: str | None = None  # set when status == "processing"
+
+
+class PendingDepositsResponse(BaseModel):
+    """Finalized, uncredited external-wallet deposits to the caller's deposit address."""
+
+    pending: list[PendingDeposit]
+    scanned_from_block: int
+    scanned_to_block: int
+
+
 class SignOnRampUrlRequest(BaseModel):
     """Request to sign a MoonPay on-ramp widget URL."""
 

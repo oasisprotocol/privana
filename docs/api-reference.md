@@ -78,6 +78,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `POST /deposits/address` | required | `Authorization: Bearer …` or `X-SIWE-Token` |
 | `POST /deposits/check` | required | same |
 | `GET /deposits/status/{id}` | required | same |
+| `GET /deposits/pending` | required | same |
 | `POST /funds/withdraw-from-lock` | required | same |
 | `GET /balances/{token_id}` | required | same |
 | `POST /balances/batch` | required | same |
@@ -122,6 +123,28 @@ The deposit path is **address-based**: the contract derives a per-user address (
                                       with status="pending" and a deposit_id
 4. GET /deposits/status/{deposit_id}  → poll until status="credited"
 ```
+
+For **external-wallet deposits** the client does not know the tx hash (no
+wallet callback, no webhook). `GET /deposits/pending?chain_id=…` scans
+finalized source-chain ERC20 Transfer logs to the caller's deposit address and
+returns uncredited candidates carrying exactly the fields `POST
+/deposits/check` consumes (`chain_id`, `tx_hash`, `amount`, `log_index`,
+`version`). Candidates with a sweep already in flight come back as
+`status="processing"` with their `deposit_id` — poll `GET
+/deposits/status/{deposit_id}` instead of re-submitting. The scan window
+defaults to ~1 hour and is clamped to ~24 hours via `lookback_blocks`
+(rounded up to full scan chunks); an optional `token_address` narrows the
+scan to one registered token. Results are cached for up to 30 seconds, so a
+just-submitted candidate may briefly reappear, possibly still marked
+`discovered` — re-submitting it to `/deposits/check` is harmless (the
+endpoint is idempotent). `scanned_from_block` reports the oldest block
+actually examined: when a scan stops early at its internal candidate caps it
+is higher than the requested window bottom, so treat only
+`[scanned_from_block, scanned_to_block]` as covered. In the extreme case
+where the caps trip inside the newest block, `scanned_from_block` is
+`scanned_to_block + 1`: the interval is empty and no block is fully covered. Native transfers
+emit no logs and are not discoverable — submit their tx hash to
+`/deposits/check` directly.
 
 Behavior notes:
 
@@ -271,7 +294,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `422 Unprocessable Entity` | Contract revert (transaction submitted but the chain rejected it). The response `detail` carries the revert reason when available. |
 | `429 Too Many Requests` | Auth rate-limiter tripped. Honour the `Retry-After` header. |
 | `500 Internal Server Error` | Unexpected failure in the service layer. Errors are logged with stack traces — file an issue with the request id. |
-| `503 Service Unavailable` | MoonPay on-ramp is not configured — URL-signing, intent-signing, transaction-lookup, or webhook keys are missing. |
+| `503 Service Unavailable` | A required integration is not configured — MoonPay on-ramp keys (URL-signing, intent-signing, transaction-lookup, webhook) or the source-chain RPC used by `GET /deposits/pending`. |
 
 ## Schemas
 

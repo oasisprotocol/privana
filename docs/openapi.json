@@ -958,6 +958,102 @@
         "title": "OnRampRecord",
         "type": "object"
       },
+      "PendingDeposit": {
+        "description": "Uncredited inbound ERC20 transfer discovered on a source chain.\n\nCarries the POST /deposits/check submission fields unchanged, plus display\nmetadata (token, block, status). status \"processing\" means a sweep is\nalready in flight \u2014 poll GET /deposits/status/{deposit_id} instead of\nre-submitting.",
+        "properties": {
+          "amount": {
+            "title": "Amount",
+            "type": "string"
+          },
+          "block_number": {
+            "title": "Block Number",
+            "type": "integer"
+          },
+          "chain_id": {
+            "title": "Chain Id",
+            "type": "integer"
+          },
+          "deposit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Id"
+          },
+          "log_index": {
+            "title": "Log Index",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "discovered",
+              "processing"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "token_address": {
+            "title": "Token Address",
+            "type": "string"
+          },
+          "token_id": {
+            "title": "Token Id",
+            "type": "string"
+          },
+          "tx_hash": {
+            "title": "Tx Hash",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chain_id",
+          "tx_hash",
+          "log_index",
+          "amount",
+          "token_address",
+          "token_id",
+          "block_number",
+          "version",
+          "status"
+        ],
+        "title": "PendingDeposit",
+        "type": "object"
+      },
+      "PendingDepositsResponse": {
+        "description": "Finalized, uncredited external-wallet deposits to the caller's deposit address.",
+        "properties": {
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/PendingDeposit"
+            },
+            "title": "Pending",
+            "type": "array"
+          },
+          "scanned_from_block": {
+            "title": "Scanned From Block",
+            "type": "integer"
+          },
+          "scanned_to_block": {
+            "title": "Scanned To Block",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending",
+          "scanned_from_block",
+          "scanned_to_block"
+        ],
+        "title": "PendingDepositsResponse",
+        "type": "object"
+      },
       "PendingOnRampsResponse": {
         "description": "Completed MoonPay transactions that still need Privana deposit verification.",
         "properties": {
@@ -2760,6 +2856,121 @@
           }
         ],
         "summary": "Check Deposit",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/deposits/pending": {
+      "get": {
+        "description": "Discover uncredited external-wallet ERC20 deposits to the caller's deposit address.\n\nRead-only: scans finalized source-chain Transfer logs and returns candidates\nshaped for POST /deposits/check. Native transfers emit no logs and are not\ndiscoverable \u2014 submit their tx hash to /deposits/check directly.",
+        "operationId": "get_pending_deposits_v1_accounting_deposits_pending_get",
+        "parameters": [
+          {
+            "description": "Source chain ID to scan",
+            "in": "query",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "Source chain ID to scan",
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Deposit address derivation version",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Deposit address derivation version",
+              "title": "Version",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Optional registered ERC20 contract to scan for (default: all)",
+            "in": "query",
+            "name": "token_address",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional registered ERC20 contract to scan for (default: all)",
+              "title": "Token Address"
+            }
+          },
+          {
+            "description": "Scan window in blocks, rounded up to full scan chunks and clamped to the chain's maximum (default: ~1h)",
+            "in": "query",
+            "name": "lookback_blocks",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scan window in blocks, rounded up to full scan chunks and clamped to the chain's maximum (default: ~1h)",
+              "title": "Lookback Blocks"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingDepositsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Pending Deposits",
         "tags": [
           "Accounting"
         ]

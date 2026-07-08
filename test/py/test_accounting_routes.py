@@ -525,3 +525,186 @@ def test_deposit_status_not_found(monkeypatch) -> None:
     response = client.get(f"/v1/accounting/deposits/status/{DEPOSIT_ID_HEX}")
 
     assert response.status_code == 404
+
+
+def _make_discovery_client(monkeypatch, result=None, error=None):
+    from src.services.deposit_discovery import DiscoveryResult
+
+    mock_service = MagicMock()
+    mock_service.get_deposit_address = AsyncMock(
+        return_value="0x" + "aa" * 20,
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    discovery = MagicMock()
+    if error is not None:
+        discovery.discover_pending_deposits = AsyncMock(side_effect=error)
+    else:
+        discovery.discover_pending_deposits = AsyncMock(
+            return_value=result
+            or DiscoveryResult(pending=[], scanned_from_block=100, scanned_to_block=200)
+        )
+    monkeypatch.setattr(routes, "get_deposit_discovery_service", lambda: discovery)
+
+    rate_limit = MagicMock()
+    monkeypatch.setattr(routes, "_enforce_auth_rate_limit", rate_limit)
+    return _make_authed_client(monkeypatch), mock_service, discovery, rate_limit
+
+
+def test_pending_deposits_returns_candidates(monkeypatch) -> None:
+    from src.services.deposit_discovery import DiscoveredDeposit, DiscoveryResult
+
+    result = DiscoveryResult(
+        pending=[
+            DiscoveredDeposit(
+                chain_id=84532,
+                tx_hash="0x" + "ab" * 32,
+                log_index=3,
+                amount=5_000_000,
+                token_address="0x" + "11" * 20,
+                token_id_hex=TOKEN_ID_HEX,
+                block_number=99_000,
+                version=0,
+                status="discovered",
+            ),
+            DiscoveredDeposit(
+                chain_id=84532,
+                tx_hash="0x" + "cd" * 32,
+                log_index=0,
+                amount=2_000_000,
+                token_address="0x" + "11" * 20,
+                token_id_hex=TOKEN_ID_HEX,
+                block_number=98_500,
+                version=0,
+                status="processing",
+                deposit_id_hex=DEPOSIT_ID_HEX,
+            ),
+        ],
+        scanned_from_block=98_186,
+        scanned_to_block=99_985,
+    )
+    client, mock_service, discovery, rate_limit = _make_discovery_client(monkeypatch, result)
+
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["scanned_from_block"] == 98_186
+    assert body["scanned_to_block"] == 99_985
+    assert [c["status"] for c in body["pending"]] == ["discovered", "processing"]
+    first = body["pending"][0]
+    assert first["chain_id"] == 84532
+    assert first["tx_hash"] == "0x" + "ab" * 32
+    assert first["amount"] == "5000000"
+    assert first["log_index"] == 3
+    assert first["version"] == 0
+    assert first["deposit_id"] is None
+    assert body["pending"][1]["deposit_id"] == DEPOSIT_ID_HEX
+
+    rate_limit.assert_called_once()
+    assert rate_limit.call_args[0][1] == "deposits_pending"
+    mock_service.get_deposit_address.assert_awaited_once()
+    kwargs = discovery.discover_pending_deposits.call_args.kwargs
+    assert kwargs["deposit_address"] == "0x" + "aa" * 20
+    assert kwargs["beneficiary"] == BENEFICIARY
+    assert kwargs["chain_id"] == 84532
+    assert kwargs["token_address"] is None
+
+
+def test_pending_deposits_rejects_unsupported_chain(monkeypatch) -> None:
+    client, _, discovery, _ = _make_discovery_client(monkeypatch)
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 999})
+    assert response.status_code == 400
+    assert "Unsupported chain_id" in response.json()["detail"]
+    discovery.discover_pending_deposits.assert_not_called()
+
+
+def test_pending_deposits_rejects_unsupported_version(monkeypatch) -> None:
+    client, _, discovery, _ = _make_discovery_client(monkeypatch)
+    response = client.get(
+        "/v1/accounting/deposits/pending", params={"chain_id": 84532, "version": 7}
+    )
+    assert response.status_code == 400
+    discovery.discover_pending_deposits.assert_not_called()
+
+
+def test_pending_deposits_rejects_invalid_token_address(monkeypatch) -> None:
+    client, _, discovery, _ = _make_discovery_client(monkeypatch)
+    response = client.get(
+        "/v1/accounting/deposits/pending",
+        params={"chain_id": 84532, "token_address": "not-an-address"},
+    )
+    assert response.status_code == 400
+    discovery.discover_pending_deposits.assert_not_called()
+
+
+def test_pending_deposits_rejects_nonpositive_lookback(monkeypatch) -> None:
+    client, _, discovery, _ = _make_discovery_client(monkeypatch)
+    response = client.get(
+        "/v1/accounting/deposits/pending", params={"chain_id": 84532, "lookback_blocks": 0}
+    )
+    assert response.status_code == 422  # FastAPI Query(gt=0) validation
+    discovery.discover_pending_deposits.assert_not_called()
+
+
+def test_pending_deposits_maps_rpc_failure_to_502(monkeypatch) -> None:
+    from src.services.deposit_discovery import DiscoveryRPCError
+
+    client, _, _, _ = _make_discovery_client(monkeypatch, error=DiscoveryRPCError("timeout"))
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
+    assert response.status_code == 502
+
+
+def test_pending_deposits_maps_missing_rpc_config_to_503(monkeypatch) -> None:
+    from src.services.deposit_discovery import DiscoveryNotConfiguredError
+
+    client, _, _, _ = _make_discovery_client(
+        monkeypatch, error=DiscoveryNotConfiguredError("No RPC URL configured for chain 84532")
+    )
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
+    assert response.status_code == 503
+    # Operator fault: the config detail must stay server-side
+    assert "RPC URL" not in response.json()["detail"]
+
+
+def test_pending_deposits_maps_siwe_revert_to_401(monkeypatch) -> None:
+    from web3.exceptions import ContractLogicError
+
+    client, _, _, _ = _make_discovery_client(
+        monkeypatch, error=ContractLogicError("execution reverted: InvalidSiweToken")
+    )
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
+    assert response.status_code == 401
+
+
+def test_pending_deposits_maps_other_revert_to_422(monkeypatch) -> None:
+    from web3.exceptions import ContractLogicError
+
+    client, _, _, _ = _make_discovery_client(
+        monkeypatch, error=ContractLogicError("execution reverted: SomethingElse")
+    )
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
+    assert response.status_code == 422
+
+
+def test_pending_deposits_maps_unregistered_token_to_400(monkeypatch) -> None:
+    token = "0x" + "22" * 20
+    client, _, _, _ = _make_discovery_client(
+        monkeypatch,
+        error=ValueError(f"token_address {token} is not a registered token on chain 84532"),
+    )
+    response = client.get(
+        "/v1/accounting/deposits/pending",
+        params={"chain_id": 84532, "token_address": Web3.to_checksum_address(token)},
+    )
+    assert response.status_code == 400
+    assert "not a registered token" in response.json()["detail"]
+
+
+def test_pending_deposits_requires_auth(monkeypatch) -> None:
+    discovery = MagicMock()
+    monkeypatch.setattr(routes, "get_deposit_discovery_service", lambda: discovery)
+    client = _make_client()
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
+    assert response.status_code == 401
+    discovery.discover_pending_deposits.assert_not_called()
