@@ -141,7 +141,7 @@ describe('Accounting history', function () {
   });
 
   it('uses _authSender semantics for empty and non-empty tokens while isolating users', async function () {
-    const depositTx1 = await accounting.mockCreditDeposit(
+    const depositTx1 = await accounting.creditDeposit(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       parseUsdt('1'),
@@ -149,7 +149,7 @@ describe('Accounting history', function () {
     );
     const depositReceipt1 = await depositTx1.wait();
 
-    const depositTx2 = await accounting.mockCreditDeposit(userWallet2.address, TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'));
+    const depositTx2 = await accounting.creditDeposit(userWallet2.address, TEST_TOKEN.tokenId, parseUsdt('2'), depositKey('u2'));
     await depositTx2.wait();
 
     const [callerHistory, callerTotal] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
@@ -182,7 +182,7 @@ describe('Accounting history', function () {
   });
 
   it('returns oldest-first pages and clamps limit to 100', async function () {
-    const tx = await accounting.mockCreditDepositNTimes(
+    const tx = await accounting.creditDepositNTimes(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       1,
@@ -216,7 +216,7 @@ describe('Accounting history', function () {
 
   it('records fund movements and recipient mirrors', async function () {
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('50'));
-    await accounting.mockCreditDeposit(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('3'), depositKey('seed'));
+    await accounting.creditDeposit(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('3'), depositKey('seed'));
 
     const expiry = (await latestTimestamp()) + 3600;
     const createLockNonce = await accounting.createLockNonces(userWallet1.address);
@@ -534,7 +534,7 @@ describe('Accounting history', function () {
 
   it('returns an empty page for out-of-range offsets while preserving total', async function () {
     for (let i = 1; i <= 3; i++) {
-      await accounting.mockCreditDeposit(
+      await accounting.creditDeposit(
         userWallet1.address,
         TEST_TOKEN.tokenId,
         BigInt(i),
@@ -556,7 +556,7 @@ describe('Accounting history', function () {
   });
 
   it('returns an empty page when limit is zero', async function () {
-    await accounting.mockCreditDeposit(
+    await accounting.creditDeposit(
       userWallet1.address,
       TEST_TOKEN.tokenId,
       parseUsdt('1'),

@@ -5,7 +5,8 @@ import { config, ethers, network, upgrades } from 'hardhat';
 import { JsonRpcProvider } from 'ethers';
 import { MockAccounting } from "../typechain-types";
 
-export const MOCK_ROFL_APP_ID = "0x" + "00".repeat(21); // bytes21
+/** Equivalent of bytes21(0) in Solidity. Disables onlyROFL checks in Accounting. */
+export const ZERO_ROFL_APP_ID = '0x' + '00'.repeat(21);
 
 /**
  * Returns a signer configured with unwrapped provider (i.e. unencrypted transactions) for deploying or upgrading contracts.
@@ -87,8 +88,9 @@ export async function waitForImplementationChange(
 /**
  * Helper to deploy the mock accounting contract with an unencrypted transaction and with workarounds for flaky UUPS wrapper errors.
  * @param mockSiweAuthAddress SIWE auth contract to initialize Accounting with
+ * @param roflAppId ROFL app ID to initialize with (default: ZERO_ROFL_APP_ID which passes onlyROFL in the mock contract)
  */
-export async function deployMockAccounting(mockSiweAuthAddress: string) {
+export async function deployMockAccounting(mockSiweAuthAddress: string, roflAppId: string = ZERO_ROFL_APP_ID) {
 	const deployer = getDeployer();
 	const AccountingFactory = await ethers.getContractFactory('MockAccounting', deployer);
 	let accounting: MockAccounting;
@@ -99,7 +101,7 @@ export async function deployMockAccounting(mockSiweAuthAddress: string) {
 			// Deploy as UUPS proxy
 			accounting = await upgrades.deployProxy(
 				AccountingFactory,
-				[MOCK_ROFL_APP_ID, deployer.address],
+				[roflAppId, deployer.address],
 				{ kind: 'uups', initializer: 'initialize', constructorArgs: [mockSiweAuthAddress] }
 			) as unknown as MockAccounting;
 			await accounting.waitForDeployment();

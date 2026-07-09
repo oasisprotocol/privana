@@ -4,7 +4,7 @@ import { keccak256, Wallet } from 'ethers';
 import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, MOCK_ROFL_APP_ID, mockAuthToken, waitForImplementationChange } from './utils';
+import { deployMockAccounting, getDeployer, mockAuthToken, waitForImplementationChange } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
@@ -191,7 +191,7 @@ describe('Accounting', function () {
     expect(await accounting.transferLockedNonces(userWallet2.address)).to.equal(0n);
   });
 
-  it("Admin adds tokenInfo for Test token", async function () {
+  it("Should add tokenInfo for Test token", async function () {
     const [admin] = await ethers.getSigners();
 
     // Pad chainId to 32 bytes, token address to 20 bytes, then concatenate
@@ -547,7 +547,7 @@ describe('Accounting', function () {
         [84532, ethers.id("0xtxhash1"), tokenId, 0]
       ));
       const amount = parseUsdt("100");
-      await accounting.mockCreditDeposit(userWallet1.address, tokenId, amount, depositId);
+      await accounting.creditDeposit(userWallet1.address, tokenId, amount, depositId);
       const balance = await accounting.getBalance(userWallet1.address, tokenId);
       expect(balance).to.be.gte(amount);
     });
@@ -557,9 +557,9 @@ describe('Accounting', function () {
         ["uint256", "bytes32", "bytes32", "uint256"],
         [84532, ethers.id("0xtxhash-dedup"), tokenId, 0]
       ));
-      await accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId);
+      await accounting.creditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId);
       await expect(
-        accounting.mockCreditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId)
+        accounting.creditDeposit(userWallet1.address, tokenId, parseUsdt("50"), depositId)
       ).to.be.reverted; // WithCustomError(accounting, "DepositAlreadyProcessed"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
@@ -569,7 +569,7 @@ describe('Accounting', function () {
         [84532, ethers.id("0xtxhash-zero"), tokenId, 0]
       ));
       await expect(
-        accounting.mockCreditDeposit(userWallet1.address, tokenId, 0n, depositId)
+        accounting.creditDeposit(userWallet1.address, tokenId, 0n, depositId)
       ).to.be.reverted// WithCustomError(accounting, "InvalidAmount"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
@@ -583,7 +583,7 @@ describe('Accounting', function () {
         [84532, ethers.id("0xtxhash-unreg"), fakeTokenId, 0]
       ));
       await expect(
-        accounting.mockCreditDeposit(userWallet1.address, fakeTokenId, parseUsdt("100"), depositId)
+        accounting.creditDeposit(userWallet1.address, fakeTokenId, parseUsdt("100"), depositId)
       ).to.be.reverted; // WithCustomError(accounting, "UnsupportedTokenType"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
   });
@@ -710,24 +710,28 @@ describe('Accounting', function () {
 
     it("should update roflSignerAddress and emit RoflSignerUpdated", async function () {
       const signer = userWallet1.address;
-      await expect(accounting.mockSetRoflSignerAddress(signer))
+      await expect(accounting.setRoflSignerAddress(signer))
         .to.emit(accounting, "RoflSignerUpdated")
         .withArgs(signer);
       expect(await accounting.roflSignerAddress()).to.equal(signer);
     });
 
     it("should reject zero address in setter", async function () {
-      await expect(accounting.mockSetRoflSignerAddress(ethers.ZeroAddress))
+      await expect(accounting.setRoflSignerAddress(ethers.ZeroAddress))
         .to.be.reverted; // WithCustomError(accounting, "InvalidAddress"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
 
-    it("real setRoflSignerAddress is gated by onlyROFL", async function () {
-      // Non-mock setter must fail when the ROFL precompile can't authenticate the caller.
-      // On Hardhat the Sapphire precompile doesn't exist, so the call reverts — which is
-      // exactly the guarantee the modifier provides. If the gate were removed, the call
-      // would succeed (since the inner body is a plain storage write).
+    it("setRoflSignerAddress onlyROFL gate passes", async function () {
+      await expect(accounting.setRoflSignerAddress(userWallet1.address))
+        .to.emit(accounting, "RoflSignerUpdated")
+        .withArgs(userWallet1.address);
+      expect(await accounting.roflSignerAddress()).to.equal(userWallet1.address);
+    });
+
+    it("setRoflSignerAddress onlyROFL gate fails", async function () {
+      const fresh = await deployMockAccounting(await mockSiweAuth.getAddress(), "0x" + "aa".repeat(21));
       await expect(
-        accounting.setRoflSignerAddress(userWallet1.address)
+        fresh.setRoflSignerAddress(userWallet1.address)
       ).to.be.reverted;
     });
 
