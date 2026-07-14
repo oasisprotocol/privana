@@ -26,7 +26,12 @@ from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
 from src.config import load_settings
-from src.config.chain_config import CHAIN_CONFIGS, MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
+from src.config.chain_config import (
+    CHAIN_CONFIGS,
+    MIN_DEPOSIT_ERC20_WEI,
+    MIN_DEPOSIT_NATIVE_WEI,
+    get_finality_depth,
+)
 from src.models.accounting import (
     BalanceResponse,
     BatchBalancesRequest,
@@ -301,6 +306,9 @@ async def get_deposit_address(
                     "erc20": str(MIN_DEPOSIT_ERC20_WEI.get(cid, 0)),
                 }
                 for cid in MIN_DEPOSIT_NATIVE_WEI
+            },
+            finality_depth={
+                str(cid): get_finality_depth(cid) for cid in load_settings().chain_rpc_urls
             },
         )
     except ContractLogicError as exc:
