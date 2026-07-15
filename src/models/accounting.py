@@ -551,6 +551,10 @@ class DepositAddressResponse(BaseModel):
     min_deposit: dict[str, dict[str, str]] = Field(
         default_factory=dict
     )  # {chain_id: {native, erc20}}
+    finality_depth: dict[str, int] = Field(
+        default_factory=dict,
+        description="The number of blocks on the target chain before the transaction can be assumed to be final",
+    )  # {chain_id: depth}
 
 
 class DepositCheckRequest(BaseModel):

@@ -208,6 +208,14 @@
             "title": "Deposit Address",
             "type": "string"
           },
+          "finality_depth": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "The number of blocks on the target chain before the transaction can be assumed to be final",
+            "title": "Finality Depth",
+            "type": "object"
+          },
           "min_deposit": {
             "additionalProperties": {
               "additionalProperties": {
