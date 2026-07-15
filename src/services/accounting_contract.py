@@ -395,18 +395,14 @@ class AccountingContractService:
         if token_type == 0:
             chain_id = int.from_bytes(token_data[:32], byteorder="big")
             if chain_id == 0:
-                raise ValueError(
-                    f"Token {token.hex()} is not registered in the contract. "
-                    f"Please register it using the hardhat addEVMNativeToken or addEVMErc20Token task."
-                )
+                raise ValueError(f"Token {token.hex()} is not registered in the contract.")
             token_address = None
             is_native = True
         elif token_type == 1:
             chain_id = int.from_bytes(token_data[:32], byteorder="big")
             if chain_id == 0:
                 raise ValueError(
-                    f"Token {token.hex()} is not properly registered in the contract. "
-                    f"Chain ID is 0. Please re-register using the hardhat addEVMErc20Token task."
+                    f"Token {token.hex()} is not properly registered in the contract. Chain ID is 0."
                 )
             token_address_bytes = token_data[32:52]
             token_address = _to_checksum("0x" + token_address_bytes.hex())
@@ -632,20 +628,36 @@ class AccountingContractService:
         address = await contract.functions.gasTankAddress().call()
         return Web3.to_checksum_address(address)
 
-    async def get_token_id(self, chain_id: int, token_address: str | None) -> bytes:
-        """Compute tokenId by calling the contract's encode + hash functions.
+    async def encode_token_data(self, chain_id: int, token_address: str | None) -> bytes:
+        """Compute the packed TokenInfo.data field via the contract's encode helpers.
 
         Avoids abi.encode vs abi.encodePacked mismatch by delegating to the contract.
         """
         contract = self._get_reader_contract()
         if token_address is None:
-            data = await contract.functions.encodeEVMNativeTokenData(chain_id).call()
-            token_id = await contract.functions.getTokenId((0, data)).call()
-        else:
-            addr = Web3.to_checksum_address(token_address)
-            data = await contract.functions.encodeEVMErc20TokenData(chain_id, addr).call()
-            token_id = await contract.functions.getTokenId((1, data)).call()
+            return await contract.functions.encodeEVMNativeTokenData(chain_id).call()
+        addr = Web3.to_checksum_address(token_address)
+        return await contract.functions.encodeEVMErc20TokenData(chain_id, addr).call()
+
+    async def get_token_data_and_id(
+        self, chain_id: int, token_address: str | None
+    ) -> tuple[bytes, bytes]:
+        """Compute (data, tokenId) for a token via the contract's encode + hash functions."""
+        contract = self._get_reader_contract()
+        data = await self.encode_token_data(chain_id, token_address)
+        token_type = 0 if token_address is None else 1
+        token_id = await contract.functions.getTokenId((token_type, data)).call()
+        return data, token_id
+
+    async def get_token_id(self, chain_id: int, token_address: str | None) -> bytes:
+        """Compute tokenId by calling the contract's encode + hash functions."""
+        _data, token_id = await self.get_token_data_and_id(chain_id, token_address)
         return token_id
+
+    async def set_token_info(self, token_type: int, data: bytes) -> SubmissionResult:
+        """Register a token via a ROFL-authenticated setTokenInfo tx."""
+        fn = self.contract.functions.setTokenInfo((token_type, bytes(data)))
+        return await self._submit(fn._encode_transaction_data())
 
     async def is_deposit_processed(self, deposit_id: bytes) -> bool:
         """Check if a deposit has already been processed on-chain.
@@ -1150,6 +1162,16 @@ class AccountingContractService:
         """Publish the ROFL-derived signer address on-chain via a ROFL-authenticated tx."""
         checksum = self._require_address(new_signer, "new_signer")
         fn = self.contract.functions.setRoflSignerAddress(checksum)
+        return await self._submit(fn._encode_transaction_data())
+
+    async def get_gas_price(self, chain_id: int) -> int:
+        """Read the currently published gas price (wei) for a chain from the contract."""
+        contract = self._get_reader_contract()
+        return await contract.functions.gasPrices(chain_id).call()
+
+    async def set_gas_price(self, chain_id: int, gas_price: int) -> SubmissionResult:
+        """Publish a chain's gas price on-chain via a ROFL-authenticated tx."""
+        fn = self.contract.functions.setGasPrice(chain_id, gas_price)
         return await self._submit(fn._encode_transaction_data())
 
     async def set_auth_token_enc_key(self, enc_key: bytes) -> None:

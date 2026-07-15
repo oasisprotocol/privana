@@ -25,6 +25,8 @@ src/
 │   ├── withdrawal_processor.py#   Polls Sapphire, resolves, broadcasts
 │   ├── accounting_contract.py #   Sapphire client (ROFL or direct-key path)
 │   ├── rofl_signer_bootstrap.py # Publish roflSignerAddress at startup
+│   ├── gas_price_bootstrap.py #   Sync per-chain gas prices at startup
+│   ├── token_info_bootstrap.py #  Register configured tokens at startup
 │   ├── l2_fee_estimator.py    #   OP-stack / Arbitrum L1-data-fee estimation
 │   └── cache.py               #   Lightweight in-memory caches
 ├── clients/
@@ -161,6 +163,30 @@ Idempotent: subsequent starts no-op when the address is already in sync. The pub
 
 Key file: `services/rofl_signer_bootstrap.py`.
 
+### Gas Price Bootstrap
+
+At startup (`main.py`, right after the ROFL signer bootstrap), `bootstrap_gas_prices` runs:
+
+1. Read desired per-chain gas prices from the `ACCOUNTING_GAS_PRICE` JSON env var (`config._build_gas_prices`).
+2. For each configured chain, read `gasPrices(chainId)` from the Accounting contract.
+3. If they differ, submit `setGasPrice(chainId, gasPrice)` via `RoflAppdClient` (gated by `onlyROFL` — must be ROFL-signed, not a plain admin key).
+
+Idempotent: chains already in sync are skipped. Per-chain, not all-or-nothing — a failure syncing one chain is logged and does not block the others or abort startup. Chains omitted from the `ACCOUNTING_GAS_PRICE` mapping are left untouched.
+
+Key file: `services/gas_price_bootstrap.py`.
+
+### Token Info Bootstrap
+
+At startup (`main.py`, right after the ROFL signer bootstrap, before the gas price sync), `bootstrap_token_info` runs:
+
+1. Read the desired token list from the `ACCOUNTING_TOKEN_INFO` JSON env var (`config._build_token_infos`) — each entry is `{"chain_id": <int>}` for a native token or `{"chain_id": <int>, "token_address": "0x..."}` for an ERC20 token.
+2. For each entry, compute `(data, tokenId)` via the contract's `encodeEVMNativeTokenData` / `encodeEVMErc20TokenData` + `getTokenId` helpers, then check `tokens(tokenId)` on-chain.
+3. If not yet registered, submit `setTokenInfo((tokenType, data))` via `RoflAppdClient` (gated by `onlyROFL`).
+
+Idempotent: a `tokenId` is a hash of its type+data, so an already-registered `tokenId` implies the on-chain data already matches — no update path is needed. Per-token, not all-or-nothing — a failure registering one token is logged and does not block the others or abort startup.
+
+Key file: `services/token_info_bootstrap.py`.
+
 ## State & Persistence
 
 | What | Where | Lifecycle |
@@ -191,6 +217,8 @@ Environment variables: see `.env.example`. Notable ones:
 
 - `SAPPHIRE_RPC_URL`, `ALCHEMY_API_KEY` — chain RPC access
 - `ACCOUNTING_CONTRACT_ADDRESS` — the deployed proxy
+- `ACCOUNTING_GAS_PRICE` — JSON object mapping chain_id to desired gas price (wei), synced on-chain at startup (see Gas Price Bootstrap above)
+- `ACCOUNTING_TOKEN_INFO` — JSON array of token descriptors to register on-chain at startup (see Token Info Bootstrap above)
 - `SIWE_DOMAINS` — comma-separated allowed SIWE domains
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
 - `DISABLE_ROFL_KEYS` (local dev only) — skip AuthToken/JWT key sync at startup
@@ -230,4 +258,6 @@ Notable test files:
 | `test_sweep_recovery.py` | Restart recovery for each `SweepState` |
 | `test_withdrawals.py` | Withdrawal poll/resolve/broadcast happy paths and catch-up |
 | `test_rofl_signer_bootstrap.py` | Idempotent on-chain signer publication |
+| `test_gas_price_bootstrap.py` | Idempotent per-chain gas price sync |
+| `test_token_info_bootstrap.py` | Idempotent token registration |
 | `test_accounting_contract_service.py` | Sapphire client (ROFL vs direct-key paths) |

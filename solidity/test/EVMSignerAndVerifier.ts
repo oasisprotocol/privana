@@ -14,6 +14,14 @@ describe('EVMSignerAndVerifier', function () {
     mockEVMSignerAndVerifier = await MockEVMSignerAndVerifierFactory.deploy() as unknown as MockEVMSignerAndVerifier;
     await mockEVMSignerAndVerifier.waitForDeployment();
     await (await mockEVMSignerAndVerifier.initialize(MOCK_ROFL_APP_ID)).wait();
+
+    // Re-attach via the default (wrapped) signer/provider: getDeployer()'s unwrapped
+    // provider is only needed for deployment. On Sapphire networks, hardhat-chai-matchers'
+    // .to.emit()/.to.be.reverted fetch the receipt via contract.runner.provider right after
+    // sending — the unwrapped provider doesn't wait for inclusion, so that lookup races the
+    // block. Mirrors the same workaround in utils.ts's deployMockAccounting.
+    mockEVMSignerAndVerifier = (await ethers.getContractFactory('MockEVMSignerAndVerifier'))
+      .attach(await mockEVMSignerAndVerifier.getAddress()) as unknown as MockEVMSignerAndVerifier;
   });
 
   it("Should have initialized evmAddress correctly", async function () {
@@ -37,7 +45,7 @@ describe('EVMSignerAndVerifier', function () {
     it("should reject a zero gas price", async function () {
       await expect(
         mockEVMSignerAndVerifier.setGasPrice(84532, 0n)
-      ).to.be.revertedWithCustomError(mockEVMSignerAndVerifier, "InvalidGasPrice");
+      ).to.be.reverted; // WithCustomError(mockEVMSignerAndVerifier, "InvalidGasPrice"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
     });
   });
 });

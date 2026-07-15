@@ -19,7 +19,9 @@ from src.auth.siwe_config import get_siwe_configs
 from src.config import load_settings
 from src.services.accounting_contract import get_accounting_contract_service
 from src.services.deposit_processor import get_deposit_processor
+from src.services.gas_price_bootstrap import bootstrap_gas_prices
 from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
+from src.services.token_info_bootstrap import bootstrap_token_info
 from src.services.withdrawal_processor import get_withdrawal_processor
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,8 @@ async def lifespan(_app: FastAPI):
         logger.info("AuthToken encryption key synced to contract")
 
         await bootstrap_rofl_signer_address(get_accounting_contract_service())
+        await bootstrap_token_info(get_accounting_contract_service(), settings.token_infos)
+        await bootstrap_gas_prices(get_accounting_contract_service(), settings.gas_prices_wei)
 
     withdrawal_processor = get_withdrawal_processor()
     await withdrawal_processor.start()
