@@ -1,4 +1,5 @@
 import { config as dotenvConfig } from 'dotenv';
+import { join } from 'path';
 import {
   sapphireLocalnet,
   sapphireTestnet,
@@ -10,6 +11,11 @@ import { HardhatUserConfig } from 'hardhat/config';
 import { HDAccountsUserConfig } from 'hardhat/types';
 import 'solidity-coverage';
 import './tasks';
+
+// Fixate .openzeppelin location to this folder.
+if (!process.env.MANIFEST_DEFAULT_DIR) {
+  process.env.MANIFEST_DEFAULT_DIR = join(__dirname, '.openzeppelin');
+}
 
 import '@openzeppelin/hardhat-upgrades'; // NB: Must be imported after hardhat packages to preserve network configuration!
 

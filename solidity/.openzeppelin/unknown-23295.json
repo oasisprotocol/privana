@@ -1,0 +1,632 @@
+{
+  "manifestVersion": "3.2",
+  "proxies": [
+    {
+      "address": "0xad3C76e4E621C0cfF7540479Ee9B0A945723A642",
+      "kind": "uups"
+    }
+  ],
+  "impls": {
+    "a3c2ce38921c7d7d3aa5e2304019e8affac17f0ae9ea61f1b9b70676e5faf0fb": {
+      "address": "0x2fb86e4eCd81D599EF00D4C0cb7cF795F4D365Cc",
+      "layout": {
+        "solcVersion": "0.8.24",
+        "storage": [
+          {
+            "label": "withdrawalNonces",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:37"
+          },
+          {
+            "label": "transferNonces",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:40"
+          },
+          {
+            "label": "createLockNonces",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:43"
+          },
+          {
+            "label": "modifyLockNonces",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:46"
+          },
+          {
+            "label": "transferLockedNonces",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:49"
+          },
+          {
+            "label": "withdrawFromLockNonces",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:52"
+          },
+          {
+            "label": "__gap",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_array(t_uint256)44_storage",
+            "contract": "EIP712SignatureVerifier",
+            "src": "contracts/EIP712SignatureVerifier.sol:329"
+          },
+          {
+            "label": "evmAddress",
+            "offset": 0,
+            "slot": "50",
+            "type": "t_address",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:32"
+          },
+          {
+            "label": "secretKey",
+            "offset": 0,
+            "slot": "51",
+            "type": "t_bytes32",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:33"
+          },
+          {
+            "label": "gasTankAddress",
+            "offset": 0,
+            "slot": "52",
+            "type": "t_address",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:34"
+          },
+          {
+            "label": "gasTankSecret",
+            "offset": 0,
+            "slot": "53",
+            "type": "t_bytes32",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:35"
+          },
+          {
+            "label": "nonces",
+            "offset": 0,
+            "slot": "54",
+            "type": "t_mapping(t_uint256,t_uint64)",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:37"
+          },
+          {
+            "label": "gasPrices",
+            "offset": 0,
+            "slot": "55",
+            "type": "t_mapping(t_uint256,t_uint256)",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:38"
+          },
+          {
+            "label": "roflAppID",
+            "offset": 0,
+            "slot": "56",
+            "type": "t_bytes21",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:40"
+          },
+          {
+            "label": "roflSignerAddress",
+            "offset": 0,
+            "slot": "57",
+            "type": "t_address",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:44"
+          },
+          {
+            "label": "__gap",
+            "offset": 0,
+            "slot": "58",
+            "type": "t_array(t_uint256)42_storage",
+            "contract": "EVMSignerAndVerifier",
+            "src": "contracts/EVMSignerAndVerifier.sol:568"
+          },
+          {
+            "label": "balances",
+            "offset": 0,
+            "slot": "100",
+            "type": "t_mapping(t_address,t_mapping(t_bytes32,t_uint256))",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:34"
+          },
+          {
+            "label": "tokens",
+            "offset": 0,
+            "slot": "101",
+            "type": "t_mapping(t_bytes32,t_struct(TokenInfo)14997_storage)",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:36"
+          },
+          {
+            "label": "processedDeposits",
+            "offset": 0,
+            "slot": "102",
+            "type": "t_mapping(t_bytes32,t_bool)",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:37"
+          },
+          {
+            "label": "userInfo",
+            "offset": 0,
+            "slot": "103",
+            "type": "t_mapping(t_address,t_struct(UserInfo)15002_storage)",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:38"
+          },
+          {
+            "label": "withdrawals",
+            "offset": 0,
+            "slot": "104",
+            "type": "t_array(t_struct(WithdrawalRequest)11514_storage)dyn_storage",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:40"
+          },
+          {
+            "label": "nextLockId",
+            "offset": 0,
+            "slot": "105",
+            "type": "t_uint256",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:42"
+          },
+          {
+            "label": "registeredTokenIds",
+            "offset": 0,
+            "slot": "106",
+            "type": "t_array(t_bytes32)dyn_storage",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:45"
+          },
+          {
+            "label": "emergencyWithdrawRequests",
+            "offset": 0,
+            "slot": "107",
+            "type": "t_mapping(t_bytes32,t_struct(EmergencyWithdrawRequest)11422_storage)",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:50"
+          },
+          {
+            "label": "history",
+            "offset": 0,
+            "slot": "108",
+            "type": "t_mapping(t_address,t_array(t_struct(HistoryEntry)15021_storage)dyn_storage)",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:51"
+          },
+          {
+            "label": "__gap",
+            "offset": 0,
+            "slot": "109",
+            "type": "t_array(t_uint256)40_storage",
+            "contract": "Accounting",
+            "src": "contracts/Accounting.sol:1167"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_string_storage": {
+            "label": "string",
+            "numberOfBytes": "32"
+          },
+          "t_struct(EIP712Storage)1204_storage": {
+            "label": "struct EIP712Upgradeable.EIP712Storage",
+            "members": [
+              {
+                "label": "_hashedName",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_hashedVersion",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "_name",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "_version",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "3"
+              }
+            ],
+            "numberOfBytes": "128"
+          },
+          "t_struct(InitializableStorage)1040_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)980_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_array(t_bytes32)dyn_storage": {
+            "label": "bytes32[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_struct(FundLock)15013_storage)dyn_storage": {
+            "label": "struct FundLock[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_struct(HistoryEntry)15021_storage)dyn_storage": {
+            "label": "struct HistoryEntry[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_struct(WithdrawalRequest)11514_storage)dyn_storage": {
+            "label": "struct Accounting.WithdrawalRequest[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_uint256)40_storage": {
+            "label": "uint256[40]",
+            "numberOfBytes": "1280"
+          },
+          "t_array(t_uint256)42_storage": {
+            "label": "uint256[42]",
+            "numberOfBytes": "1344"
+          },
+          "t_array(t_uint256)44_storage": {
+            "label": "uint256[44]",
+            "numberOfBytes": "1408"
+          },
+          "t_bytes21": {
+            "label": "bytes21",
+            "numberOfBytes": "21"
+          },
+          "t_bytes_storage": {
+            "label": "bytes",
+            "numberOfBytes": "32"
+          },
+          "t_enum(HistoryKind)14991": {
+            "label": "enum HistoryKind",
+            "members": [
+              "Deposit",
+              "Withdraw",
+              "CreateLock",
+              "TransferFromLockOut",
+              "TransferFromLockIn",
+              "TransferBalanceOut",
+              "TransferBalanceIn",
+              "ModifyLock",
+              "UnlockLock"
+            ],
+            "numberOfBytes": "1"
+          },
+          "t_enum(TokenType)14974": {
+            "label": "enum TokenType",
+            "members": [
+              "NativeEVM",
+              "ERC20"
+            ],
+            "numberOfBytes": "1"
+          },
+          "t_mapping(t_address,t_array(t_struct(HistoryEntry)15021_storage)dyn_storage)": {
+            "label": "mapping(address => struct HistoryEntry[])",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_mapping(t_bytes32,t_uint256))": {
+            "label": "mapping(address => mapping(bytes32 => uint256))",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_struct(UserInfo)15002_storage)": {
+            "label": "mapping(address => struct UserInfo)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_uint256)": {
+            "label": "mapping(address => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_bool)": {
+            "label": "mapping(bytes32 => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(EmergencyWithdrawRequest)11422_storage)": {
+            "label": "mapping(bytes32 => struct Accounting.EmergencyWithdrawRequest)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(TokenInfo)14997_storage)": {
+            "label": "mapping(bytes32 => struct TokenInfo)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_uint256)": {
+            "label": "mapping(bytes32 => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_uint256)": {
+            "label": "mapping(uint256 => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_uint64)": {
+            "label": "mapping(uint256 => uint64)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(EmergencyWithdrawRequest)11422_storage": {
+            "label": "struct Accounting.EmergencyWithdrawRequest",
+            "members": [
+              {
+                "label": "toAddress",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "blockNumber",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(FundLock)15013_storage": {
+            "label": "struct FundLock",
+            "members": [
+              {
+                "label": "lockId",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "serviceId",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "tokenId",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "expiry",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "4"
+              }
+            ],
+            "numberOfBytes": "160"
+          },
+          "t_struct(HistoryEntry)15021_storage": {
+            "label": "struct HistoryEntry",
+            "members": [
+              {
+                "label": "kind",
+                "type": "t_enum(HistoryKind)14991",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "timestamp",
+                "type": "t_uint64",
+                "offset": 1,
+                "slot": "0"
+              },
+              {
+                "label": "payload",
+                "type": "t_bytes_storage",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(TokenInfo)14997_storage": {
+            "label": "struct TokenInfo",
+            "members": [
+              {
+                "label": "tokenType",
+                "type": "t_enum(TokenType)14974",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "data",
+                "type": "t_bytes_storage",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(UserInfo)15002_storage": {
+            "label": "struct UserInfo",
+            "members": [
+              {
+                "label": "activeLocks",
+                "type": "t_array(t_struct(FundLock)15013_storage)dyn_storage",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(WithdrawalRequest)11514_storage": {
+            "label": "struct Accounting.WithdrawalRequest",
+            "members": [
+              {
+                "label": "userAddress",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "toAddress",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "blockNumber",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "tokenId",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "resolved",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "txIdentifier",
+                "type": "t_bytes_storage",
+                "offset": 0,
+                "slot": "6"
+              }
+            ],
+            "numberOfBytes": "224"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.EIP712": [
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_hashedName",
+              "type": "t_bytes32",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:38",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_hashedVersion",
+              "type": "t_bytes32",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:40",
+              "offset": 0,
+              "slot": "1"
+            },
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_name",
+              "type": "t_string_storage",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:42",
+              "offset": 0,
+              "slot": "2"
+            },
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_version",
+              "type": "t_string_storage",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:43",
+              "offset": 0,
+              "slot": "3"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
