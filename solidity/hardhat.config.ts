@@ -23,9 +23,9 @@ const TEST_HDWALLET = {
   passphrase: '',
 } as const satisfies HDAccountsUserConfig;
 
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const SECRET_KEY = process.env.SECRET_KEY;
 
-const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : TEST_HDWALLET;
+const accounts = SECRET_KEY ? [SECRET_KEY] : TEST_HDWALLET;
 
 const config: HardhatUserConfig = {
   networks: {
