@@ -38,11 +38,11 @@ The Accounting module consists of these main components:
          ▼             │             │  onlyROFL    │            │
 ┌─────────────────┐    │             ▼              │            │
 │   ROFL TEE      │◀──▶│  ┌──────────────────────┐  │            │
-│ (Python svc)   │    │  │ creditDeposit        │  │            │
+│ (Python svc)    │    │  │ creditDeposit        │  │            │
 ├─────────────────┤    │  │ resolveWithdrawal    │  │            │
-│ • Verify deps. │    │  │ setRoflSignerAddress │  │            │
-│ • Sweep engine │    │  └──────────────────────┘  │            │
-│ • Withdraw poll│    └────────────────────────────┘            │
+│ • Verify deps.  │    │  │ setRoflSignerAddress │  │            │
+│ • Sweep engine  │    │  └──────────────────────┘  │            │
+│ • Withdraw poll │    └────────────────────────────┘            │
 └────────┬────────┘                                              │
          │                                                       │
          └───────── RPC reads / broadcasts ──────────────────────┘
@@ -124,32 +124,38 @@ Generate test coverage reports:
 bun run coverage
 ```
 
-## Deployment
+## Deployment and Upgrades
+
+If the contract will be owned by an EOA, define `SECRET_KEY` env variable.
+
+```shell
+export SECRET_KEY=0x...
+```
+
+If the contract will be owned by a multisig Safe contract, use `--output-safe`
+parameter to generate the Safe Transaction Builder JSON file, sign and  submit.
+In this case `SECRET_KEY` is only mandatory for contract upgrades to deploy 
+proposed upgrade implementation.
+
+### Deploy
 
 The `deploy` task provisions both the SIWE auth helper and the Accounting proxy/implementation in one step.
 
-### Deploy to Sapphire Localnet
-
 ```shell
+# Sapphire Localnet
 npx hardhat deploy --network sapphire-localnet --roflappid <rofl1…>
-```
 
-### Deploy to Sapphire Testnet
-
-```shell
+# Sapphire Testnet
 npx hardhat deploy --network sapphire-testnet --roflappid <rofl1…>
 ```
 
 Outputs: SIWE-auth address, proxy address, implementation address, EVM signing address, owner.
 
-### Standalone subtasks
+#### Standalone subtasks
 
 ```shell
 # Deploy AccountingSiweAuth alone (e.g., to roll the auth contract):
 npx hardhat deploy-siwe-auth --network sapphire-testnet --roflappid <rofl1…>
-
-# Force-import an existing proxy into hardhat-upgrades' deployment registry:
-npx hardhat force-import --network sapphire-testnet --proxy <proxy-address>
 ```
 
 ### Upgrade
@@ -165,34 +171,29 @@ bun run build
 
 #### 2. Run the upgrade task
 
-For staging (Sapphire Testnet):
+##### With EOA
+
 ```shell
-npx hardhat upgrade --network sapphire-testnet --proxy 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642
+# Sapphire Testnet
+npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642
+
+# Sapphire Mainnet
+npx hardhat upgrade --network sapphire --address <accounting-proxy-address>
 ```
 
-For production (Sapphire Mainnet):
-```shell
-npx hardhat upgrade --network sapphire --proxy <accounting-proxy-address>
-```
+##### With Safe multisig
 
-If the task cannot resolve `siweAuth()` from the existing proxy, pass it explicitly:
 ```shell
-npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --siweauth <siwe-auth-address>
+# Sapphire Testnet
+npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642 --output-safe accounting-upgrade-safe.json
+
+# Sapphire Mainnet
+npx hardhat upgrade --network sapphire --address <accounting-proxy-address> --output-safe accounting-upgrade-safe.json
 ```
 
 #### 3. Update the README
 
 After a successful upgrade, refresh the implementation address in the [Contract Addresses](#contract-addresses) section below.
-
-#### Troubleshooting
-
-If the proxy was deployed outside of hardhat-upgrades (or on a fresh machine), you may need to import it first:
-
-```shell
-npx hardhat force-import --network sapphire-testnet --proxy <accounting-proxy-address>
-```
-
-The upgrade task uses `redeployImplementation: 'always'` to ensure a fresh implementation is deployed. If you see the same implementation address after an upgrade, verify the contract was actually recompiled with your changes.
 
 ## Configuration
 
