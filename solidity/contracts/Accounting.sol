@@ -98,6 +98,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     error Unauthorized();
     error DepositAlreadyProcessed();
     error InvalidSiweAuth();
+    error UpgradeCallDataNotAllowed();
 
     struct WithdrawalRequest {
         address userAddress;
@@ -145,6 +146,19 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
      * @param newImplementation Address of the new implementation contract
      */
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /**
+     * @dev Overridden to prevent the simulation attack by contract owner.
+     * @param newImplementation Address of the new implementation contract
+     * @param data Must be empty so no upgrade migration hook can extract sensitive data in simulated call; passing call data reverts.
+     */
+    function upgradeToAndCall(
+        address newImplementation,
+        bytes memory data
+    ) public payable override onlyProxy {
+        if (data.length != 0) revert UpgradeCallDataNotAllowed();
+        super.upgradeToAndCall(newImplementation, data);
+    }
 
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
