@@ -16,92 +16,6 @@ wheels = [
 ]
 
 [[package]]
-name = "accounting-module"
-version = "1.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "cachetools" },
-    { name = "cbor2" },
-    { name = "cryptography" },
-    { name = "diskcache" },
-    { name = "eth-account" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "oasis-rofl-client" },
-    { name = "oasis-sapphire-py" },
-    { name = "pydantic" },
-    { name = "pyjwt" },
-    { name = "python-dotenv" },
-    { name = "rlp" },
-    { name = "siwe" },
-    { name = "trie" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "web3" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-test = [
-    { name = "eth-utils" },
-    { name = "py-trie" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-    { name = "types-cachetools" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cachetools", specifier = ">=7.1.4" },
-    { name = "cbor2", specifier = ">=5.0.0" },
-    { name = "cryptography", specifier = ">=41.0.0" },
-    { name = "diskcache", specifier = ">=5.6.3" },
-    { name = "eth-account", specifier = ">=0.13.0" },
-    { name = "eth-utils", marker = "extra == 'test'", specifier = ">=5.0.0" },
-    { name = "fastapi", specifier = ">=0.104.0" },
-    { name = "httpx", specifier = ">=0.25.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.2" },
-    { name = "oasis-rofl-client", specifier = ">=0.2.0" },
-    { name = "oasis-sapphire-py", specifier = ">=0.4.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.0" },
-    { name = "py-trie", marker = "extra == 'test'", specifier = ">=1.0.0" },
-    { name = "pydantic", specifier = ">=2.13.4" },
-    { name = "pyjwt", specifier = ">=2.8.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "rlp", specifier = ">=4.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.17" },
-    { name = "siwe", specifier = ">=4.3.0" },
-    { name = "trie", specifier = ">=3.0.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.49.0" },
-    { name = "web3", specifier = ">=7.16.0" },
-]
-provides-extras = ["dev", "test"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.20.2" },
-    { name = "pre-commit", specifier = ">=4.6.0" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "pytest-asyncio", specifier = ">=1.4.0" },
-    { name = "ruff", specifier = ">=0.15.17" },
-    { name = "types-cachetools", specifier = ">=5.0.0" },
-]
-
-[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1561,6 +1475,92 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8e/22/2de9408ac81acbb8a7d05d4cc064a152ccf33b3d480ebe0cd292153db239/pre_commit-4.6.0.tar.gz", hash = "sha256:718d2208cef53fdc38206e40524a6d4d9576d103eb16f0fec11c875e7716e9d9", size = 198525, upload-time = "2026-04-21T20:31:41.613Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/6e/4b28b62ecb6aae56769c34a8ff1d661473ec1e9519e2d5f8b2c150086b26/pre_commit-4.6.0-py2.py3-none-any.whl", hash = "sha256:e2cf246f7299edcabcf15f9b0571fdce06058527f0a06535068a86d38089f29b", size = 226472, upload-time = "2026-04-21T20:31:40.092Z" },
+]
+
+[[package]]
+name = "privana"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cachetools" },
+    { name = "cbor2" },
+    { name = "cryptography" },
+    { name = "diskcache" },
+    { name = "eth-account" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "oasis-rofl-client" },
+    { name = "oasis-sapphire-py" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "rlp" },
+    { name = "siwe" },
+    { name = "trie" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "web3" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+test = [
+    { name = "eth-utils" },
+    { name = "py-trie" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+    { name = "types-cachetools" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cachetools", specifier = ">=7.1.4" },
+    { name = "cbor2", specifier = ">=5.0.0" },
+    { name = "cryptography", specifier = ">=41.0.0" },
+    { name = "diskcache", specifier = ">=5.6.3" },
+    { name = "eth-account", specifier = ">=0.13.0" },
+    { name = "eth-utils", marker = "extra == 'test'", specifier = ">=5.0.0" },
+    { name = "fastapi", specifier = ">=0.104.0" },
+    { name = "httpx", specifier = ">=0.25.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.2" },
+    { name = "oasis-rofl-client", specifier = ">=0.2.0" },
+    { name = "oasis-sapphire-py", specifier = ">=0.4.0" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.0" },
+    { name = "py-trie", marker = "extra == 'test'", specifier = ">=1.0.0" },
+    { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "pyjwt", specifier = ">=2.8.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "rlp", specifier = ">=4.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.17" },
+    { name = "siwe", specifier = ">=4.3.0" },
+    { name = "trie", specifier = ">=3.0.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.49.0" },
+    { name = "web3", specifier = ">=7.16.0" },
+]
+provides-extras = ["dev", "test"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.20.2" },
+    { name = "pre-commit", specifier = ">=4.6.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "ruff", specifier = ">=0.15.17" },
+    { name = "types-cachetools", specifier = ">=5.0.0" },
 ]
 
 [[package]]
