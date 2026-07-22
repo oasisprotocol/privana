@@ -159,8 +159,8 @@ The fiat on-ramp reuses the deposit path: MoonPay delivers tokens straight to th
 
 ```
 1. POST /onramp/intent             → mint a signed Privana externalTransactionId
-                                     carrying user, deposit, token, chain, and
-                                     currency metadata
+                                     carrying provider, user, deposit, token,
+                                     chain, and canonical asset metadata
 2. POST /onramp/sign-url           → validate + sign the MoonPay widget URL
 3. user completes the purchase in the MoonPay widget
 4. POST /onramp/webhook            → MoonPay reports status + on-chain tx hash;
@@ -183,11 +183,13 @@ The fiat on-ramp reuses the deposit path: MoonPay delivers tokens straight to th
 
 Behavior notes:
 
-- **Signed intents are the authority.** The MoonPay `externalTransactionId` is a signed Privana token. The backend rejects tampered, expired, wrong-user, or wrong-deposit IDs.
+- **Signed intents are the authority for correlation.** The provider correlation field carries a signed Privana intent. The backend rejects tampered, wrong-provider, wrong-user, or wrong-deposit intents. Expiry blocks new widget URL signing; authenticated pending/compat recovery may decode expired intents because they still cannot authorize credit.
+- **There is one provider-neutral wire format.** The initial v1 format signs an explicit provider and canonical provider asset. The current MoonPay adapter mints this format and rejects intents assigned to another provider; future provider adapters use the same codec.
+- **There is one signing-key ring per environment.** A distinct high-entropy `ONRAMP_INTENT_SIGNING_KEY` is required to mint. Verification accepts the current key plus comma-separated `ONRAMP_INTENT_PREVIOUS_SIGNING_KEYS`; previous-only configuration supports recovery but cannot mint. Keys must contain at least 32 ASCII characters and no whitespace or commas. Retain previous keys for 365 days after their last mint—the 24-hour intent TTL does not bound authenticated recovery.
 - **MoonPay is the on-ramp transaction source.** `/onramp/pending` does not depend on local on-ramp storage. It fetches MoonPay transactions by `externalCustomerId` and filters locally using the signed intent and delivery wallet. If the widget session was stale, the client can pass the signed `externalTransactionId` minted by `/onramp/intent`; the backend then uses MoonPay's exact external-id lookup and still returns only transactions whose signed intent matches the caller and deposit address.
-- **Amounts come from MoonPay reads.** The signed intent carries only Privana correlation metadata (`user`, deposit wallet, `token_id`, `chain_id`, MoonPay currency, nonce, and expiry). Base and quote currency amounts are returned only after MoonPay lookup.
+- **Amounts come from provider reads.** The signed intent carries only Privana correlation metadata (provider, user, deposit wallet, `token_id`, `chain_id`, canonical provider asset, nonce, and expiry). Base and quote currency amounts are returned only after the provider lookup.
 - **The deposit path is still authoritative for credit.** `/deposits/check` and `/deposits/status/{deposit_id}` remain the only balance-credit path and retain their existing idempotency.
-- **Fail-closed configuration.** `POST /onramp/intent`, `POST /onramp/sign-url`, `GET /onramp/pending`, `POST /onramp/{transaction_id}`, and `POST /onramp/webhook` return `503` until the required `MOONPAY_*` keys are configured.
+- **Fail-closed configuration.** Minting returns `503` without a valid current `ONRAMP_INTENT_SIGNING_KEY`; verification returns `503` only when the key ring is empty or invalid. MoonPay operations independently require their relevant `MOONPAY_*` keys.
 
 ## Withdrawal Flow
 

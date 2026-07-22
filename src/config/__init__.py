@@ -71,6 +71,14 @@ def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
     return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
 
 
+def _parse_secret_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
+    """Split a secret key ring without changing key material."""
+
+    if not value:
+        return ()
+    return tuple(piece for piece in value.split(",") if piece)
+
+
 def _get_bool(name: str) -> bool:
     value = os.getenv(name)
     normalized = value.strip().lower()
@@ -209,7 +217,10 @@ def load_settings(refresh: bool = False) -> Settings:
             trust_x_forwarded_for=_get_bool("TRUST_X_FORWARDED_FOR"),
             moonpay_api_key=os.getenv("MOONPAY_API_KEY"),
             moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY"),
-            moonpay_intent_signing_key=os.getenv("MOONPAY_INTENT_SIGNING_KEY"),
+            onramp_intent_signing_key=os.getenv("ONRAMP_INTENT_SIGNING_KEY"),
+            onramp_intent_previous_signing_keys=_parse_secret_csv_tuple(
+                os.getenv("ONRAMP_INTENT_PREVIOUS_SIGNING_KEYS")
+            ),
             moonpay_api_base_url=os.getenv("MOONPAY_API_BASE_URL", "https://api.moonpay.com"),
             moonpay_webhook_secret_key=os.getenv("MOONPAY_WEBHOOK_SECRET_KEY"),
             moonpay_allowed_hosts=(_parse_csv_tuple(os.getenv("MOONPAY_ALLOWED_HOSTS"))),

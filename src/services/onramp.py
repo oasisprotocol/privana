@@ -7,8 +7,6 @@ import hashlib
 import hmac
 import json
 import logging
-import secrets
-import struct
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -18,25 +16,18 @@ import httpx
 from web3 import Web3
 
 from src.config import load_settings
+from src.services.onramp_intent import (
+    PROVIDER_MOONPAY,
+    OnRampError,
+    OnRampNotConfiguredError,
+    create_intent,
+    decode_intent,
+)
 
-_ONRAMP_INTENT_PREFIX = "privana_"
-_ONRAMP_INTENT_VERSION = 1
-_ONRAMP_INTENT_TTL_SECONDS = 24 * 60 * 60
-_ONRAMP_INTENT_MAX_LENGTH = 255
-_ONRAMP_INTENT_MAX_CURRENCY_CODE_BYTES = 32
-_ONRAMP_INTENT_STRUCT = struct.Struct(">BIII20s20s32s8sB")
 _MOONPAY_TRANSACTION_PAGE_LIMIT = 50
 _MOONPAY_TRANSACTION_MAX_PAGES = 10
 
 logger = logging.getLogger(__name__)
-
-
-class OnRampError(ValueError):
-    """Raised when an on-ramp request is invalid."""
-
-
-class OnRampNotConfiguredError(OnRampError):
-    """Raised when MoonPay config is missing."""
 
 
 class MoonPayAPIError(OnRampError):
@@ -53,22 +44,14 @@ def create_onramp_intent(
 ) -> dict[str, Any]:
     """Create a signed, self-contained externalTransactionId record."""
 
-    now = int(time.time())
-    payload: dict[str, Any] = {
-        "v": _ONRAMP_INTENT_VERSION,
-        "u": _address_payload(user_address),
-        "w": _address_payload(wallet_address),
-        "t": _hex_payload(token_id, byte_length=32, field_name="token_id"),
-        "c": chain_id,
-        "m": _currency_code_or_error(moonpay_currency_code, "moonpay_currency_code"),
-        "iat": now,
-        "exp": now + _ONRAMP_INTENT_TTL_SECONDS,
-        "n": secrets.token_hex(8),
-    }
-
-    transaction_id = _encode_intent_payload(payload)
-    if len(transaction_id) > _ONRAMP_INTENT_MAX_LENGTH:
-        raise OnRampError("MoonPay externalTransactionId is too large")
+    transaction_id, payload = create_intent(
+        provider=PROVIDER_MOONPAY,
+        user_address=user_address,
+        wallet_address=wallet_address,
+        token_id=token_id,
+        chain_id=chain_id,
+        asset_code=moonpay_currency_code,
+    )
     return onramp_record_from_intent(transaction_id, payload)
 
 
@@ -79,29 +62,9 @@ def decode_onramp_intent(
 ) -> dict[str, Any]:
     """Verify and decode a signed Privana on-ramp externalTransactionId."""
 
-    if not transaction_id.startswith(_ONRAMP_INTENT_PREFIX):
-        raise OnRampError("MoonPay externalTransactionId is not a Privana intent")
-    token = transaction_id.removeprefix(_ONRAMP_INTENT_PREFIX)
-    payload_b64, separator, signature_b64 = token.partition(".")
-    if not separator or not payload_b64 or not signature_b64:
-        raise OnRampError("MoonPay externalTransactionId is malformed")
-
-    expected = _intent_signature(payload_b64)
-    try:
-        provided = _b64url_decode(signature_b64)
-    except ValueError as exc:
-        raise OnRampError("MoonPay externalTransactionId signature is malformed") from exc
-    if not hmac.compare_digest(expected, provided):
-        raise OnRampError("MoonPay externalTransactionId signature mismatch")
-
-    try:
-        payload = _decode_intent_payload(_b64url_decode(payload_b64))
-    except ValueError:
-        raise OnRampError("MoonPay externalTransactionId payload is malformed")
-
-    _validate_intent_payload(payload)
-    if not allow_expired and int(payload["exp"]) < int(time.time()):
-        raise OnRampError("MoonPay externalTransactionId has expired")
+    payload = decode_intent(transaction_id, allow_expired=allow_expired)
+    if payload["p"] != PROVIDER_MOONPAY:
+        raise OnRampError("Signed on-ramp intent is not a MoonPay intent")
     return payload
 
 
@@ -116,7 +79,7 @@ def onramp_record_from_intent(transaction_id: str, payload: dict[str, Any]) -> d
         "wallet_address": Web3.to_checksum_address("0x" + str(payload["w"])),
         "token_id": "0x" + str(payload["t"]).lower(),
         "chain_id": int(payload["c"]),
-        "moonpay_currency_code": str(payload["m"]).lower(),
+        "moonpay_currency_code": str(payload["a"]).lower(),
         "created_at": created_at,
         "updated_at": created_at,
     }
@@ -365,7 +328,7 @@ def moonpay_transaction_to_onramp_record(
         return None, "missing_on_chain_tx_hash"
 
     currency_code = _currency_code(data.get("currency")) or _currency_code(data.get("crypto"))
-    if currency_code and currency_code != str(intent["m"]).lower():
+    if currency_code and currency_code != str(intent["a"]).lower():
         return None, "currency_mismatch"
 
     created_at = _timestamp(data.get("createdAt"), fallback=int(intent["iat"]))
@@ -473,96 +436,6 @@ def parse_webhook_body(raw_body: bytes) -> dict[str, Any]:
     return payload
 
 
-def _encode_intent_payload(payload: dict[str, Any]) -> str:
-    payload_b64 = _b64url_encode(_pack_intent_payload(payload))
-    signature_b64 = _b64url_encode(_intent_signature(payload_b64))
-    return f"{_ONRAMP_INTENT_PREFIX}{payload_b64}.{signature_b64}"
-
-
-def _pack_intent_payload(payload: dict[str, Any]) -> bytes:
-    currency = _currency_code_or_error(
-        str(payload["m"]),
-        "moonpay_currency_code",
-    ).encode("ascii")
-    if len(currency) > _ONRAMP_INTENT_MAX_CURRENCY_CODE_BYTES:
-        raise OnRampError("MoonPay currency code is too large")
-    chain_id = int(payload["c"])
-    if chain_id < 0 or chain_id > 0xFFFFFFFF:
-        raise OnRampError("Invalid chain_id")
-    return (
-        _ONRAMP_INTENT_STRUCT.pack(
-            int(payload["v"]),
-            int(payload["iat"]),
-            int(payload["exp"]),
-            chain_id,
-            bytes.fromhex(str(payload["u"])),
-            bytes.fromhex(str(payload["w"])),
-            bytes.fromhex(str(payload["t"])),
-            bytes.fromhex(str(payload["n"])),
-            len(currency),
-        )
-        + currency
-    )
-
-
-def _decode_intent_payload(payload: bytes) -> dict[str, Any]:
-    if len(payload) < _ONRAMP_INTENT_STRUCT.size:
-        raise ValueError("intent payload too short")
-    (
-        version,
-        issued_at,
-        expires_at,
-        chain_id,
-        user,
-        wallet,
-        token_id,
-        nonce,
-        currency_length,
-    ) = _ONRAMP_INTENT_STRUCT.unpack_from(payload)
-    expected_length = _ONRAMP_INTENT_STRUCT.size + currency_length
-    if len(payload) != expected_length:
-        raise ValueError("intent payload length mismatch")
-    currency = payload[_ONRAMP_INTENT_STRUCT.size : expected_length].decode("ascii")
-    return {
-        "v": version,
-        "u": user.hex(),
-        "w": wallet.hex(),
-        "t": token_id.hex(),
-        "c": chain_id,
-        "m": currency,
-        "iat": issued_at,
-        "exp": expires_at,
-        "n": nonce.hex(),
-    }
-
-
-def _intent_signature(payload_b64: str) -> bytes:
-    settings = load_settings()
-    if not settings.moonpay_intent_signing_key:
-        raise OnRampNotConfiguredError("MoonPay on-ramp intents are not configured")
-    return hmac.new(
-        settings.moonpay_intent_signing_key.encode("utf-8"),
-        f"privana:onramp:intent:v{_ONRAMP_INTENT_VERSION}:{payload_b64}".encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-
-
-def _validate_intent_payload(payload: dict[str, Any]) -> None:
-    if payload.get("v") != _ONRAMP_INTENT_VERSION:
-        raise OnRampError("MoonPay externalTransactionId version is unsupported")
-    for field in ("u", "w", "t", "c", "m", "iat", "exp", "n"):
-        if payload.get(field) is None:
-            raise OnRampError("MoonPay externalTransactionId payload is incomplete")
-    Web3.to_checksum_address("0x" + str(payload["u"]))
-    Web3.to_checksum_address("0x" + str(payload["w"]))
-    _hex_payload(str(payload["t"]), byte_length=32, field_name="token_id")
-    int(payload["c"])
-    int(payload["iat"])
-    int(payload["exp"])
-    _hex_payload(str(payload["n"]), byte_length=8, field_name="nonce")
-    _currency_code_or_error(str(payload["m"]), "moonpay_currency_code")
-
-
 def _moonpay_response_items(response: httpx.Response) -> list[dict[str, Any]]:
     if response.status_code == 401:
         raise MoonPayAPIError("MoonPay transaction lookup is unauthorized")
@@ -598,12 +471,6 @@ def _address_or_none(value: Any) -> str | None:
     return Web3.to_checksum_address(value) if Web3.is_address(value) else None
 
 
-def _address_payload(value: str) -> str:
-    if not Web3.is_address(value):
-        raise OnRampError("Invalid wallet address")
-    return Web3.to_checksum_address(value).removeprefix("0x").lower()
-
-
 def _hex_or_none(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -611,17 +478,6 @@ def _hex_or_none(value: Any) -> str | None:
     if not value.startswith("0x"):
         value = "0x" + value
     return value
-
-
-def _hex_payload(value: str, *, byte_length: int, field_name: str) -> str:
-    stripped = value.lower().removeprefix("0x")
-    if len(stripped) != byte_length * 2:
-        raise OnRampError(f"Invalid {field_name}")
-    try:
-        bytes.fromhex(stripped)
-    except ValueError as exc:
-        raise OnRampError(f"Invalid {field_name}") from exc
-    return stripped
 
 
 def _string_or_none(value: Any) -> str | None:
@@ -634,15 +490,6 @@ def _currency_code(value: Any) -> str | None:
     if isinstance(value, str):
         return value.lower()
     return None
-
-
-def _currency_code_or_error(value: str | None, field_name: str) -> str:
-    if not value or not isinstance(value, str):
-        raise OnRampError(f"Invalid {field_name}")
-    code = value.strip().lower()
-    if not code or any(ch.isspace() for ch in code):
-        raise OnRampError(f"Invalid {field_name}")
-    return code
 
 
 def _normalize_status(value: Any) -> str:
@@ -699,18 +546,6 @@ def _timestamp(value: Any, *, fallback: int) -> int:
         except ValueError:
             return fallback
     return fallback
-
-
-def _b64url_encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    try:
-        return base64.urlsafe_b64decode(value + padding)
-    except Exception as exc:
-        raise ValueError("invalid base64url") from exc
 
 
 def short_address(value: Any) -> str | None:

@@ -540,14 +540,14 @@ async def sign_onramp_url(
             expected_wallet_address=deposit_address,
             user_address=auth.user_address,
             expected_external_transaction_id=intent_id,
-            expected_currency_code=str(intent["m"]),
+            expected_currency_code=str(intent["a"]),
         )
         logger.info(
             "On-ramp URL signed: intent=%s user=%s deposit=%s currency=%s",
             short_identifier(intent_id),
             short_address(auth.user_address),
             short_address(deposit_address),
-            intent.get("m"),
+            intent.get("a"),
         )
         return SignOnRampUrlResponse(signature=signature)
     except ContractLogicError as exc:

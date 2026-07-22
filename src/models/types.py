@@ -42,7 +42,8 @@ class Settings:
 
     moonpay_api_key: str
     moonpay_secret_key: str
-    moonpay_intent_signing_key: str
+    onramp_intent_signing_key: str | None
+    onramp_intent_previous_signing_keys: Tuple[str, ...]
     moonpay_api_base_url: str
     moonpay_webhook_secret_key: str
     moonpay_allowed_hosts: Tuple[str, ...]
