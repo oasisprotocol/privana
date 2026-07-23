@@ -1,7 +1,7 @@
 [project]
-name = "accounting-module"
+name = "privana"
 version = "1.0.0"
-description = "Accounting service module for ROFL apps"
+description = "Privana backend service"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -40,7 +40,7 @@ test = [
 ]
 
 [project.scripts]
-accounting-module = "src.main:main"
+privana = "src.main:main"
 
 [build-system]
 requires = ["hatchling"]
