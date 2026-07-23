@@ -7,16 +7,16 @@ ARG ENV_FILE
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-COPY pyproject.toml uv.lock ./
+COPY README.md pyproject.toml uv.lock ./
 COPY ${ENV_FILE} .env
 RUN uv sync --no-dev --frozen --no-install-project
 
-COPY . .
+# Python backend.
+COPY src ./src
 
-# Verify Solidity artifacts exist (run 'make solidity-build' locally if this fails)
-RUN test -f solidity/artifacts/contracts/Accounting.sol/Accounting.json \
-    && test -f solidity/artifacts/contracts/auth/AccountingSiweAuth.sol/AccountingSiweAuth.json \
-    || (echo "ERROR: Solidity artifacts not found. Run 'make solidity-build' before building Docker image." && exit 1)
+# Contract artifacts.
+COPY solidity/artifacts/contracts/Accounting.sol/Accounting.json ./solidity/artifacts/contracts/Accounting.sol/Accounting.json
+COPY solidity/artifacts/contracts/auth/AccountingSiweAuth.sol/AccountingSiweAuth.json ./solidity/artifacts/contracts/auth/AccountingSiweAuth.sol/AccountingSiweAuth.json
 
 RUN uv sync --no-dev --frozen
 

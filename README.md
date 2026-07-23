@@ -1,6 +1,6 @@
-# ROFL Accounting Module
+# Privana
 
-A reusable library for apps running in ROFL that enables:
+A reusable framework for apps running in ROFL that enables:
 
 - Seamless crosschain deposits and withdrawals.
 - Private accounting of user funds.
@@ -15,6 +15,9 @@ A reusable library for apps running in ROFL that enables:
 | [`docs/api-reference.md`](docs/api-reference.md) | HTTP API reference: request/response shapes, auth, error codes. |
 
 ## Deployments
+
+The Privana python backend service is containerized and deployed as an
+application running in ROFL TEE.
 
 ### Staging (Sapphire Testnet)
 
