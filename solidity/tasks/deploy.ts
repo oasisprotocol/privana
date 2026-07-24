@@ -2,6 +2,7 @@ import { task } from "hardhat/config";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { parseRoflAppId } from "./utils/rofl";
+import { verifySourcifyContract, verifySourcifyProxy } from "./utils/sourcify";
 
 // Read VERSION from the local Accounting.sol.
 function getAvailableAccountingVersion(): string {
@@ -96,14 +97,19 @@ task("deploy")
     const proxyAddress = await proxy.getAddress();
     const implAddress = await hre.upgrades.erc1967.getImplementationAddress(proxyAddress);
 
-    for (const address of [implAddress, proxyAddress]) {
-      try {
-        await hre.run("verify:sourcify", { address });
-      } catch (err) {
-        console.log(
-          `Warning: Sourcify verification of ${address} failed or is unsupported on this network: ${(err as Error).message}`
-        );
-      }
+    try {
+      await verifySourcifyContract(hre, implAddress, "Accounting");
+    } catch (err) {
+      console.log(
+        `Warning: Sourcify verification of implementation ${implAddress} failed or is unsupported on this network: ${(err as Error).message}`
+      );
+    }
+    try {
+      await verifySourcifyProxy(hre, proxyAddress);
+    } catch (err) {
+      console.log(
+        `Warning: Sourcify verification of proxy ${proxyAddress} failed or is unsupported on this network: ${(err as Error).message}`
+      );
     }
 
     console.log(`AccountingSiweAuth address: ${siweAuthAddress}`);
@@ -235,7 +241,7 @@ task("upgrade")
     }
 
     try {
-      await hre.run("verify:sourcify", { address: newImplAddress });
+      await verifySourcifyContract(hre, newImplAddress, "Accounting");
     } catch (err) {
       console.log(
         `Warning: Sourcify verification failed or is unsupported on this network: ${(err as Error).message}`
