@@ -64,6 +64,9 @@ task("deploy")
     if (!siweAuthAddress) {
       siweAuthAddress = await hre.run('deploy-siwe-auth', { roflappid: args.roflappid });
     }
+    if (!hre.ethers.isAddress(siweAuthAddress)) {
+      throw new Error(`Invalid siweAuthAddress address: ${siweAuthAddress}`);
+    }
 
     // Deploy Accounting as UUPS proxy (siweAuth passed as constructor arg for immutable).
     // `ownerAddress` (e.g. a Safe) is set directly via initialize(), independent of who
@@ -86,21 +89,26 @@ task("deploy")
     const proxyAddress = await proxy.getAddress();
     const implAddress = await hre.upgrades.erc1967.getImplementationAddress(proxyAddress);
 
-    for (const address of [implAddress, proxyAddress]) {
-      try {
-        await hre.run("verify:sourcify", { address });
-      } catch (err) {
-        console.log(
-          `Warning: Sourcify verification of ${address} failed or is unsupported on this network: ${(err as Error).message}`
-        );
-      }
-    }
-
-    console.log(`AccountingSiweAuth address: ${siweAuthAddress}`);
     console.log(`Accounting contract address: ${proxyAddress}`);
     console.log(`Accounting implementation address: ${implAddress}`);
+    console.log(`AccountingSiweAuth address: ${siweAuthAddress}`);
     console.log(`EVM signing address: ${await proxy.evmAddress()}`);
     console.log(`Owner: ${await proxy.owner()}`);
+
+    try {
+      await hre.run("verify:sourcify", { address: implAddress, contract: "Accounting" });
+    } catch (err) {
+      console.log(
+        `Warning: Sourcify verification of implementation ${implAddress} failed or is unsupported on this network: ${(err as Error).message}`
+      );
+    }
+    try {
+      await hre.run("verify:sourcify", { address: proxyAddress, proxy: true });
+    } catch (err) {
+      console.log(
+        `Warning: Sourcify verification of proxy ${proxyAddress} failed or is unsupported on this network: ${(err as Error).message}`
+      );
+    }
 
     return proxyAddress;
   });
@@ -139,16 +147,16 @@ task("deploy-siwe-auth")
     await siweAuth.waitForDeployment();
     const siweAuthAddress = await siweAuth.getAddress();
 
+    console.log(`AccountingSiweAuth deployed at: ${siweAuthAddress}`);
+    console.log(`ROFL app ID: ${args.roflappid}`);
+
     try {
-      await verifySourcifyContract(hre, siweAuthAddress, "AccountingSiweAuth");
+      await hre.run("verify:sourcify", { address: siweAuthAddress, contract: "AccountingSiweAuth" });
     } catch (err) {
       console.log(
         `Warning: Sourcify verification of implementation ${siweAuthAddress} failed or is unsupported on this network: ${(err as Error).message}`
       );
     }
-
-    console.log(`AccountingSiweAuth deployed at: ${siweAuthAddress}`);
-    console.log(`ROFL app ID: ${args.roflappid}`);
 
     return siweAuthAddress;
   });
@@ -250,7 +258,7 @@ task("upgrade")
     }
 
     try {
-      await hre.run("verify:sourcify", { address: newImplAddress });
+      await hre.run("verify:sourcify", { address: newImplAddress, contract: "Accounting" });
     } catch (err) {
       if (args.outputSafe) {
         // Verification is critical for a Safe artifact: signers rely on it to confirm the
