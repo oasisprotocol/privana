@@ -205,7 +205,7 @@ def test_intent_is_signed_and_sign_url_returns_moonpay_signature(monkeypatch, tm
     intent = _create_intent(client)
     intent_id = intent["transaction_id"]
 
-    assert len(intent_id) <= 255
+    assert len(intent_id) <= onramp_intent.INTENT_MAX_LENGTH
     decoded = onramp.decode_onramp_intent(intent_id)
     assert Web3.to_checksum_address("0x" + decoded["u"]) == BENEFICIARY
     assert Web3.to_checksum_address("0x" + decoded["w"]) == DEPOSIT_ADDRESS

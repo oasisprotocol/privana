@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -17,12 +18,12 @@ SIGNING_KEY = "0123456789abcdef0123456789abcdef"
 ISSUED_AT = 1_781_000_000
 NONCE = "0102030405060708"
 
-# This freezes the initial struct order, Transak provider ID, and v1 HMAC
-# domain. Any intentional incompatible change requires a new wire version.
+# This freezes the initial canonical JSON encoding and v1 HMAC domain. Any
+# intentional incompatible change requires a new wire version.
 GOLDEN_TOKEN = (
     "privana_"
-    "AQJqJ-dAaik4wAABSjQRERERERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIiIiIiMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMBAgMEBQYHCAl1c2RjOmJhc2U"
-    ".M0UwAS-OP-DX3nemSVhjqvDxw5uJat0UdCQNPjSmYnw"
+    "eyJhIjoidXNkYzpiYXNlIiwiYyI6ODQ1MzIsImV4cCI6MTc4MTA4NjQwMCwiaWF0IjoxNzgxMDAwMDAwLCJuIjoiMDEwMjAzMDQwNTA2MDcwOCIsInAiOiJ0cmFuc2FrIiwidCI6IjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMiLCJ1IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjEsInciOiIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIn0"
+    ".jxKFoY8aXEZxIBBnII3lM-biUP-VS00Hknalnc9u4fE"
 )
 
 
@@ -55,6 +56,10 @@ def _token_payload_bytes(token: str) -> bytes:
     return base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4))
 
 
+def _token_payload(token: str) -> dict:
+    return json.loads(_token_payload_bytes(token))
+
+
 def _create_transak_intent() -> tuple[str, dict]:
     return oi.create_intent(
         provider=oi.PROVIDER_TRANSAK,
@@ -66,11 +71,8 @@ def _create_transak_intent() -> tuple[str, dict]:
     )
 
 
-def test_frozen_initial_token_decodes_with_permanent_provider_id() -> None:
-    wire_payload = _token_payload_bytes(GOLDEN_TOKEN)
-
-    assert wire_payload[:2] == bytes([oi.INTENT_VERSION, 2])
-    assert oi.decode_intent(GOLDEN_TOKEN, allow_expired=True) == {
+def test_frozen_initial_token_decodes_from_canonical_json() -> None:
+    expected = {
         "v": oi.INTENT_VERSION,
         "p": oi.PROVIDER_TRANSAK,
         "u": USER.removeprefix("0x"),
@@ -82,6 +84,9 @@ def test_frozen_initial_token_decodes_with_permanent_provider_id() -> None:
         "exp": ISSUED_AT + oi.INTENT_TTL_SECONDS,
         "n": NONCE,
     }
+
+    assert _token_payload(GOLDEN_TOKEN) == expected
+    assert oi.decode_intent(GOLDEN_TOKEN, allow_expired=True) == expected
 
 
 def test_mint_is_byte_identical_to_frozen_initial_contract(
@@ -109,8 +114,7 @@ def test_roundtrip_binds_provider_and_complete_privana_context(provider: str) ->
         asset_code="USDC:Base",
     )
 
-    expected_provider_id = {oi.PROVIDER_MOONPAY: 1, oi.PROVIDER_TRANSAK: 2}[provider]
-    assert _token_payload_bytes(token)[1] == expected_provider_id
+    assert _token_payload(token)["p"] == provider
     assert len(token) <= oi.INTENT_MAX_LENGTH
     assert oi.decode_intent(token) == payload
     assert payload == {
@@ -271,31 +275,56 @@ def test_expiry_boundary_and_explicit_recovery_bypass(
     assert oi.decode_intent(token, allow_expired=True)["p"] == oi.PROVIDER_TRANSAK
 
 
-@pytest.mark.parametrize(
-    "payload_mutation",
-    [
-        lambda payload: bytes([9]) + payload[1:],
-        lambda payload: payload[:1] + bytes([99]) + payload[2:],
-        lambda payload: payload[:-1],
-        lambda payload: payload + b"x",
-        lambda payload: payload[:-1] + b"\xff",
-        lambda payload: payload[:-9] + payload[-9:].upper(),
-    ],
-)
-def test_validly_signed_invalid_payloads_are_rejected(payload_mutation) -> None:
-    original = _token_payload_bytes(GOLDEN_TOKEN)
-    signed = _signed_raw(payload_mutation(original))
+@pytest.mark.parametrize("raw_payload", [b"not-json", b"[]", b'{"v":1}'])
+def test_validly_signed_malformed_payloads_are_rejected(raw_payload: bytes) -> None:
+    signed = _signed_raw(raw_payload)
 
     with pytest.raises(oi.OnRampError):
         oi.decode_intent(signed, allow_expired=True)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("v", 2, "version"),
+        ("p", "unknown", "provider"),
+        ("u", "11" * 19, "user"),
+        ("t", "33" * 31, "token_id"),
+        ("c", True, "chain_id"),
+        ("c", 84_532.0, "chain_id"),
+        ("iat", str(ISSUED_AT), "issued_at"),
+        ("a", "USDC:Base", "asset code"),
+    ],
+)
+def test_validly_signed_invalid_json_fields_are_rejected(
+    field: str, value: object, error: str
+) -> None:
+    payload = _token_payload(GOLDEN_TOKEN)
+    payload[field] = value
+    signed = _signed_raw(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("ascii"))
+
+    with pytest.raises(oi.OnRampError, match=error):
+        oi.decode_intent(signed, allow_expired=True)
+
+
+def test_validly_signed_noncanonical_or_ambiguous_json_is_rejected() -> None:
+    canonical = _token_payload_bytes(GOLDEN_TOKEN)
+    duplicate_key = canonical.replace(b'{"a"', b'{"v":1,"a"', 1)
+    extra_payload = _token_payload(GOLDEN_TOKEN) | {"x": 1}
+    extra_field = json.dumps(extra_payload, separators=(",", ":"), sort_keys=True).encode("ascii")
+
+    for raw_payload in (b" " + canonical, duplicate_key, extra_field):
+        with pytest.raises(oi.OnRampError, match="payload is malformed"):
+            oi.decode_intent(_signed_raw(raw_payload), allow_expired=True)
+
+
 def test_validly_signed_expiry_before_issue_is_rejected() -> None:
-    payload = bytearray(_token_payload_bytes(GOLDEN_TOKEN))
-    payload[6:10] = (ISSUED_AT - 1).to_bytes(4, "big")
+    payload = _token_payload(GOLDEN_TOKEN)
+    payload["exp"] = ISSUED_AT - 1
+    raw_payload = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("ascii")
 
     with pytest.raises(oi.OnRampError, match="expires before"):
-        oi.decode_intent(_signed_raw(bytes(payload)), allow_expired=True)
+        oi.decode_intent(_signed_raw(raw_payload), allow_expired=True)
 
 
 @pytest.mark.parametrize(
@@ -307,6 +336,7 @@ def test_validly_signed_expiry_before_issue_is_rejected() -> None:
         ({"token_id": "0x1234"}, "token_id"),
         ({"chain_id": -1}, "chain_id"),
         ({"chain_id": 0x1_0000_0000}, "chain_id"),
+        ({"chain_id": True}, "chain_id"),
         ({"asset_code": "usdc base"}, "asset code"),
         ({"asset_code": "usdç"}, "asset code"),
         ({"asset_code": "a" * 33}, "asset code"),
@@ -327,7 +357,9 @@ def test_creation_rejects_invalid_fields(overrides, error: str) -> None:
         oi.create_intent(**arguments)
 
 
-def test_maximum_asset_stays_within_intent_length_budget() -> None:
+def test_signed_json_length_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oi.time, "time", lambda: ISSUED_AT)
+    monkeypatch.setattr(oi.secrets, "token_hex", lambda _length: NONCE)
     token, payload = oi.create_intent(
         provider=oi.PROVIDER_TRANSAK,
         user_address=USER,
@@ -337,5 +369,13 @@ def test_maximum_asset_stays_within_intent_length_budget() -> None:
         asset_code="a" * oi.INTENT_MAX_ASSET_BYTES,
     )
 
+    assert len(token) == 442
     assert len(token) <= oi.INTENT_MAX_LENGTH
     assert oi.decode_intent(token) == payload
+
+    absolute_max = payload | {
+        "c": 0xFFFFFFFF,
+        "iat": 0xFFFFFFFF - oi.INTENT_TTL_SECONDS,
+        "exp": 0xFFFFFFFF,
+    }
+    assert len(oi._encode_intent(absolute_max)) == 448
