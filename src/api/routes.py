@@ -37,6 +37,7 @@ from src.models.accounting import (
     BatchBalancesRequest,
     BatchBalancesResponse,
     CreateOnRampIntentRequest,
+    CreateOnRampSessionRequest,
     DepositAddressRequest,
     DepositAddressResponse,
     DepositCheckRequest,
@@ -50,6 +51,7 @@ from src.models.accounting import (
     ModifyLockNonceResponse,
     ModifyLockRequest,
     OnRampRecord,
+    OnRampSessionResponse,
     PendingDeposit,
     PendingDepositsResponse,
     PendingOnRampsResponse,
@@ -108,6 +110,24 @@ from src.services.onramp import (
     verify_moonpay_webhook,
     webhook_updates,
 )
+from src.services.onramp_intent import (
+    PROVIDER_MOONPAY,
+    PROVIDER_TRANSAK,
+    configured_provider,
+    decode_intent,
+)
+from src.services.transak import (
+    TransakAPIError,
+    TransakConfig,
+    TransakRateLimitError,
+    TransakWebhookVerificationError,
+    client_ip_from_values,
+    create_transak_intent,
+    get_transak_service,
+    load_transak_config,
+    pending_records_from_transak_orders,
+    transak_webhook_log_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +141,9 @@ _ZERO_ADDRESS = Web3.to_checksum_address("0x000000000000000000000000000000000000
 # body before buffering it instead of trusting upstream proxy limits.
 _ONRAMP_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
 _ONRAMP_PENDING_MAX_INTENT_LOOKUPS = 10
+_ONRAMP_INTENT_RATE_LIMIT = 20
 _ONRAMP_PENDING_RATE_LIMIT = 20
+_ONRAMP_SESSION_RATE_LIMIT = 10
 _DEPOSITS_PENDING_RATE_LIMIT = 10
 _SUPPORTED_DEPOSIT_ADDRESS_VERSIONS = {0}
 
@@ -131,7 +153,7 @@ def _validated_onramp_pending_intents(
     *,
     user_address: str,
     deposit_address: str,
-) -> list[str]:
+) -> list[tuple[str, dict[str, object]]]:
     if not intent_ids:
         return []
     deduped = list(dict.fromkeys(intent_ids))
@@ -139,13 +161,15 @@ def _validated_onramp_pending_intents(
         raise OnRampError("Too many externalTransactionId values")
     user = Web3.to_checksum_address(user_address)
     deposit = Web3.to_checksum_address(deposit_address)
+    validated: list[tuple[str, dict[str, object]]] = []
     for intent_id in deduped:
-        intent = decode_onramp_intent(intent_id, allow_expired=True)
+        intent = decode_intent(intent_id, allow_expired=True)
         if Web3.to_checksum_address("0x" + str(intent["u"])) != user:
-            raise OnRampError("MoonPay externalTransactionId does not belong to the caller")
+            raise OnRampError("Signed on-ramp intent does not belong to the caller")
         if Web3.to_checksum_address("0x" + str(intent["w"])) != deposit:
-            raise OnRampError("MoonPay externalTransactionId does not match the deposit address")
-    return deduped
+            raise OnRampError("Signed on-ramp intent does not match the deposit address")
+        validated.append((intent_id, intent))
+    return validated
 
 
 def _mint_private_read_token(user_address: str, *, valid_until: Optional[int] = None) -> bytes:
@@ -262,6 +286,95 @@ def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
             detail="Too many authentication requests. Please retry later.",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+def _enforce_onramp_user_rate_limit(user_address: str, bucket: str, limit: int) -> None:
+    """Rate-limit authenticated on-ramp work by resolved user, not proxy/IP shape."""
+
+    settings = load_settings()
+    retry_after = get_auth_rate_limiter().hit(
+        bucket=bucket,
+        key=Web3.to_checksum_address(user_address).lower(),
+        limit=limit,
+        window_seconds=settings.auth_rate_limit_window_seconds,
+    )
+    if retry_after is not None:
+        raise auth_exception(
+            status_code=429,
+            detail="Too many on-ramp requests. Please retry later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def _registered_transak_token_id(
+    config: TransakConfig,
+    *,
+    requested_token_id: str | None = None,
+    requested_chain_id: int | None = None,
+) -> str:
+    """Resolve and require the configured ERC-20 in Privana's token registry."""
+
+    if requested_chain_id is not None and requested_chain_id != config.chain_id:
+        raise OnRampError("chain_id does not match the configured Transak asset")
+    token_id = await _service.get_token_id(config.chain_id, config.token_address)
+    token_id_hex = Web3.to_hex(token_id).lower()
+    if requested_token_id is not None and requested_token_id.lower() != token_id_hex:
+        raise OnRampError("token_id does not match the configured Transak asset")
+    if not await _service.is_token_registered(token_id):
+        raise OnRampNotConfiguredError("The configured Transak asset is not registered")
+    return token_id_hex
+
+
+def _validate_transak_intent(
+    intent: dict[str, object],
+    *,
+    user_address: str,
+    deposit_address: str,
+    token_id: str,
+    config: TransakConfig,
+) -> None:
+    if intent.get("p") != PROVIDER_TRANSAK:
+        raise OnRampError("Signed on-ramp intent is not a Transak intent")
+    if Web3.to_checksum_address("0x" + str(intent["u"])) != Web3.to_checksum_address(user_address):
+        raise OnRampError("Signed on-ramp intent does not belong to the caller")
+    if Web3.to_checksum_address("0x" + str(intent["w"])) != Web3.to_checksum_address(
+        deposit_address
+    ):
+        raise OnRampError("Signed on-ramp intent does not match the deposit address")
+    if int(intent["c"]) != config.chain_id:
+        raise OnRampError("Signed on-ramp intent does not match the configured chain")
+    if "0x" + str(intent["t"]).lower() != token_id.lower():
+        raise OnRampError("Signed on-ramp intent does not match the configured token")
+    if str(intent["a"]).lower() != config.canonical_asset_code:
+        raise OnRampError("Signed on-ramp intent does not match the configured asset")
+
+
+def _dedupe_onramp_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, object]] = []
+    for row in rows:
+        provider = str(row.get("provider") or "")
+        identifier = str(row.get("provider_transaction_id") or row.get("transaction_id") or "")
+        key = (provider, identifier)
+        if identifier and key in seen:
+            continue
+        if identifier:
+            seen.add(key)
+        deduped.append(row)
+    deduped.sort(
+        key=lambda row: (
+            int(row.get("updated_at") or 0),
+            int(row.get("created_at") or 0),
+            str(row.get("provider_transaction_id") or ""),
+        ),
+        reverse=True,
+    )
+    return deduped
+
+
+def _transak_rate_limit_exception(exc: TransakRateLimitError) -> HTTPException:
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+    return HTTPException(status_code=429, detail=str(exc), headers=headers)
 
 
 def _enforce_browser_auth_origin(request: Request) -> None:
@@ -485,8 +598,14 @@ async def create_onramp_intent(
     payload: CreateOnRampIntentRequest,
     auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> OnRampRecord:
-    """Create a signed Privana MoonPay intent before opening the widget."""
+    """Create a signed Privana intent for the deployment-selected provider."""
     try:
+        _enforce_onramp_user_rate_limit(
+            auth.user_address,
+            "onramp_intent",
+            _ONRAMP_INTENT_RATE_LIMIT,
+        )
+        provider = configured_provider()
         deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         deposit_address = Web3.to_checksum_address(deposit_address)
         if (
@@ -495,13 +614,30 @@ async def create_onramp_intent(
         ):
             raise OnRampError("wallet_address must be the Privana deposit address")
 
-        record = onramp_service.create_onramp_intent(
-            user_address=auth.user_address,
-            wallet_address=deposit_address,
-            token_id=payload.token_id,
-            chain_id=payload.chain_id,
-            moonpay_currency_code=payload.moonpay_currency_code,
-        )
+        if provider == PROVIDER_MOONPAY:
+            if not payload.moonpay_currency_code:
+                raise OnRampError("moonpay_currency_code is required for MoonPay")
+            record = onramp_service.create_onramp_intent(
+                user_address=auth.user_address,
+                wallet_address=deposit_address,
+                token_id=payload.token_id,
+                chain_id=payload.chain_id,
+                moonpay_currency_code=payload.moonpay_currency_code,
+            )
+        else:
+            config = load_transak_config()
+            await _registered_transak_token_id(
+                config,
+                requested_token_id=payload.token_id,
+                requested_chain_id=payload.chain_id,
+            )
+            record = create_transak_intent(
+                user_address=auth.user_address,
+                wallet_address=deposit_address,
+                token_id=payload.token_id,
+                chain_id=payload.chain_id,
+                config=config,
+            )
         logger.info("On-ramp intent created: %s", onramp_log_summary(record))
         return OnRampRecord(**record)
     except ContractLogicError as exc:
@@ -522,6 +658,8 @@ async def sign_onramp_url(
 ) -> SignOnRampUrlResponse:
     """Sign a validated MoonPay widget URL for the caller's Privana deposit address."""
     try:
+        if configured_provider() != PROVIDER_MOONPAY:
+            raise OnRampNotConfiguredError("MoonPay URL signing is disabled")
         deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
         deposit_address = Web3.to_checksum_address(deposit_address)
         intent_id = moonpay_url_external_transaction_id(payload.url)
@@ -543,8 +681,7 @@ async def sign_onramp_url(
             expected_currency_code=str(intent["a"]),
         )
         logger.info(
-            "On-ramp URL signed: intent=%s user=%s deposit=%s currency=%s",
-            short_identifier(intent_id),
+            "On-ramp URL signed: user=%s deposit=%s currency=%s",
             short_address(auth.user_address),
             short_address(deposit_address),
             intent.get("a"),
@@ -564,6 +701,67 @@ async def sign_onramp_url(
         raise HTTPException(status_code=500, detail="Failed to sign MoonPay URL") from exc
 
 
+@router.post("/onramp/session", response_model=OnRampSessionResponse)
+async def create_onramp_session(
+    payload: CreateOnRampSessionRequest,
+    request: Request,
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
+) -> OnRampSessionResponse:
+    """Create one short-lived Transak widget session for a caller-owned intent."""
+
+    try:
+        _enforce_onramp_user_rate_limit(
+            auth.user_address,
+            "onramp_session",
+            _ONRAMP_SESSION_RATE_LIMIT,
+        )
+        if configured_provider() != PROVIDER_TRANSAK:
+            raise OnRampNotConfiguredError("Transak on-ramp sessions are disabled")
+        config = load_transak_config()
+        intent = decode_intent(payload.transaction_id)
+        deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
+        deposit_address = Web3.to_checksum_address(deposit_address)
+        token_id = await _registered_transak_token_id(config)
+        _validate_transak_intent(
+            intent,
+            user_address=auth.user_address,
+            deposit_address=deposit_address,
+            token_id=token_id,
+            config=config,
+        )
+        user_ip = client_ip_from_values(
+            request.headers.getlist(config.client_ip_header),
+            header_name=config.client_ip_header,
+        )
+        session = await get_transak_service().create_widget_session(
+            transaction_id=payload.transaction_id,
+            wallet_address=deposit_address,
+            user_ip=user_ip,
+            config=config,
+        )
+        logger.info(
+            "Transak on-ramp session created: user=%s deposit=%s asset=%s network=%s",
+            short_address(auth.user_address),
+            short_address(deposit_address),
+            config.canonical_asset_code,
+            config.canonical_network,
+        )
+        return OnRampSessionResponse(**session)
+    except ContractLogicError as exc:
+        if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
+            raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+        logger.error("Contract revert in Transak session validation: %s", exc)
+        raise HTTPException(status_code=422, detail="Contract call failed") from exc
+    except OnRampNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TransakRateLimitError as exc:
+        raise _transak_rate_limit_exception(exc) from exc
+    except TransakAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except OnRampError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/onramp/pending", response_model=PendingOnRampsResponse)
 async def get_pending_onramps(
     request: Request,
@@ -571,71 +769,132 @@ async def get_pending_onramps(
         default=None,
         alias="externalTransactionId",
         description=(
-            "Optional signed Privana MoonPay externalTransactionId values to look up exactly "
-            "when MoonPay customer metadata is stale."
+            "Optional signed Privana intent values to look up exactly through their "
+            "encoded provider."
         ),
     ),
     auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
 ) -> PendingOnRampsResponse:
-    """Return completed MoonPay purchases that still need deposit verification."""
+    """Return completed provider purchases that still need deposit verification."""
     try:
-        _enforce_auth_rate_limit(request, "onramp_pending", _ONRAMP_PENDING_RATE_LIMIT)
+        _enforce_onramp_user_rate_limit(
+            auth.user_address,
+            "onramp_pending",
+            _ONRAMP_PENDING_RATE_LIMIT,
+        )
         deposit_address = await _service.get_deposit_address("evm", 0, auth.token)
-        fallback_intent_ids = _validated_onramp_pending_intents(
+        deposit_address = Web3.to_checksum_address(deposit_address)
+        exact_intents = _validated_onramp_pending_intents(
             external_transaction_id,
             user_address=auth.user_address,
             deposit_address=deposit_address,
         )
-        fallback_transactions: list[dict[str, object]] = []
-        fallback_diagnostics: dict[str, object] | None = None
-        fallback_lookup_succeeded = False
-        if fallback_intent_ids:
-            fallback_errors: list[str] = []
-            for intent_id in fallback_intent_ids:
+        rows: list[dict[str, object]] = []
+        exact_diagnostics: list[dict[str, object]] = []
+        exact_lookup_succeeded = False
+        transak_config: TransakConfig | None = None
+        transak_token_id: str | None = None
+
+        for intent_id, intent in exact_intents:
+            provider = str(intent["p"])
+            if provider == PROVIDER_MOONPAY:
                 try:
-                    fallback_transactions.extend(
-                        await fetch_moonpay_buy_transactions_by_external_id(intent_id)
+                    transactions = await fetch_moonpay_buy_transactions_by_external_id(intent_id)
+                    exact_rows, diagnostics = pending_records_from_moonpay_transactions(
+                        transactions,
+                        expected_user_address=auth.user_address,
+                        expected_wallet_address=deposit_address,
                     )
-                    fallback_lookup_succeeded = True
-                except MoonPayAPIError as exc:
-                    fallback_errors.append(str(exc))
-            _, fallback_diagnostics = pending_records_from_moonpay_transactions(
-                fallback_transactions,
-                expected_user_address=auth.user_address,
-                expected_wallet_address=deposit_address,
-            )
-            if fallback_errors:
-                fallback_diagnostics["errors"] = fallback_errors
+                    exact_lookup_succeeded = True
+                    rows.extend(exact_rows)
+                    exact_diagnostics.append(
+                        {"provider": PROVIDER_MOONPAY, "diagnostics": diagnostics}
+                    )
+                except OnRampError as exc:
+                    exact_diagnostics.append({"provider": PROVIDER_MOONPAY, "error": str(exc)})
+            elif provider == PROVIDER_TRANSAK:
+                try:
+                    if transak_config is None or transak_token_id is None:
+                        candidate_config = load_transak_config()
+                        candidate_token_id = await _registered_transak_token_id(candidate_config)
+                        transak_config = candidate_config
+                        transak_token_id = candidate_token_id
+                    _validate_transak_intent(
+                        intent,
+                        user_address=auth.user_address,
+                        deposit_address=deposit_address,
+                        token_id=transak_token_id,
+                        config=transak_config,
+                    )
+                    orders = await get_transak_service().get_orders_by_partner_order_id(
+                        intent_id,
+                        config=transak_config,
+                    )
+                    exact_rows, diagnostics = pending_records_from_transak_orders(
+                        orders,
+                        expected_user_address=auth.user_address,
+                        expected_wallet_address=deposit_address,
+                        expected_token_id=transak_token_id,
+                        expected_transaction_id=intent_id,
+                        config=transak_config,
+                    )
+                    exact_lookup_succeeded = True
+                    rows.extend(exact_rows)
+                    exact_diagnostics.append(
+                        {"provider": PROVIDER_TRANSAK, "diagnostics": diagnostics}
+                    )
+                except OnRampError as exc:
+                    exact_diagnostics.append({"provider": PROVIDER_TRANSAK, "error": str(exc)})
 
-        customer_transactions: list[dict[str, object]] = []
-        customer_diagnostics: dict[str, object]
-        try:
-            customer_transactions = await fetch_moonpay_buy_transactions(
-                external_customer_id=auth.user_address
-            )
-            rows, customer_diagnostics = pending_records_from_moonpay_transactions(
-                customer_transactions,
-                expected_user_address=auth.user_address,
-                expected_wallet_address=deposit_address,
-            )
-        except MoonPayAPIError as exc:
-            if not fallback_lookup_succeeded:
-                raise
-            rows = []
-            customer_diagnostics = {"error": str(exc)}
+        provider = configured_provider()
+        wallet_diagnostics: dict[str, object]
+        wallet_error: OnRampError | None = None
+        wallet_lookup_succeeded = False
+        if provider == PROVIDER_MOONPAY:
+            try:
+                customer_transactions = await fetch_moonpay_buy_transactions(
+                    external_customer_id=auth.user_address
+                )
+                wallet_rows, wallet_diagnostics = pending_records_from_moonpay_transactions(
+                    dedupe_moonpay_transactions(customer_transactions),
+                    expected_user_address=auth.user_address,
+                    expected_wallet_address=deposit_address,
+                )
+                wallet_lookup_succeeded = True
+                rows.extend(wallet_rows)
+            except OnRampError as exc:
+                wallet_error = exc
+                wallet_diagnostics = {"provider": PROVIDER_MOONPAY, "error": str(exc)}
+        else:
+            try:
+                if transak_config is None or transak_token_id is None:
+                    transak_config = load_transak_config()
+                    transak_token_id = await _registered_transak_token_id(transak_config)
+                wallet_orders = await get_transak_service().get_orders_by_wallet(
+                    deposit_address,
+                    config=transak_config,
+                )
+                wallet_rows, wallet_diagnostics = pending_records_from_transak_orders(
+                    wallet_orders,
+                    expected_user_address=auth.user_address,
+                    expected_wallet_address=deposit_address,
+                    expected_token_id=transak_token_id,
+                    config=transak_config,
+                )
+                wallet_lookup_succeeded = True
+                rows.extend(wallet_rows)
+            except OnRampError as exc:
+                wallet_error = exc
+                wallet_diagnostics = {"provider": PROVIDER_TRANSAK, "error": str(exc)}
 
-        diagnostics: dict[str, object] = customer_diagnostics
-        if fallback_intent_ids:
-            rows, combined_diagnostics = pending_records_from_moonpay_transactions(
-                dedupe_moonpay_transactions(customer_transactions + fallback_transactions),
-                expected_user_address=auth.user_address,
-                expected_wallet_address=deposit_address,
-            )
-            diagnostics = {
-                "customer_lookup": customer_diagnostics,
-                "external_transaction_id_lookup": fallback_diagnostics,
-                "combined_lookup": combined_diagnostics,
-            }
+        if not wallet_lookup_succeeded and not exact_lookup_succeeded and wallet_error is not None:
+            raise wallet_error
+
+        rows = _dedupe_onramp_rows(rows)
+        diagnostics = {
+            "wallet_lookup": wallet_diagnostics,
+            "exact_lookups": exact_diagnostics,
+        }
         logger.info(
             "On-ramp pending lookup: user=%s deposit=%s returned=%d diagnostics=%s",
             short_address(auth.user_address),
@@ -651,13 +910,17 @@ async def get_pending_onramps(
         raise HTTPException(status_code=422, detail="Contract call failed") from exc
     except OnRampNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TransakRateLimitError as exc:
+        raise _transak_rate_limit_exception(exc) from exc
+    except TransakAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except MoonPayAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except OnRampError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/onramp/webhook")
+@router.post("/onramp/moonpay/webhook")
 async def moonpay_onramp_webhook(
     request: Request,
     signature: str = Header(..., alias="Moonpay-Signature-V2"),
@@ -679,16 +942,16 @@ async def moonpay_onramp_webhook(
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     try:
         payload = parse_webhook_body(raw_body)
-        transaction_id, updates = webhook_updates(payload)
+        _transaction_id, updates = webhook_updates(payload)
         id_source = (
             "externalTransactionId" if updates.get("external_transaction_id") else "moonpay_id"
         )
         logger.info(
             "On-ramp webhook accepted: tx=%s id_source=%s updates=%s",
-            short_identifier(transaction_id),
+            short_identifier(updates.get("moonpay_transaction_id")),
             id_source,
             {
-                "external_transaction_id": short_identifier(updates.get("external_transaction_id")),
+                "has_signed_intent": bool(updates.get("external_transaction_id")),
                 "moonpay_transaction_id": short_identifier(updates.get("moonpay_transaction_id")),
                 "status": updates.get("status"),
                 "user_address": short_address(updates.get("user_address")),
@@ -701,6 +964,27 @@ async def moonpay_onramp_webhook(
         return {"ok": True}
     except OnRampNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OnRampError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/onramp/transak/webhook")
+async def transak_onramp_webhook(request: Request) -> dict[str, bool]:
+    """Verify and log Transak webhooks as non-authoritative observability signals."""
+
+    buffer = bytearray()
+    async for chunk in request.stream():
+        if len(buffer) + len(chunk) > _ONRAMP_WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Transak webhook payload is too large")
+        buffer.extend(chunk)
+    try:
+        payload = await get_transak_service().verify_webhook(bytes(buffer))
+        logger.info("Transak on-ramp webhook accepted: %s", transak_webhook_log_summary(payload))
+        return {"ok": True}
+    except OnRampNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TransakWebhookVerificationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OnRampError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

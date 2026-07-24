@@ -56,6 +56,19 @@ def _get_int(name: str) -> int:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
 
 
+def _get_optional_int_fail_closed(name: str) -> int | None:
+    """Parse an optional integration value without blocking application startup."""
+
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value, 0)
+    except ValueError:
+        logging.error("%s is invalid; the affected integration will remain disabled", name)
+        return None
+
+
 def _parse_siwe_domains(value: Optional[str]) -> Tuple[str, ...]:
     """Parse the SIWE domain allow-list from ``SIWE_DOMAINS`` (comma-separated).
 
@@ -181,6 +194,7 @@ def load_settings(refresh: bool = False) -> Settings:
         alchemy_api_key = os.getenv("ALCHEMY_API_KEY")
         chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key)
         auth_token_storage_dir = os.getenv("AUTH_TOKEN_STORAGE_DIR", ".auth_tokens")
+        onramp_provider = os.getenv("ONRAMP_PROVIDER")
 
         _settings = Settings(
             api_host=os.getenv("API_HOST"),
@@ -211,6 +225,7 @@ def load_settings(refresh: bool = False) -> Settings:
             trust_x_forwarded_for=_get_bool("TRUST_X_FORWARDED_FOR"),
             moonpay_api_key=os.getenv("MOONPAY_API_KEY"),
             moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY"),
+            onramp_provider=onramp_provider.strip().lower() if onramp_provider else None,
             onramp_intent_signing_key_id=os.getenv(
                 "ONRAMP_INTENT_SIGNING_KEY_ID",
                 DEFAULT_ONRAMP_INTENT_SIGNING_KEY_ID,
@@ -227,6 +242,16 @@ def load_settings(refresh: bool = False) -> Settings:
             moonpay_webhook_tolerance_seconds=_get_int(
                 "MOONPAY_WEBHOOK_TOLERANCE_SECONDS",
             ),
+            transak_api_key=os.getenv("TRANSAK_API_KEY"),
+            transak_api_secret=os.getenv("TRANSAK_API_SECRET"),
+            transak_api_base_url=os.getenv("TRANSAK_API_BASE_URL"),
+            transak_gateway_base_url=os.getenv("TRANSAK_GATEWAY_BASE_URL"),
+            transak_referrer_domain=os.getenv("TRANSAK_REFERRER_DOMAIN"),
+            transak_client_ip_header=os.getenv("TRANSAK_CLIENT_IP_HEADER"),
+            transak_crypto_currency_code=os.getenv("TRANSAK_CRYPTO_CURRENCY_CODE"),
+            transak_network=os.getenv("TRANSAK_NETWORK"),
+            transak_chain_id=_get_optional_int_fail_closed("TRANSAK_CHAIN_ID"),
+            transak_token_address=os.getenv("TRANSAK_TOKEN_ADDRESS"),
         )
     return _settings
 

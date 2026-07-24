@@ -206,6 +206,39 @@ def decode_intent(token: str, *, allow_expired: bool = False) -> dict[str, Any]:
     return payload
 
 
+def configured_provider() -> str:
+    """Return the deployment-selected provider, failing closed on invalid values."""
+
+    provider = load_settings().onramp_provider
+    if provider not in _PROVIDERS:
+        raise OnRampNotConfiguredError("On-ramp provider configuration is invalid")
+    return provider
+
+
+def record_from_intent(transaction_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Build the provider-neutral API record represented by a signed intent."""
+
+    provider = str(payload["p"])
+    asset_code = str(payload["a"]).lower()
+    created_at = int(payload["iat"])
+    return {
+        "transaction_id": transaction_id,
+        "external_transaction_id": transaction_id,
+        "provider": provider,
+        "provider_transaction_id": None,
+        "provider_asset_code": asset_code,
+        "moonpay_transaction_id": None,
+        "status": "pending",
+        "wallet_address": Web3.to_checksum_address("0x" + str(payload["w"])),
+        "token_id": "0x" + str(payload["t"]).lower(),
+        "chain_id": int(payload["c"]),
+        # Retain the MoonPay field during the SDK migration.
+        "moonpay_currency_code": asset_code if provider == PROVIDER_MOONPAY else None,
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+
+
 def _encode_intent(payload: dict[str, Any]) -> str:
     """Encode and sign a normalized payload."""
 
@@ -355,7 +388,9 @@ __all__ = [
     "OnRampNotConfiguredError",
     "PROVIDER_MOONPAY",
     "PROVIDER_TRANSAK",
+    "configured_provider",
     "create_intent",
     "decode_intent",
     "get_onramp_intent_key_manager",
+    "record_from_intent",
 ]

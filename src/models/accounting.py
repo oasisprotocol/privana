@@ -9,6 +9,8 @@ from typing import ClassVar, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from web3 import Web3
 
+from src.services.onramp_intent import INTENT_MAX_LENGTH
+
 
 class ChainType(IntEnum):
     """Chain family used for deposit-address derivation.
@@ -628,12 +630,14 @@ class SignOnRampUrlResponse(BaseModel):
 
 
 class CreateOnRampIntentRequest(BaseModel):
-    """Authenticated Privana intent created before opening MoonPay."""
+    """Authenticated Privana intent created before opening the configured provider."""
 
     wallet_address: str | None = None
     token_id: str
     chain_id: int
-    moonpay_currency_code: str
+    # Retained for the MoonPay SDK during provider migration. Transak's single
+    # configured asset is selected by the backend and ignores this field.
+    moonpay_currency_code: str | None = None
 
     @field_validator("wallet_address")
     def _normalise_wallet_address(cls, value: str | None) -> str | None:
@@ -650,6 +654,20 @@ class CreateOnRampIntentRequest(BaseModel):
     @field_validator("moonpay_currency_code")
     def _normalise_currency_code(cls, value: str | None) -> str | None:
         return _normalise_currency_code(value)
+
+
+class CreateOnRampSessionRequest(BaseModel):
+    """Request a short-lived session for a signed on-ramp intent."""
+
+    transaction_id: str = Field(..., min_length=1, max_length=INTENT_MAX_LENGTH)
+
+
+class OnRampSessionResponse(BaseModel):
+    """Opaque, single-use provider session returned to the browser."""
+
+    provider: Literal["transak"]
+    url: str
+    expires_at: int
 
 
 class UpdateOnRampRequest(BaseModel):
@@ -693,10 +711,13 @@ class UpdateOnRampRequest(BaseModel):
 
 
 class OnRampRecord(BaseModel):
-    """MoonPay on-ramp transaction visible to the SDK."""
+    """Normalized provider transaction visible to the SDK."""
 
     transaction_id: str
     external_transaction_id: str | None = None
+    provider: Literal["moonpay", "transak"]
+    provider_transaction_id: str | None = None
+    provider_asset_code: str
     moonpay_transaction_id: str | None = None
     status: Literal["pending", "completed", "failed", "cancelled"]
     wallet_address: str | None = None
@@ -716,6 +737,6 @@ class OnRampRecord(BaseModel):
 
 
 class PendingOnRampsResponse(BaseModel):
-    """Completed MoonPay transactions that still need Privana deposit verification."""
+    """Completed provider transactions that still need deposit verification."""
 
     pending: list[OnRampRecord]

@@ -42,6 +42,7 @@ class Settings:
 
     moonpay_api_key: str
     moonpay_secret_key: str
+    onramp_provider: str | None
     onramp_intent_signing_key_id: str
     onramp_intent_previous_signing_key_ids: Tuple[str, ...]
     moonpay_api_base_url: str
@@ -49,3 +50,14 @@ class Settings:
     moonpay_allowed_hosts: Tuple[str, ...]
     moonpay_allowed_currency_codes: Tuple[str, ...]
     moonpay_webhook_tolerance_seconds: int
+
+    transak_api_key: str | None
+    transak_api_secret: str | None
+    transak_api_base_url: str | None
+    transak_gateway_base_url: str | None
+    transak_referrer_domain: str | None
+    transak_client_ip_header: str | None
+    transak_crypto_currency_code: str | None
+    transak_network: str | None
+    transak_chain_id: int | None
+    transak_token_address: str | None

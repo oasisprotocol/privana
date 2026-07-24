@@ -23,7 +23,7 @@ If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`
 - **Amounts** are integers in the token's base units (wei for ETH, smallest unit for ERC-20). Strings are accepted; scientific notation is parsed with `Decimal` to preserve precision.
 - **Signatures** are EIP-712 typed-data signatures. User-signed accounting operations are defined in `solidity/contracts/EIP712SignatureVerifier.sol`.
 - **Nonces** are per-operation. User-signed operations key nonces by recovered signer; service-signed lock operations key nonces by service. Always fetch the current nonce immediately before signing.
-- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for validation errors, `401` for missing/invalid auth, `422` for contract reverts, `429` for rate-limit, `500` for internal failures.
+- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
 
 ### User-Signed EIP-712 Types
 
@@ -88,9 +88,11 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /history` | required | same |
 | `POST /onramp/intent` | required | same |
 | `POST /onramp/sign-url` | required | same |
+| `POST /onramp/session` | required | same |
 | `GET /onramp/pending` | required | same |
 | `POST /onramp/{transaction_id}` | required | same |
-| `POST /onramp/webhook` | MoonPay webhook signature | `Moonpay-Signature-V2` |
+| `POST /onramp/moonpay/webhook` | MoonPay webhook signature | `Moonpay-Signature-V2` |
+| `POST /onramp/transak/webhook` | Transak JWT | JWT in body `data` |
 | `POST /auth/jwt/siwe-token` | required | `Authorization: Bearer …` |
 | `POST /auth/jwt/logout`, `GET /auth/jwt/me` | required | `Authorization: Bearer …` |
 | Everything else | none (signature-gated where applicable) | — |
@@ -153,43 +155,44 @@ Behavior notes:
 - The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
 - The `min_deposit` field of the address response is a per-chain map — clients should use it to gate the UI.
 
-## On-Ramp Flow (MoonPay)
+## On-Ramp Flow (MoonPay or Transak)
 
-The fiat on-ramp reuses the deposit path: MoonPay delivers tokens straight to the user's per-user deposit address, and the existing verify → sweep → credit pipeline performs the actual credit. The on-ramp endpoints only **correlate** MoonPay purchase state with Privana deposits — the webhook never credits balances.
+The fiat on-ramp reuses the existing deposit path. The configured provider delivers an ERC-20 to the server-derived per-user deposit address; the normal verify → sweep → credit pipeline is the only path that can credit a balance. Provider orders, amounts, widget events, and webhooks are correlation evidence only.
 
 ```
-1. POST /onramp/intent             → mint a signed Privana externalTransactionId
-                                     carrying provider, user, deposit, token,
-                                     chain, and canonical asset metadata
-2. POST /onramp/sign-url           → validate + sign the MoonPay widget URL
-3. user completes the purchase in the MoonPay widget
-4. POST /onramp/webhook            → MoonPay reports status + on-chain tx hash;
-                                     the backend verifies and logs it
-5. GET  /onramp/pending            → query MoonPay by externalCustomerId; clients
-                                     may also pass signed externalTransactionId
-                                     values for exact stale-session recovery
-6. POST /deposits/check            → normal deposit verification using the
-                                     MoonPay on-chain tx hash
-7. GET  /deposits/status/{id}      → poll until status="credited"
+1. POST /onramp/intent             → mint a provider-bound signed Privana intent
+2a. MoonPay: POST /onramp/sign-url → validate and sign the widget URL
+2b. Transak: POST /onramp/session  → create a five-minute, single-use opaque URL
+3. user completes the provider purchase to the locked deposit address
+4. provider webhook (optional)     → backend verifies and logs an observability signal
+5. GET /onramp/pending             → bounded provider read; optional exact signed-intent
+                                     values recover known purchases after a provider switch
+6. POST /deposits/check            → verify the matching on-chain transfer, sweep, credit
+7. GET /deposits/status/{id}       → poll until status="credited"
 ```
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `POST /onramp/intent` | required | Mint a signed intent pinning `user_address`, deposit `wallet_address`, `token_id`, `chain_id`, and MoonPay currency before the widget opens. |
-| `POST /onramp/sign-url` | required | Validate an unsigned MoonPay widget URL (allow-listed host, expected `apiKey`, `walletAddress` = caller's deposit address, `externalCustomerId` = caller, signed Privana `externalTransactionId`, allow-listed `currencyCode` matching the intent) and return its HMAC signature. |
-| `GET /onramp/pending` | required | Query MoonPay by the caller's `externalCustomerId` and return completed purchases whose signed Privana intent matches the caller and deposit address and carries enough data (`token_id`, `chain_id`, `on_chain_tx_hash`) for idempotent `/deposits/check` verification. Optionally accepts up to 10 signed `externalTransactionId` query values for exact stale-session recovery. |
-| `POST /onramp/{transaction_id}` | required | Compatibility endpoint that validates caller-owned signed intent metadata and echoes the merged client payload without persisting state. |
-| `POST /onramp/webhook` | MoonPay HMAC (`Moonpay-Signature-V2`) | Verify and log MoonPay transaction updates. |
+| `POST /onramp/intent` | required | Mint an intent for the deployment-selected `ONRAMP_PROVIDER`. It pins provider, caller, freshly derived deposit wallet, token, chain, and canonical provider asset. Transak accepts only its one configured, registered asset. |
+| `POST /onramp/sign-url` | required | MoonPay-only launch. Validate the allow-listed widget URL and return its HMAC signature. Returns `503` when MoonPay is not selected. |
+| `POST /onramp/session` | required | Transak-only launch. Revalidate the unexpired caller-owned intent and registered asset, require one trusted proxy-owned client IP, and return an opaque URL with `expires_at`. Returns `503` when Transak is not selected or fully configured. The browser must open/embed the URL without `noreferrer` or a `no-referrer` policy so Transak receives the approved `Referer`. |
+| `GET /onramp/pending` | required | Bootstrap the selected provider by caller/wallet and optionally perform up to 10 exact lookups through each signed intent's encoded provider. Return only completed, strictly admitted records with an on-chain transaction hash. |
+| `POST /onramp/{transaction_id}` | required | MoonPay compatibility endpoint. Validate caller-owned signed intent metadata and echo the merged client payload without persistence. |
+| `POST /onramp/moonpay/webhook` | MoonPay HMAC (`Moonpay-Signature-V2`) | Verify and log a MoonPay update; never credit or persist provider state. |
+| `POST /onramp/transak/webhook` | Transak body JWT | Verify with a cached current or bounded previous Partner Access Token and log a redacted summary; never credit or persist provider state. |
 
 Behavior notes:
 
-- **Signed intents bind provider orders to Privana deposits.** MoonPay's `externalTransactionId` carries a signed Privana intent. The backend rejects tampered, wrong-provider, wrong-user, or wrong-deposit intents. Expiry blocks new widget URL signing; authenticated pending/compat recovery may decode expired intents because they still cannot authorize credit.
-- **There is one provider-neutral wire format.** The initial v1 format is canonical minified JSON authenticated with HMAC-SHA256; it includes an explicit provider and canonical provider asset. Generated v1 identifiers are at most 448 characters; the 512-character validation cap is defensive, not a provider limit. The current MoonPay adapter mints this format and rejects intents assigned to another provider; future provider adapters use the same codec.
-- **There is one signing-key ring per environment.** At startup, the backend derives a 256-bit HMAC key from ROFL appd using `ONRAMP_INTENT_SIGNING_KEY_ID`. Verification also accepts keys derived from comma-separated `ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS`. ROFL keeps each key stable for the same app and key ID across restarts and redeployments. Rotate by selecting a new current ID and retaining old IDs for 365 days after their last mint; the 24-hour intent TTL does not bound authenticated recovery.
-- **MoonPay is the on-ramp transaction source.** `/onramp/pending` does not depend on local on-ramp storage. It fetches MoonPay transactions by `externalCustomerId` and filters locally using the signed intent and delivery wallet. If the widget session was stale, the client can pass the signed `externalTransactionId` minted by `/onramp/intent`; the backend then uses MoonPay's exact external-id lookup and still returns only transactions whose signed intent matches the caller and deposit address.
-- **Amounts come from provider reads.** The signed intent carries only Privana binding metadata (provider, user, deposit wallet, `token_id`, `chain_id`, canonical provider asset, nonce, and expiry). Base and quote currency amounts are returned only after the provider lookup.
-- **The deposit path is still authoritative for credit.** `/deposits/check` and `/deposits/status/{deposit_id}` remain the only balance-credit path and retain their existing idempotency.
-- **Fail-closed configuration.** Startup fails if any configured on-ramp intent key cannot be derived from ROFL. MoonPay operations independently require their relevant `MOONPAY_*` keys.
+- **The deployment chooses the provider.** `ONRAMP_PROVIDER` must be configured explicitly; the shipped environment files select `moonpay` until the controlled Transak rollout. Clients cannot select a provider. Launch endpoints enforce the choice; exact authenticated recovery can still dispatch a known signed intent to its encoded provider.
+- **Signed intents bind provider orders to Privana deposits; they do not authorize credit.** The v1 wire format is canonical minified JSON authenticated with HMAC-SHA256. It binds provider, user, deposit wallet, `token_id`, chain, canonical asset, nonce, issue time, and expiry. Generated identifiers are at most 448 characters; the 512-character validation cap is defensive, not a provider limit. New launches reject expired or mismatched intents. Authenticated pending recovery may decode expired intents because it still cannot authorize credit.
+- **Recovery is stateless and bounded.** There is no local provider-order database. MoonPay reads by caller or exact external ID. Transak reads exact `partnerOrderId` first and the derived wallet second, with BUY/COMPLETED filters, explicit 365-day UTC bounds, deterministic order, and capped pagination.
+- **Transak admission is strict.** Every returned order must carry a valid signed `partnerOrderId`, caller-owned deposit wallet, configured token/chain/asset/network, BUY product, `COMPLETED` status, and a 32-byte transaction hash. Provider fiat/crypto amounts are display-only; use the matching transfer log for the `/deposits/check` claim.
+- **Partner tokens stay in memory.** Transak token refresh is single-flight and driven by returned `expiresAt`; an authenticated API request gets one compare-and-swap refresh/retry only after an explicit `401`. Webhook verification never mints a token in response to an unauthenticated request. A fresh process without a cached verification token returns `503` for the webhook while polling remains available.
+- **Transak session URLs require the approved browser referrer.** Preserve `Referer` when opening or embedding the opaque URL; never use `noreferrer` or `Referrer-Policy: no-referrer`.
+- **There is one intent signing-key ring per environment.** At startup, the backend derives a 256-bit HMAC key from ROFL appd using `ONRAMP_INTENT_SIGNING_KEY_ID`. Verification also accepts keys derived from comma-separated `ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS`. Rotate by selecting a new current ID and retaining old IDs for 365 days after their last mint.
+- **Configuration fails closed.** Startup fails if any configured intent key cannot be derived from ROFL. Invalid Transak configuration disables only its endpoints with `503`. The provider flip additionally requires registered token configuration and a proxy-owned original-client-IP header whose browser-supplied value is overwritten.
+- **Sensitive launch material is not logged.** Application access logs redact exact-recovery query values and signed compatibility-route IDs. Any upstream proxy/access-log layer must apply the same policy. Widget URLs, provider tokens, webhook JWTs, and full provider bodies are never logged.
+- **Only the deposit path credits.** `/deposits/check` and `/deposits/status/{deposit_id}` retain the existing on-chain verification, idempotency, sweep, and ROFL-gated credit behavior.
 
 ## Withdrawal Flow
 
@@ -288,15 +291,16 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 |---|---|
 | `200 OK` | Synchronous success — the response body has the result. |
 | `202 Accepted` | Work continues in the background. Currently only `POST /deposits/check` when a sweep is in flight. Poll the corresponding status endpoint. |
-| `400 Bad Request` | Pydantic validation, malformed hex/address, business rule violation (e.g. modify-lock no-op). |
-| `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a MoonPay webhook signature that fails verification. |
+| `400 Bad Request` | Semantic validation or business rule violation after the request model has parsed (for example malformed signed intent metadata or a modify-lock no-op). |
+| `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a provider webhook signature/JWT that fails verification. |
 | `403 Forbidden` | On-ramp record belongs to a different user or deposit address. |
 | `404 Not Found` | Status check for an unknown deposit. |
-| `413 Payload Too Large` | MoonPay webhook body exceeds the 1 MiB cap. |
-| `422 Unprocessable Entity` | Contract revert (transaction submitted but the chain rejected it). The response `detail` carries the revert reason when available. |
-| `429 Too Many Requests` | Auth rate-limiter tripped. Honour the `Retry-After` header. |
+| `413 Payload Too Large` | A provider webhook body exceeds the 1 MiB cap. |
+| `422 Unprocessable Entity` | FastAPI/Pydantic request-model validation, or a contract revert after a parsed request reaches the chain. Contract-revert responses carry the revert reason when available. |
+| `429 Too Many Requests` | An auth/on-ramp rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
+| `502 Bad Gateway` | A configured provider API is unavailable, malformed, or rejects an authenticated server request. |
 | `500 Internal Server Error` | Unexpected failure in the service layer. Errors are logged with stack traces — file an issue with the request id. |
-| `503 Service Unavailable` | A required integration is not configured — MoonPay on-ramp keys (URL-signing, intent-signing, transaction-lookup, webhook) or the source-chain RPC used by `GET /deposits/pending`. |
+| `503 Service Unavailable` | A required integration is unavailable or fail-closed — intent keys, provider configuration, registered Transak asset, cached Transak webhook verification token, or the source-chain RPC used by `GET /deposits/pending`. |
 
 ## Schemas
 

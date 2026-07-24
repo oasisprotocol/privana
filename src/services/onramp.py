@@ -22,6 +22,7 @@ from src.services.onramp_intent import (
     OnRampNotConfiguredError,
     create_intent,
     decode_intent,
+    record_from_intent,
 )
 
 _MOONPAY_TRANSACTION_PAGE_LIMIT = 50
@@ -71,19 +72,7 @@ def decode_onramp_intent(
 def onramp_record_from_intent(transaction_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Build an API-visible on-ramp record from a signed intent payload."""
 
-    created_at = int(payload["iat"])
-    record: dict[str, Any] = {
-        "transaction_id": transaction_id,
-        "external_transaction_id": transaction_id,
-        "status": "pending",
-        "wallet_address": Web3.to_checksum_address("0x" + str(payload["w"])),
-        "token_id": "0x" + str(payload["t"]).lower(),
-        "chain_id": int(payload["c"]),
-        "moonpay_currency_code": str(payload["a"]).lower(),
-        "created_at": created_at,
-        "updated_at": created_at,
-    }
-    return record
+    return record_from_intent(transaction_id, payload)
 
 
 def sign_moonpay_url(
@@ -337,6 +326,7 @@ def moonpay_transaction_to_onramp_record(
     record.update(
         {
             "moonpay_transaction_id": _string_or_none(data.get("id")),
+            "provider_transaction_id": _string_or_none(data.get("id")),
             "status": "completed",
             "wallet_address": intent_wallet,
             "base_currency_code": _currency_code(data.get("baseCurrency"))
@@ -564,13 +554,14 @@ def short_identifier(value: Any) -> str | None:
 
 def onramp_log_summary(record: dict[str, Any]) -> dict[str, Any]:
     return {
-        "transaction_id": short_identifier(record.get("transaction_id")),
-        "external_transaction_id": short_identifier(record.get("external_transaction_id")),
+        "has_signed_intent": bool(record.get("transaction_id")),
+        "provider": record.get("provider"),
+        "provider_transaction_id": short_identifier(record.get("provider_transaction_id")),
         "moonpay_transaction_id": short_identifier(record.get("moonpay_transaction_id")),
         "status": record.get("status"),
         "wallet_address": short_address(record.get("wallet_address")),
         "has_on_chain_tx_hash": bool(record.get("on_chain_tx_hash")),
         "has_token_id": bool(record.get("token_id")),
         "chain_id": record.get("chain_id"),
-        "moonpay_currency_code": record.get("moonpay_currency_code"),
+        "provider_asset_code": record.get("provider_asset_code"),
     }
