@@ -2,12 +2,13 @@
 pragma solidity ^0.8.20;
 
 import {Accounting} from "../Accounting.sol";
-import {ChainType, HistoryKind, UnsupportedTokenType} from "../Types.sol";
+import {ChainType} from "../Types.sol";
 
 /**
  * @title MockAccounting
  * @notice Mock version of Accounting for testing on non-Sapphire chains (e.g., Hardhat).
  * @dev Overrides the keypair generation to avoid calling Sapphire precompiles.
+ * @custom:oz-upgrades-unsafe-allow missing-initializer
  */
 contract MockAccounting is Accounting {
     // Test keypair: #4 of "chimney theory present latin find behave ankle clock shadow earn suit reflect"
@@ -16,10 +17,6 @@ contract MockAccounting is Accounting {
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address siweAuthAddress) Accounting(siweAuthAddress) {}
-
-    function initialize(bytes21 _roflAppID, address _owner) external override initializer {
-        __Accounting_init(_roflAppID, _owner);
-    }
 
     function _generateKeypair() internal pure override returns (address, bytes32) {
         return (TEST_ADDRESS, TEST_SECRET);
@@ -42,43 +39,19 @@ contract MockAccounting is Accounting {
     }
 
     /**
-     * @notice Test helper: creditDeposit without onlyROFL check.
-     * @dev Bypasses ROFL auth for Hardhat testing.
+     * @notice Ignore ROFL check if app id is zero.
+     * @dev Only for testing purposes - NOT for production use
      */
-    function mockCreditDeposit(
-        address beneficiary,
-        bytes32 tokenId,
-        uint256 amount,
-        bytes32 depositId
-    ) external {
-        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
-        if (amount == 0) revert InvalidAmount();
-        if (tokens[tokenId].data.length == 0) revert UnsupportedTokenType();
-        processedDeposits[depositId] = true;
-        balances[beneficiary][tokenId] += amount;
-        _appendHistory(
-            beneficiary,
-            HistoryKind.Deposit,
-            abi.encodePacked(tokenId, amount, depositId)
-        );
-        emit Deposit(tokenId, amount, depositId);
+    function _checkRoflAppId() internal view override {
+        if (roflAppID != bytes21(0)) {
+            super._checkRoflAppId();
+        }
     }
 
     /**
-     * @notice Test helper: set roflSignerAddress without onlyROFL check.
-     * @dev Bypasses ROFL auth for Hardhat testing; onlyROFL calls the Sapphire
-     *      roflEnsureAuthorizedOrigin precompile which doesn't exist on Hardhat.
+     * @notice Calls creditDeposit n times from solidity to speed up the sapphire-localnet tests.
      */
-    function mockSetRoflSignerAddress(address newSigner) external {
-        if (newSigner == address(0)) revert InvalidAddress();
-        roflSignerAddress = newSigner;
-        emit RoflSignerUpdated(newSigner);
-    }
-
-    /**
-     * @notice Calls mockCreditDeposit n times from solidity to speed up the sapphire-localnet tests.
-     */
-    function mockCreditDepositNTimes(
+    function creditDepositNTimes(
         address beneficiary,
         bytes32 tokenId,
         uint256 amount,
@@ -86,7 +59,7 @@ contract MockAccounting is Accounting {
         uint256 n
     ) external {
         for (uint256 i = 0; i < n; i++) {
-            this.mockCreditDeposit(beneficiary, tokenId, i + amount, keccak256(abi.encodePacked(depositId, i)));
+            this.creditDeposit(beneficiary, tokenId, i + amount, keccak256(abi.encodePacked(depositId, i)));
         }
     }
 }

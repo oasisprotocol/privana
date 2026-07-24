@@ -198,29 +198,11 @@ The upgrade task uses `redeployImplementation: 'always'` to ensure a fresh imple
 
 ### Adding Token Support
 
-After deployment, register tokens that the accounting system should support:
-
-#### Native Token (ETH, MATIC, etc.)
-
-```shell
-npx hardhat addEVMNativeToken --network sapphire-testnet --chainid 1 --address <deployed-accounting-address>
-```
-
-#### ERC20 Token
-
-```shell
-npx hardhat addEVMErc20Token --network sapphire-testnet --chainid 1 --tokenaddress 0x... --address <deployed-accounting-address>
-```
-
-Both tasks call `setTokenInfo(...)` (owner-only).
+Tokens (`setTokenInfo`, gated by `onlyROFL`) are registered by `src/services/token_info_bootstrap.py` at every ROFL restart, reading the desired token list from the `ACCOUNTING_TOKEN_INFO` JSON env var — no manual Hardhat task. Each entry is `{"chain_id": <int>}` for a native token, or `{"chain_id": <int>, "token_address": "0x..."}` for an ERC20 token. See `src/README.md` → Token Info Bootstrap.
 
 ### Setting Gas Prices
 
-Configure gas prices for different chains:
-
-```shell
-npx hardhat setGasPrice --network sapphire-testnet --chainid 1 --gasprice 20000000000 --contract <deployed-accounting-address>
-```
+Per-chain gas prices (`setGasPrice`, gated by `onlyROFL`) are kept in sync by `src/services/gas_price_bootstrap.py` at every ROFL restart, reading desired values from the `ACCOUNTING_GAS_PRICE` JSON env var — no manual Hardhat task. See `src/README.md` → Gas Price Bootstrap.
 
 ### ROFL Signer Address
 
@@ -266,8 +248,6 @@ User-driven escape hatch from a per-user deposit address, with no ROFL involveme
 | `deploy-siwe-auth` | Deploy `AccountingSiweAuth` standalone |
 | `force-import` | Import an existing proxy into hardhat-upgrades |
 | `upgrade` | UUPS upgrade Accounting implementation |
-| `addEVMNativeToken` / `addEVMErc20Token` | Register tokens |
-| `setGasPrice` | Set per-chain gas price |
 | `getBalance` | Read user balance |
 | `transferERC20` | Sign + submit an EIP-712 transfer |
 | `withdraw` / `watchWithdrawal` | User-side withdrawal flow |

@@ -1,10 +1,12 @@
 """Configuration management for the Accounting Module API."""
 
+import json
 import logging
 import os
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+from web3 import Web3
 
 from src.models.types import Settings
 
@@ -94,6 +96,81 @@ def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
     return rpc_urls
 
 
+def _build_gas_prices() -> Dict[int, int]:
+    """Parse per-chain gas prices from the ACCOUNTING_GAS_PRICE env var.
+
+    Expects a JSON object mapping chain_id in decimal to gas price in wei, e.g.
+    ACCOUNTING_GAS_PRICE='{"84532": 1000000000, "11155111": 20000000000}'.
+    """
+    raw = os.getenv("ACCOUNTING_GAS_PRICE")
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid ACCOUNTING_GAS_PRICE JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("ACCOUNTING_GAS_PRICE must be a JSON object mapping chain_id to gas price")
+
+    gas_prices: Dict[int, int] = {}
+    for chain_id_raw, gas_price_raw in parsed.items():
+        gas_prices[int(chain_id_raw)] = int(gas_price_raw)
+
+    return gas_prices
+
+
+def _build_token_infos() -> List[Dict[str, Any]]:
+    """Parse the ACCOUNTING_TOKEN_INFO env var: a JSON array of token descriptors.
+
+    Each entry is ``{"chain_id": <int>}`` for a native token, or
+    {"chain_id": <int>, "token_address": "0x..."}`` for an ERC20 token
+
+    For example:
+      ACCOUNTING_TOKEN_INFO='[
+        {"chain_id": 84532},
+        {"chain_id": 84532, "token_address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"}
+      ]'
+    """
+    raw = os.getenv("ACCOUNTING_TOKEN_INFO")
+    if not raw:
+        return []
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid ACCOUNTING_TOKEN_INFO JSON: {exc}") from exc
+
+    if not isinstance(parsed, list):
+        raise ValueError("ACCOUNTING_TOKEN_INFO must be a JSON array of token descriptors")
+
+    token_infos: List[Dict[str, Any]] = []
+    for index, entry in enumerate(parsed):
+        if not isinstance(entry, dict):
+            raise ValueError(f"ACCOUNTING_TOKEN_INFO entry {index} must be a JSON object")
+
+        if "chain_id" not in entry:
+            raise ValueError(f"ACCOUNTING_TOKEN_INFO entry {index} missing chain_id")
+        try:
+            chain_id = int(entry["chain_id"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"ACCOUNTING_TOKEN_INFO entry {index} chain_id must be an integer"
+            ) from exc
+
+        token_address = entry.get("token_address")
+        if token_address is not None:
+            if not isinstance(token_address, str) or not Web3.is_address(token_address):
+                raise ValueError(
+                    f"ACCOUNTING_TOKEN_INFO entry {index} token_address is not a valid address"
+                )
+
+        token_infos.append({"chain_id": chain_id, "token_address": token_address})
+
+    return token_infos
+
+
 def load_settings(refresh: bool = False) -> Settings:
     """Load settings, optionally refreshing cached values."""
 
@@ -114,6 +191,8 @@ def load_settings(refresh: bool = False) -> Settings:
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL"),
             accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT"),
             chain_rpc_urls=chain_rpc_urls,
+            gas_prices_wei=_build_gas_prices(),
+            token_infos=_build_token_infos(),
             withdrawal_poll_interval=_get_int("WITHDRAWAL_POLL_INTERVAL"),
             withdrawal_resolution_timeout=_get_int("WITHDRAWAL_RESOLUTION_TIMEOUT"),
             min_withdrawal_gas_balance=_get_int("MIN_WITHDRAWAL_GAS_BALANCE"),

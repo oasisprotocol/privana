@@ -502,6 +502,133 @@ async def test_set_rofl_signer_address_rejects_invalid_address() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_gas_price_returns_int() -> None:
+    reader = MagicMock()
+    reader.functions.gasPrices.return_value.call = AsyncMock(return_value=1_000_000_000)
+
+    service = _make_service_with_reader(reader)
+    result = await service.get_gas_price(84532)
+
+    reader.functions.gasPrices.assert_called_once_with(84532)
+    assert result == 1_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_set_gas_price_submits_tx() -> None:
+    calldata = b"\xde\xad\xbe\xef" + b"\x00" * 32
+
+    contract = MagicMock()
+    encoder = MagicMock()
+    encoder._encode_transaction_data.return_value = calldata
+    contract.functions.setGasPrice.return_value = encoder
+
+    rofl_client = MagicMock()
+    rofl_client.submit_tx = AsyncMock(
+        return_value=RoflSubmissionResult(submission_id="sub-3", ok_payload=None)
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract = contract
+    service.contract_address = "0x" + "11" * 20
+    service.gas_limit = 500_000
+    service.rofl_client = rofl_client
+
+    result = await service.set_gas_price(84532, 1_000_000_000)
+
+    contract.functions.setGasPrice.assert_called_once_with(84532, 1_000_000_000)
+    rofl_client.submit_tx.assert_awaited_once()
+    assert result.submission_id == "sub-3"
+
+
+@pytest.mark.asyncio
+async def test_encode_token_data_native() -> None:
+    data = b"\x00" * 31 + bytes([1])
+    reader = MagicMock()
+    reader.functions.encodeEVMNativeTokenData.return_value.call = AsyncMock(return_value=data)
+
+    service = _make_service_with_reader(reader)
+    result = await service.encode_token_data(84532, None)
+
+    reader.functions.encodeEVMNativeTokenData.assert_called_once_with(84532)
+    assert result == data
+
+
+@pytest.mark.asyncio
+async def test_encode_token_data_erc20_checksums_address() -> None:
+    token_address = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+    data = b"\x00" * 32 + bytes.fromhex(token_address[2:])
+    reader = MagicMock()
+    reader.functions.encodeEVMErc20TokenData.return_value.call = AsyncMock(return_value=data)
+
+    service = _make_service_with_reader(reader)
+    result = await service.encode_token_data(84532, token_address)
+
+    reader.functions.encodeEVMErc20TokenData.assert_called_once_with(
+        84532, Web3.to_checksum_address(token_address)
+    )
+    assert result == data
+
+
+@pytest.mark.asyncio
+async def test_get_token_data_and_id_native() -> None:
+    data = b"\x00" * 31 + bytes([1])
+    token_id = b"\xaa" * 32
+    reader = MagicMock()
+    reader.functions.encodeEVMNativeTokenData.return_value.call = AsyncMock(return_value=data)
+    reader.functions.getTokenId.return_value.call = AsyncMock(return_value=token_id)
+
+    service = _make_service_with_reader(reader)
+    result_data, result_id = await service.get_token_data_and_id(84532, None)
+
+    reader.functions.getTokenId.assert_called_once_with((0, data))
+    assert result_data == data
+    assert result_id == token_id
+
+
+@pytest.mark.asyncio
+async def test_get_token_id_returns_id_only() -> None:
+    data = b"\x00" * 32 + bytes.fromhex("036cbd53842c5426634e7929541ec2318f3dcf7e")
+    token_id = b"\xbb" * 32
+    reader = MagicMock()
+    reader.functions.encodeEVMErc20TokenData.return_value.call = AsyncMock(return_value=data)
+    reader.functions.getTokenId.return_value.call = AsyncMock(return_value=token_id)
+
+    service = _make_service_with_reader(reader)
+    result = await service.get_token_id(84532, "0x036cbd53842c5426634e7929541ec2318f3dcf7e")
+
+    reader.functions.getTokenId.assert_called_once_with((1, data))
+    assert result == token_id
+
+
+@pytest.mark.asyncio
+async def test_set_token_info_submits_tx() -> None:
+    calldata = b"\xde\xad\xbe\xef" + b"\x00" * 32
+    data = b"\x00" * 31 + bytes([1])
+
+    contract = MagicMock()
+    encoder = MagicMock()
+    encoder._encode_transaction_data.return_value = calldata
+    contract.functions.setTokenInfo.return_value = encoder
+
+    rofl_client = MagicMock()
+    rofl_client.submit_tx = AsyncMock(
+        return_value=RoflSubmissionResult(submission_id="sub-4", ok_payload=None)
+    )
+
+    service = AccountingContractService.__new__(AccountingContractService)
+    service.contract = contract
+    service.contract_address = "0x" + "11" * 20
+    service.gas_limit = 500_000
+    service.rofl_client = rofl_client
+
+    result = await service.set_token_info(0, data)
+
+    contract.functions.setTokenInfo.assert_called_once_with((0, data))
+    rofl_client.submit_tx.assert_awaited_once()
+    assert result.submission_id == "sub-4"
+
+
+@pytest.mark.asyncio
 async def test_set_auth_token_enc_key_submits_encrypted_tx() -> None:
     auth_address = "0x2222222222222222222222222222222222222222"
     enc_key = bytes.fromhex("11" * 32)

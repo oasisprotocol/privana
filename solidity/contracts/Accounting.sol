@@ -14,6 +14,7 @@ import {
     UserInfo
 } from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
@@ -24,7 +25,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
  * and automated withdrawals via EIP-712 signatures.
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgradeable {
+contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UUPSUpgradeable {
     /// @dev Maximum entries returned by `getHistory` in a single call.
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
 
@@ -123,7 +124,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      */
     function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
         __EIP712SignatureVerifier_init();
-        __EVMSignerAndVerifier_init(_roflAppID, _owner);
+        __EVMSignerAndVerifier_init(_roflAppID);
+        __Ownable_init(_owner);
         nextLockId = 1;
     }
 
@@ -1006,10 +1008,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, UUPSUpgrad
      * an existing token's configuration. The token ID is automatically
      * computed from the provided token information.
      *
-     * @dev Only callable by the contract owner to prevent unauthorized token configuration.
+     * @dev Gated by onlyROFL so only an authenticated ROFL transaction can update it.
      * @param info The complete token information including type, data, and metadata
      */
-    function setTokenInfo(TokenInfo calldata info) external onlyOwner {
+    function setTokenInfo(TokenInfo calldata info) external onlyROFL {
         bytes32 tokenId = getTokenId(info);
 
         // Track token for enumeration (check array to avoid duplicates)

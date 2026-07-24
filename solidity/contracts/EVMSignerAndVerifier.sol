@@ -26,9 +26,8 @@ import {
 } from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
-abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
+abstract contract EVMSignerAndVerifier is Initializable {
     address public evmAddress;
     bytes32 private secretKey;
     address public gasTankAddress;
@@ -63,7 +62,7 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     event RoflSignerUpdated(address indexed newSigner);
 
     modifier onlyROFL() {
-        Subcall.roflEnsureAuthorizedOrigin(roflAppID);
+        _checkRoflAppId();
         _;
     }
 
@@ -84,14 +83,8 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
     /**
      * @notice Initializes the EVMSignerAndVerifier contract.
      * @param _roflAppID The ROFL app identifier (stable across redeployments)
-     * @param _owner The address that will own this contract
      */
-    function __EVMSignerAndVerifier_init(
-        bytes21 _roflAppID,
-        address _owner
-    ) internal onlyInitializing {
-        if (_owner == address(0)) revert InvalidAddress();
-        __Ownable_init(_owner);
+    function __EVMSignerAndVerifier_init(bytes21 _roflAppID) internal onlyInitializing {
         (evmAddress, secretKey) = _generateKeypair();
         (gasTankAddress, gasTankSecret) = _generateKeypair();
         roflAppID = _roflAppID;
@@ -140,17 +133,21 @@ abstract contract EVMSignerAndVerifier is Initializable, OwnableUpgradeable {
         }
     }
 
+    function _checkRoflAppId() internal view virtual {
+        Subcall.roflEnsureAuthorizedOrigin(roflAppID);
+    }
+
     /**
      * @notice Sets the gas price for a specific EVM chain ID.
      *
      * @dev This function allows updating the gas price used in transaction generation.
-     *      Only callable by the contract owner to prevent unauthorized manipulation.
+     *      Gated by onlyROFL so only an authenticated ROFL transaction can update it.
      *      Gas price must be greater than 0 to prevent transaction failures.
      *
      * @param chainId The EVM chain ID to set the gas price for.
      * @param gasPrice The gas price in wei to set for the specified chain ID.
      */
-    function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyOwner {
+    function setGasPrice(uint256 chainId, uint256 gasPrice) public onlyROFL {
         if (gasPrice == 0) revert InvalidGasPrice();
         gasPrices[chainId] = gasPrice;
         emit GasPriceSet(chainId, gasPrice);

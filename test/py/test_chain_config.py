@@ -7,6 +7,8 @@ from src.config import (
     NATIVE_TOKEN_DECIMALS,
     NATIVE_TOKEN_NAMES,
     NATIVE_TOKEN_SYMBOLS,
+    _build_gas_prices,
+    _build_token_infos,
 )
 from src.config.chain_config import (
     MIN_DEPOSIT_ERC20_WEI,
@@ -88,3 +90,94 @@ def test_gas_funding_not_below_min_deposit_rejected():
             gas_funding_amount_wei=1_000_000,
             min_deposit_native_wei=1_000_000,
         )
+
+
+def test_build_gas_prices_wei_defaults_to_empty(monkeypatch):
+    monkeypatch.delenv("ACCOUNTING_GAS_PRICE", raising=False)
+
+    assert _build_gas_prices() == {}
+
+
+def test_build_gas_prices_wei_parses_json_mapping(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_GAS_PRICE", '{"84532": 1000000000, "11155111": 20000000000}')
+
+    assert _build_gas_prices() == {84532: 1_000_000_000, 11155111: 20_000_000_000}
+
+
+def test_build_gas_prices_wei_rejects_invalid_json(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_GAS_PRICE", "{not valid json")
+
+    with pytest.raises(ValueError, match="Invalid ACCOUNTING_GAS_PRICE JSON"):
+        _build_gas_prices()
+
+
+def test_build_gas_prices_wei_rejects_non_object(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_GAS_PRICE", "[1, 2, 3]")
+
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        _build_gas_prices()
+
+
+USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+
+def test_build_token_infos_defaults_to_empty(monkeypatch):
+    monkeypatch.delenv("ACCOUNTING_TOKEN_INFO", raising=False)
+
+    assert _build_token_infos() == []
+
+
+def test_build_token_infos_parses_native_and_erc20(monkeypatch):
+    monkeypatch.setenv(
+        "ACCOUNTING_TOKEN_INFO",
+        f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}"}}]',
+    )
+
+    assert _build_token_infos() == [
+        {"chain_id": 84532, "token_address": None},
+        {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA},
+    ]
+
+
+def test_build_token_infos_rejects_invalid_json(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", "{not valid json")
+
+    with pytest.raises(ValueError, match="Invalid ACCOUNTING_TOKEN_INFO JSON"):
+        _build_token_infos()
+
+
+def test_build_token_infos_rejects_non_array(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", '{"chain_id": 84532}')
+
+    with pytest.raises(ValueError, match="must be a JSON array"):
+        _build_token_infos()
+
+
+def test_build_token_infos_rejects_non_object_entry(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", "[84532]")
+
+    with pytest.raises(ValueError, match="entry 0 must be a JSON object"):
+        _build_token_infos()
+
+
+def test_build_token_infos_rejects_missing_chain_id(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", '[{"token_address": "%s"}]' % USDC_BASE_SEPOLIA)
+
+    with pytest.raises(ValueError, match="entry 0 missing chain_id"):
+        _build_token_infos()
+
+
+def test_build_token_infos_rejects_non_integer_chain_id(monkeypatch):
+    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", '[{"chain_id": "not-a-number"}]')
+
+    with pytest.raises(ValueError, match="entry 0 chain_id must be an integer"):
+        _build_token_infos()
+
+
+def test_build_token_infos_rejects_invalid_token_address(monkeypatch):
+    monkeypatch.setenv(
+        "ACCOUNTING_TOKEN_INFO", '[{"chain_id": 84532, "token_address": "not-an-address"}]'
+    )
+
+    with pytest.raises(ValueError, match="entry 0 token_address is not a valid address"):
+        _build_token_infos()

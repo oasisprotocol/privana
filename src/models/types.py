@@ -1,7 +1,7 @@
 """Type definitions for the Accounting Module API."""
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 @dataclass
@@ -19,6 +19,8 @@ class Settings:
     sapphire_rpc_url: str
     accounting_gas_limit: int
     chain_rpc_urls: Dict[int, str]
+    gas_prices_wei: Dict[int, int]
+    token_infos: List[Dict[str, Any]]
     withdrawal_poll_interval: int
     withdrawal_resolution_timeout: int
     min_withdrawal_gas_balance: int
