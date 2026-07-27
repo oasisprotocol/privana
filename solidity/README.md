@@ -246,7 +246,7 @@ User-driven escape hatch from a per-user deposit address, with no ROFL involveme
 | Task | Purpose |
 |------|---------|
 | `deploy` | Deploy Accounting + SIWE auth |
-| `deploy-siwe-auth` | Deploy `AccountingSiweAuth` standalone |
+| `deploy-siwe-auth` | Deploy `SiweAuth.sol` standalone |
 | `force-import` | Import an existing proxy into hardhat-upgrades |
 | `upgrade` | UUPS upgrade Accounting implementation |
 | `getBalance` | Read user balance |
@@ -291,7 +291,7 @@ Run `npx hardhat <task> --help` for parameter details.
 
 - **Trust anchor for deposits:** ROFL TEE attestation. `creditDeposit` is gated by `roflEnsureAuthorizedOrigin(roflAppID)` — no on-chain transaction proof is verified
 - **Confidential signing:** Sapphire's `EIP155Signer` + `SIGN_DIGEST` precompile keeps the contract-held EVM private key inside the secure environment; signed transactions are returned only to authorized callers
-- **EIP-712:** All user-authored balance operations require typed-data signatures, validated by `EIP712SignatureVerifier`
+- **EIP-712:** All user-authored balance operations require typed-data signatures, validated by `EIP712Verifier.sol`
 - **Signed view-call auth:** `onlyROFLQuery` matches `msg.sender` against the ROFL-published `roflSignerAddress`. `roflEnsureAuthorizedOrigin` is unavailable inside `eth_call`, so signed-query reads use this alternative gate
 - **1-block delays** on `resolveWithdrawal` and `executeEmergencyWithdraw` mitigate same-block read-then-act simulation attacks
 
@@ -313,7 +313,7 @@ contracts/
 
 test/
 ├── Accounting.E2E.ts           # End-to-end integration test
-├── EVMSignerAndVerifier.ts     # EVM signing tests
+├── EVMSignerVerifier.ts     # EVM signing tests
 ├── AuthTokenDecryption.ts      # SIWE auth-token tests
 ├── RoflAppId.ts                # ROFL app ID parsing tests
 └── utils.ts                    # Test utilities

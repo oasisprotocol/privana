@@ -18,7 +18,7 @@
         "@nomicfoundation/hardhat-ignition-ethers": "^0.15.1",
         "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
         "@nomicfoundation/hardhat-toolbox": "^4.0.0",
-        "@oasisprotocol/sapphire-contracts": "0.2.16",
+        "@oasisprotocol/sapphire-contracts": "0.2.17",
         "@oasisprotocol/sapphire-hardhat": "^2.22.3",
         "@oasisprotocol/sapphire-paratime": "^2.3.0",
         "@openzeppelin/hardhat-upgrades": "^3.0.0",
@@ -287,7 +287,7 @@
 
     "@oasisprotocol/deoxysii": ["@oasisprotocol/deoxysii@0.0.6", "", {}, "sha512-TI51bIpChfsla9aRbjip6zvTbz6rpsqKgM7MqJvSfeFF6G5xLXQcbSC9u/1hOnOOazd7HaqA9NvaXQdeKCb3yw=="],
 
-    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.16", "", { "dependencies": { "@openzeppelin/contracts": "^5.0.2" } }, "sha512-5Ii4IJEi6iVqNPGLiCrB1ZZWYfDmBicUbu7Wg04/t6Z840Q9H3KpRwh20k3EHparC39DHKwx6i8+g7rGzR5DWA=="],
+    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.17", "", { "dependencies": { "@openzeppelin/contracts": "5.3.0", "@openzeppelin/contracts-upgradeable": "5.3.0" } }, "sha512-5R7cXBf1zzj6e8DGCUXyz8nx2+Jfb4yarQ4fMnWhULYpm6NlxCvxX4W8oOABy1A4GNXR39+sP1AA3rBhGNaFrw=="],
 
     "@oasisprotocol/sapphire-hardhat": ["@oasisprotocol/sapphire-hardhat@2.22.3", "", { "dependencies": { "@oasisprotocol/sapphire-paratime": "^2.3.0" }, "peerDependencies": { "hardhat": "2.x" } }, "sha512-9GqmHx9XC2mMSuejFjoS6PnRH2zPfWmbA9N/LBBd0uGkzVxVkMquqqhz5WDq0qpzJqoKHVn5PhM5gG8We3DWWQ=="],
 
@@ -1522,6 +1522,10 @@
     "@nomicfoundation/ignition-core/cbor": ["cbor@9.0.2", "", { "dependencies": { "nofilter": "^3.1.0" } }, "sha512-JPypkxsB10s9QOWwa6zwPzqE1Md3vqpPc+cai4sAecuCsRyAtAl/pMyhPlMbT/xtPnm2dznJZYRLui57qiRhaQ=="],
 
     "@nomicfoundation/ignition-core/lodash": ["lodash@4.17.21", "", {}, "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="],
+
+    "@oasisprotocol/sapphire-contracts/@openzeppelin/contracts": ["@openzeppelin/contracts@5.3.0", "", {}, "sha512-zj/KGoW7zxWUE8qOI++rUM18v+VeLTTzKs/DJFkSzHpQFPD/jKKF0TrMxBfGLl3kpdELCNccvB3zmofSzm4nlA=="],
+
+    "@oasisprotocol/sapphire-contracts/@openzeppelin/contracts-upgradeable": ["@openzeppelin/contracts-upgradeable@5.3.0", "", { "peerDependencies": { "@openzeppelin/contracts": "5.3.0" } }, "sha512-yVzSSyTMWO6rapGI5tuqkcLpcGGXA0UA1vScyV5EhE5yw8By3Ewex9rDUw8lfVw0iTkvR/egjfcW5vpk03lqZg=="],
 
     "@openzeppelin/upgrades-core/minimatch": ["minimatch@9.0.9", "", { "dependencies": { "brace-expansion": "^2.0.2" } }, "sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg=="],
 

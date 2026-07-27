@@ -5,6 +5,8 @@ pragma solidity ^0.8.20;
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
  * @title EIP712SignatureVerifier
@@ -24,14 +26,67 @@ import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/crypt
  * The contract prevents signature replay attacks via per-operation nonces and ensures
  * that only the rightful user can authorize operations on their funds.
  */
-abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
+contract EIP712Verifier is OwnableUpgradeable, EIP712Upgradeable, UUPSUpgradeable {
+    /// @notice Contract version, bumped on each upgrade for tracking/verification.
+    string public constant VERSION = "1.0.0";
+
+    error NotAuthorized();
+    error UpgradeCallDataNotAllowed();
+    error InvalidAccounting();
+
+    event AccountingUpdated(address indexed newAccounting);
+
+    /// @notice Gate for functions called by the whitelisted Accounting contract.
+    modifier onlyAccounting() {
+        if (msg.sender != accounting) revert NotAuthorized();
+        _;
+    }
+
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice Initializes the EIP-712 domain separator for typed data signatures.
-     * @dev This replaces the constructor for upgradeable contracts.
      */
-    function __EIP712SignatureVerifier_init() internal onlyInitializing {
+    function initialize(address inAccounting, address owner) external virtual initializer {
         __EIP712_init("AccountingModule", "1");
+        __Ownable_init(owner);
+        accounting = inAccounting;
     }
+
+    /**
+     * @notice Authorizes an upgrade to a new implementation.
+     * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
+     * @param newImplementation Address of the new implementation contract
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /**
+     * @dev Overridden to prevent the simulation attack by contract owner.
+     * @param newImplementation Address of the new implementation contract
+     * @param data Must be empty so no upgrade migration hook can extract sensitive data in simulated call; passing call data reverts.
+     */
+    function upgradeToAndCall(
+        address newImplementation,
+        bytes memory data
+    ) public payable override onlyProxy {
+        if (data.length != 0) revert UpgradeCallDataNotAllowed();
+        super.upgradeToAndCall(newImplementation, data);
+    }
+
+    /// @notice Updates the Accounting contract authorized to call the verifier functions.
+    /// @dev Owner-gated. The wiring is circular at deploy time (Accounting needs the verifier
+    ///      address and vice versa), so this setter lets the owner point the verifier at the
+    ///      real Accounting proxy after both are deployed.
+    /// @param newAccounting The address of the Accounting contract.
+    function setAccounting(address newAccounting) external onlyOwner {
+        if (newAccounting == address(0)) revert InvalidAccounting();
+        accounting = newAccounting;
+        emit AccountingUpdated(newAccounting);
+    }
+
+    address public accounting;
 
     /// @notice Mapping to track withdrawal nonces per user for replay protection
     mapping(address user => uint256 nonce) public withdrawalNonces;
@@ -106,7 +161,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) internal returns (address userAddress) {
+    ) external onlyAccounting returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(WITHDRAW_TYPEHASH, tokenId, amount, nonce)
         );
@@ -142,7 +197,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 expiry,
         uint256 nonce,
         bytes calldata signature
-    ) internal returns (address userAddress) {
+    ) external onlyAccounting returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(
                 LOCK_TYPEHASH,
@@ -183,7 +238,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) internal returns (address userAddress) {
+    ) external onlyAccounting returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(
                 TRANSFER_TYPEHASH,
@@ -226,7 +281,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) internal {
+    ) external onlyAccounting {
         if (nonce != transferLockedNonces[serviceAddress]) {
             revert InvalidNonce();
         }
@@ -259,7 +314,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
-    ) internal {
+    ) external onlyAccounting {
         if (nonce != withdrawFromLockNonces[serviceAddress]) {
             revert InvalidNonce();
         }
@@ -300,7 +355,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 newExpiry,
         uint256 nonce,
         bytes calldata signature
-    ) internal returns (address userAddress) {
+    ) external onlyAccounting returns (address userAddress) {
         bytes32 structHash = keccak256(
             abi.encode(
                 MODIFY_LOCK_TYPEHASH,
@@ -326,5 +381,5 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[44] private __gap;
+    uint256[40] private __gap;
 }

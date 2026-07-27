@@ -193,7 +193,7 @@ Key file: `services/token_info_bootstrap.py`.
 |------|-------|-----------|
 | Sweep records | `/data/sweep-engine/sweep_<deposit_id>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
 | JWT signing key | Derived in-memory from ROFL TEE seed at startup | Re-derived on each start; deterministic per ROFL app. |
-| AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
+| AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `SiweAuth.sol` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
 | Withdrawal high-water marks | In-memory only (`WithdrawalProcessor._chain_high_water_mark`) | Rebuilt on restart via the catch-up pass. |
 
 ## Configuration
