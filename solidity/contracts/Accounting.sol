@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {EVMSignerAndVerifier} from "./EVMSignerAndVerifier.sol";
-import {EIP712SignatureVerifier} from "./EIP712SignatureVerifier.sol";
+import {ROFLableUpgradeable} from "@oasisprotocol/sapphire-contracts/contracts/ROFLableUpgradeable.sol";
+
+import {EVMSignerVerifier} from "./EVMSignerVerifier.sol";
+import {EIP712Verifier} from "./EIP712Verifier.sol";
 import {
     ChainType,
     FundLock,
@@ -13,7 +15,7 @@ import {
     UnsupportedTokenType,
     UserInfo
 } from "./Types.sol";
-import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
+import {ISiweAuth} from "./interfaces/ISiweAuth.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
@@ -25,12 +27,17 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
  * and automated withdrawals via EIP-712 signatures.
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UUPSUpgradeable {
+contract Accounting is OwnableUpgradeable, ROFLableUpgradeable, UUPSUpgradeable {
+    /// @notice Contract version, bumped on each upgrade for tracking/verification.
+    string public constant VERSION = "1.0.0";
+
     /// @dev Maximum entries returned by `getHistory` in a single call.
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
 
-    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
-    IAccountingSiweAuth public immutable siweAuth;
+    ISiweAuth public siweAuth;
+    EIP712Verifier public eip712Verifier;
+    EVMSignerVerifier public evmSignerVerifier;
+
     /// @dev internal (not private) so MockAccounting test helper can set balances directly.
     mapping(address user => mapping(bytes32 tokenId => uint256 balance))
         internal balances;
@@ -98,6 +105,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     error Unauthorized();
     error DepositAlreadyProcessed();
     error InvalidSiweAuth();
+    error InvalidEip712Verifier();
+    error InvalidEvmSignerVerifier();
+    error UpgradeCallDataNotAllowed();
 
     struct WithdrawalRequest {
         address userAddress;
@@ -110,33 +120,30 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
-    constructor(address siweAuthAddress) {
+    constructor() {
         _disableInitializers();
-        if (siweAuthAddress == address(0)) revert InvalidSiweAuth();
-        siweAuth = IAccountingSiweAuth(siweAuthAddress);
-    }
-
-    /**
-     * @notice Internal initializer for the Accounting contract.
-     * @param _roflAppID The ROFL app identifier
-     * @param _owner Address that will own this contract
-     */
-    function __Accounting_init(bytes21 _roflAppID, address _owner) internal onlyInitializing {
-        __EIP712SignatureVerifier_init();
-        __EVMSignerAndVerifier_init(_roflAppID);
-        __Ownable_init(_owner);
-        nextLockId = 1;
     }
 
     /**
      * @notice Initializes the Accounting contract.
      * @dev Replaces the constructor for upgradeable contracts.
-     * @param _roflAppID The ROFL app identifier (stable across redeployments)
-     * @param _owner Address that will own this contract
+     * @param roflAppId The ROFL app identifier (stable across redeployments)
+     * @param owner Address that will own this contract
      */
-    function initialize(bytes21 _roflAppID, address _owner) external virtual initializer {
-        __Accounting_init(_roflAppID, _owner);
+    function initialize(address siweAuthAddr, address eip712VerifierAddr, address evmSignerVerifierAddr, bytes21 roflAppId, address owner) external virtual initializer {
+        __ROFLable_init(roflAppId);
+        __Ownable_init(owner);
+
+        if (siweAuthAddr == address(0)) revert InvalidSiweAuth();
+        siweAuth = ISiweAuth(siweAuthAddr);
+
+        if (eip712VerifierAddr == address(0)) revert InvalidEip712Verifier();
+        eip712Verifier = EIP712Verifier(eip712VerifierAddr);
+
+        if (evmSignerVerifierAddr == address(0)) revert InvalidEvmSignerVerifier();
+        evmSignerVerifier = EVMSignerVerifier(evmSignerVerifierAddr);
+
+        nextLockId = 1;
     }
 
     /**
@@ -145,6 +152,19 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
      * @param newImplementation Address of the new implementation contract
      */
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /**
+     * @dev Overridden to prevent the simulation attack by contract owner.
+     * @param newImplementation Address of the new implementation contract
+     * @param data Must be empty so no upgrade migration hook can extract sensitive data in simulated call; passing call data reverts.
+     */
+    function upgradeToAndCall(
+        address newImplementation,
+        bytes memory data
+    ) public payable override onlyProxy {
+        if (data.length != 0) revert UpgradeCallDataNotAllowed();
+        super.upgradeToAndCall(newImplementation, data);
+    }
 
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
@@ -208,7 +228,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         bytes calldata siweToken
     ) external view returns (address depositAddr) {
         address beneficiary = _authSender(siweToken);
-        (depositAddr, ) = _deriveDepositKeypair(beneficiary, chainType, version);
+        (depositAddr, ) = evmSignerVerifier.deriveDepositKeypair(beneficiary, chainType, version);
     }
 
     /**
@@ -323,8 +343,8 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         // Dispatch on tokenType; the else-revert is the single exhaustiveness guard.
         // When a non-EVM TokenType is added, add a branch here with its ChainType.
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            uint256 chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            signedTx = generateDepositAddressTransfer(
+            uint256 chainId = evmSignerVerifier.decodeEVMNativeTokenData(tInfo.data);
+            signedTx = evmSignerVerifier.generateDepositAddressTransfer(
                 beneficiary,
                 ChainType.EVM,
                 version,
@@ -335,9 +355,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
                 gasPrice
             );
         } else if (tInfo.tokenType == TokenType.ERC20) {
-            (uint256 chainId, address tokenAddress) = EVMSignerAndVerifier
+            (uint256 chainId, address tokenAddress) = evmSignerVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
-            signedTx = generateDepositAddressERC20Transfer(
+            signedTx = evmSignerVerifier.generateDepositAddressERC20Transfer(
                 beneficiary,
                 ChainType.EVM,
                 version,
@@ -398,7 +418,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         if (expiry <= block.timestamp) revert InvalidExpiry();
         if (amount == 0) revert InvalidAmount();
 
-        address userAddress = EIP712SignatureVerifier.verifyLockSignature(
+        address userAddress = eip712Verifier.verifyLockSignature(
             serviceAddress,
             tokenId,
             amount,
@@ -461,17 +481,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         uint256 chainId;
 
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
-            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+            chainId = evmSignerVerifier.decodeEVMNativeTokenData(tInfo.data);
+            if (evmSignerVerifier.gasPrices(chainId) == 0) revert EVMSignerVerifier.GasPriceNotSet(chainId);
 
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+            txIdentifier = abi.encode(evmSignerVerifier.getEVMNonceAndIncrement(chainId));
         } else if (tInfo.tokenType == TokenType.ERC20) {
-            (chainId, ) = EVMSignerAndVerifier.decodeEVMErc20TokenData(
+            (chainId, ) = evmSignerVerifier.decodeEVMErc20TokenData(
                 tInfo.data
             );
-            if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
+            if (evmSignerVerifier.gasPrices(chainId) == 0) revert EVMSignerVerifier.GasPriceNotSet(chainId);
 
-            txIdentifier = abi.encode(getEVMNonceAndIncrement(chainId));
+            txIdentifier = abi.encode(evmSignerVerifier.getEVMNonceAndIncrement(chainId));
         } else {
             revert UnsupportedTokenType();
         }
@@ -508,7 +528,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         uint256 nonce,
         bytes calldata signature
     ) public {
-        address userAddress = EIP712SignatureVerifier.verifyModifyLockSignature(
+        address userAddress = eip712Verifier.verifyModifyLockSignature(
             lockId,
             amount,
             newExpiry,
@@ -688,7 +708,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
 
-        EIP712SignatureVerifier.verifyTransferLockedSignature(
+        eip712Verifier.verifyTransferLockedSignature(
             lock.serviceId,
             userAddress,
             toAddress,
@@ -756,7 +776,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         uint256 lockIndex = _findLockIndex(locks, lockId);
         FundLock storage lock = locks[lockIndex];
 
-        EIP712SignatureVerifier.verifyWithdrawFromLockSignature(
+        eip712Verifier.verifyWithdrawFromLockSignature(
             lock.serviceId,
             userAddress,
             toAddress,
@@ -822,7 +842,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        address userAddress = EIP712SignatureVerifier.verifyTransferSignature(
+        address userAddress = eip712Verifier.verifyTransferSignature(
             toAddress,
             tokenId,
             amount,
@@ -880,7 +900,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     ) public {
         if (amount == 0) revert InvalidAmount();
 
-        address userAddress = EIP712SignatureVerifier.verifyWithdrawSignature(
+        address userAddress = eip712Verifier.verifyWithdrawSignature(
             tokenId,
             amount,
             nonce,
@@ -944,9 +964,9 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         uint256 chainId;
 
         if (tInfo.tokenType == TokenType.NativeEVM) {
-            chainId = EVMSignerAndVerifier.decodeEVMNativeTokenData(tInfo.data);
+            chainId = evmSignerVerifier.decodeEVMNativeTokenData(tInfo.data);
             uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
-            signedTx = EVMSignerAndVerifier.generateNativeTransfer(
+            signedTx = evmSignerVerifier.generateNativeTransfer(
                 chainId,
                 toAddress,
                 amount,
@@ -954,10 +974,10 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
             );
         } else if (tInfo.tokenType == TokenType.ERC20) {
             address tokenAddress;
-            (chainId, tokenAddress) = EVMSignerAndVerifier
+            (chainId, tokenAddress) = evmSignerVerifier
                 .decodeEVMErc20TokenData(tInfo.data);
             uint64 nonce = abi.decode(withdrawalRequest.txIdentifier, (uint64));
-            signedTx = EVMSignerAndVerifier.generateERC20Transfer(
+            signedTx = evmSignerVerifier.generateERC20Transfer(
                 chainId,
                 toAddress,
                 tokenAddress,

@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {SignatureRSV, A13e} from "@oasisprotocol/sapphire-contracts/contracts/auth/A13e.sol";
 import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
 import {Subcall} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
-import {IAccountingSiweAuth} from "../interfaces/IAccountingSiweAuth.sol";
+import {ISiweAuth} from "../interfaces/ISiweAuth.sol";
 
 /// @title AuthToken structure for SIWE-based authentication
 struct AuthToken {
@@ -29,7 +29,7 @@ struct AuthToken {
  *    stored inside this contract (only whitelisted ROFL is allowed).
  * 2. Domain check is removed to allow cross-domain logins.
  */
-contract AccountingSiweAuth is A13e, IAccountingSiweAuth {
+contract SiweAuth is A13e, ISiweAuth {
     bytes32 private _authTokenEncKey;
     bytes21 public roflAppId;
 

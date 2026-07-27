@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import {AuthToken} from "../auth/AccountingSiweAuth.sol";
+import {AuthToken} from "../auth/SiweAuth.sol";
 
 /**
  * @title MockAuthTokenDecrypt

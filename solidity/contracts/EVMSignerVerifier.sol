@@ -5,38 +5,34 @@ pragma solidity ^0.8.20;
 import {ChainType, TokenInfo, EVMKeypair} from "./Types.sol";
 
 import {RLPReader} from "solidity-rlp/contracts/RLPReader.sol";
-import {
-    RLPWriter
-} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.sol";
+import {RLPWriter} from "@oasisprotocol/sapphire-contracts/contracts/RLPWriter.sol";
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {
-    EIP155Signer
-} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
-import {
-    Subcall
-} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
+import {EIP155Signer} from "@oasisprotocol/sapphire-contracts/contracts/EIP155Signer.sol";
+import {Subcall} from "@oasisprotocol/sapphire-contracts/contracts/Subcall.sol";
 
 import {SliceBytes} from "./lib/SliceBytes.sol";
-import {
-    Sapphire
-} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
-import {
-    EthereumUtils
-} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
+import {Sapphire} from "@oasisprotocol/sapphire-contracts/contracts/Sapphire.sol";
+import {ROFLableUpgradeable} from "@oasisprotocol/sapphire-contracts/contracts/ROFLableUpgradeable.sol";
+import {EthereumUtils} from "@oasisprotocol/sapphire-contracts/contracts/EthereumUtils.sol";
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-abstract contract EVMSignerAndVerifier is Initializable {
+abstract contract EVMSignerVerifier is OwnableUpgradeable, ROFLableUpgradeable, UUPSUpgradeable {
+    /// @notice Contract version, bumped on each upgrade for tracking/verification.
+    string public constant VERSION = "1.0.0";
+
     address public evmAddress;
-    bytes32 private secretKey;
+    bytes32 private _secretKey;
     address public gasTankAddress;
-    bytes32 private gasTankSecret;
+    bytes32 private _gasTankSecret;
+    address public accounting;
 
     mapping(uint256 chainId => uint64) public nonces;
     mapping(uint256 chainId => uint256) public gasPrices;
 
-    bytes21 public roflAppID;
     /// @notice Address of the ROFL-derived secp256k1 key used to authenticate signed queries.
     /// @dev Published by the service at startup via setRoflSignerAddress. Enables msg.sender-based
     ///      auth on view functions (roflEnsureAuthorizedOrigin is tx-only and doesn't work in eth_call).
@@ -55,14 +51,17 @@ abstract contract EVMSignerAndVerifier is Initializable {
     error InvalidERC20TokenDataLength();
     error InvalidAddress();
     error UnsupportedChainType();
-    error NotAuthorizedROFL();
+    error NotAuthorized();
     error RoflSignerNotSet();
+    error UpgradeCallDataNotAllowed();
 
     event GasPriceSet(uint256 indexed chainId, uint256 gasPrice);
     event RoflSignerUpdated(address indexed newSigner);
+    event AccountingUpdated(address indexed newAccounting);
 
-    modifier onlyROFL() {
-        _checkRoflAppId();
+    /// @notice Gate for functions called by the whitelisted Accounting contract.
+    modifier onlyAccounting() {
+        if (msg.sender != accounting) revert NotAuthorized();
         _;
     }
 
@@ -71,7 +70,13 @@ abstract contract EVMSignerAndVerifier is Initializable {
     ///      Relies on sapphirepy signed queries setting msg.sender to the ROFL-derived key.
     modifier onlyROFLQuery() {
         if (roflSignerAddress == address(0)) revert RoflSignerNotSet();
-        if (msg.sender != roflSignerAddress) revert NotAuthorizedROFL();
+        if (msg.sender != roflSignerAddress) revert NotAuthorized();
+        _;
+    }
+
+    modifier onlyAccountingOrROFLQuery() {
+        if (roflSignerAddress == address(0)) revert RoflSignerNotSet();
+        if (msg.sender != roflSignerAddress && msg.sender != accounting) revert NotAuthorized();
         _;
     }
 
@@ -80,14 +85,65 @@ abstract contract EVMSignerAndVerifier is Initializable {
     using RLPReader for bytes;
     using SliceBytes for bytes;
 
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice Initializes the EVMSignerAndVerifier contract.
-     * @param _roflAppID The ROFL app identifier (stable across redeployments)
+     * @param inAccounting Accounting contract whitelisted to sign transaction
+     * @param inRoflAppId The ROFL app identifier (stable across redeployments)
+     * @param inOwner The address of the contract owner managing upgrades
      */
-    function __EVMSignerAndVerifier_init(bytes21 _roflAppID) internal onlyInitializing {
-        (evmAddress, secretKey) = _generateKeypair();
-        (gasTankAddress, gasTankSecret) = _generateKeypair();
-        roflAppID = _roflAppID;
+    function initialize(address inAccounting, bytes21 inRoflAppId, address inOwner) external virtual initializer {
+        __EVMSignerAndVerifier_init(inAccounting, inRoflAppId, inOwner);
+    }
+
+    /**
+     * @notice Initializes the EVMSignerAndVerifier contract.
+     * @param inAccounting Accounting contract whitelisted to sign transaction
+     * @param inRoflAppId The ROFL app identifier (stable across redeployments)
+     * @param inOwner The address of the contract owner managing upgrades
+     */
+    function __EVMSignerAndVerifier_init(address inAccounting, bytes21 inRoflAppId, address inOwner) internal onlyInitializing {
+        __ROFLable_init(inRoflAppId);
+        __Ownable_init(inOwner);
+
+        (evmAddress, _secretKey) = _generateKeypair();
+        (gasTankAddress, _gasTankSecret) = _generateKeypair();
+        accounting = inAccounting;
+    }
+
+    /**
+     * @notice Authorizes an upgrade to a new implementation.
+     * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
+     * @param newImplementation Address of the new implementation contract
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /**
+     * @dev Overridden to prevent the simulation attack by contract owner.
+     * @param newImplementation Address of the new implementation contract
+     * @param data Must be empty so no upgrade migration hook can extract sensitive data in simulated call; passing call data reverts.
+     */
+    function upgradeToAndCall(
+        address newImplementation,
+        bytes memory data
+    ) public payable override onlyProxy {
+        if (data.length != 0) revert UpgradeCallDataNotAllowed();
+        super.upgradeToAndCall(newImplementation, data);
+    }
+
+    /// @notice Updates the Accounting contract authorized to call the signer/verifier functions.
+    /// @dev Owner-gated. The wiring is circular at deploy time (Accounting needs the verifier
+    ///      address and vice versa), so this setter lets the owner point the verifier at the
+    ///      real Accounting proxy after both are deployed. Whoever is set as `accounting` can
+    ///      request signed transfers from the pooled hot wallet, so restrict this to a trusted owner.
+    /// @param newAccounting The address of the Accounting contract.
+    function setAccounting(address newAccounting) external onlyOwner {
+        if (newAccounting == address(0)) revert InvalidAddress();
+        accounting = newAccounting;
+        emit AccountingUpdated(newAccounting);
     }
 
     /**
@@ -111,13 +167,13 @@ abstract contract EVMSignerAndVerifier is Initializable {
      * @return depositAddr The derived deposit address
      * @return depositSecret The derived deposit private key
      */
-    function _deriveDepositKeypair(
+    function deriveDepositKeypair(
         address beneficiary,
         ChainType chainType,
         uint256 version
-    ) internal view virtual returns (address depositAddr, bytes32 depositSecret) {
+    ) public view onlyAccountingOrROFLQuery returns (address depositAddr, bytes32 depositSecret) {
         bytes32 seed = keccak256(
-            abi.encode(secretKey, beneficiary, chainType, version)
+            abi.encode(_secretKey, beneficiary, chainType, version)
         );
 
         // v1: only EVM family uses Secp256k1. When a non-EVM ChainType variant is
@@ -131,10 +187,6 @@ abstract contract EVMSignerAndVerifier is Initializable {
         assembly {
             depositSecret := mload(add(sk, 32))
         }
-    }
-
-    function _checkRoflAppId() internal view virtual {
-        Subcall.roflEnsureAuthorizedOrigin(roflAppID);
     }
 
     /**
@@ -186,13 +238,13 @@ abstract contract EVMSignerAndVerifier is Initializable {
         address userAddress,
         uint256 amount,
         uint64 nonce
-    ) internal view returns (bytes memory output) {
+    ) public onlyAccounting view returns (bytes memory output) {
         if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
 
         return
             EIP155Signer.sign(
                 evmAddress,
-                secretKey,
+                _secretKey,
                 EIP155Signer.EthTx({
                     nonce: nonce,
                     gasPrice: gasPrices[chainId],
@@ -235,7 +287,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
         address tokenAddress,
         uint256 amount,
         uint64 nonce
-    ) internal view returns (bytes memory output) {
+    ) public onlyAccounting view returns (bytes memory output) {
         if (gasPrices[chainId] == 0) revert GasPriceNotSet(chainId);
 
         bytes memory data = abi.encodeWithSignature(
@@ -246,7 +298,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
         return
             EIP155Signer.sign(
                 evmAddress,
-                secretKey,
+                _secretKey,
                 EIP155Signer.EthTx({
                     nonce: nonce,
                     gasPrice: gasPrices[chainId],
@@ -276,7 +328,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
         uint64 sourceChainNonce,
         uint256 gasPrice
     ) external view onlyROFLQuery returns (bytes memory signedTx) {
-        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+        (address depositAddr, bytes32 depositSecret) = deriveDepositKeypair(
             beneficiary, chainType, version
         );
         signedTx = EIP155Signer.sign(
@@ -308,7 +360,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
         uint64 sourceChainNonce,
         uint256 gasPrice
     ) external view onlyROFLQuery returns (bytes memory signedTx) {
-        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+        (address depositAddr, bytes32 depositSecret) = deriveDepositKeypair(
             beneficiary, chainType, version
         );
         bytes memory data = abi.encodeWithSignature(
@@ -344,8 +396,8 @@ abstract contract EVMSignerAndVerifier is Initializable {
         uint256 amount,
         uint64 sourceChainNonce,
         uint256 gasPrice
-    ) internal view returns (bytes memory signedTx) {
-        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+    ) external onlyAccounting view returns (bytes memory signedTx) {
+        (address depositAddr, bytes32 depositSecret) = deriveDepositKeypair(
             beneficiary, chainType, version
         );
         signedTx = EIP155Signer.sign(
@@ -378,8 +430,8 @@ abstract contract EVMSignerAndVerifier is Initializable {
         uint256 amount,
         uint64 sourceChainNonce,
         uint256 gasPrice
-    ) internal view returns (bytes memory signedTx) {
-        (address depositAddr, bytes32 depositSecret) = _deriveDepositKeypair(
+    ) external onlyAccounting view returns (bytes memory signedTx) {
+        (address depositAddr, bytes32 depositSecret) = deriveDepositKeypair(
             beneficiary, chainType, version
         );
         bytes memory data = abi.encodeWithSignature(
@@ -415,7 +467,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
     ) external view onlyROFLQuery returns (bytes memory signedTx) {
         signedTx = EIP155Signer.sign(
             gasTankAddress,
-            gasTankSecret,
+            _gasTankSecret,
             EIP155Signer.EthTx({
                 nonce: gasTankNonce,
                 gasPrice: gasPrice,
@@ -552,7 +604,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
 
     function getEVMNonceAndIncrement(
         uint256 chainId
-    ) internal returns (uint64 nonce) {
+    ) external onlyAccounting returns (uint64 nonce) {
         return uint64(nonces[chainId]++);
     }
 
@@ -560,5 +612,5 @@ abstract contract EVMSignerAndVerifier is Initializable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[42] private __gap;
+    uint256[40] private __gap;
 }

@@ -15,13 +15,6 @@ contract MockAccounting is Accounting {
     address private constant TEST_ADDRESS = 0xe6F321Fb3D912Db48DE460560B8bB99B57AeAcA2;
     bytes32 private constant TEST_SECRET = bytes32(0x9147e5178b1ee427d704dcdb699f1adf9c8a3b58480a6118635a3486ad3a35ce);
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor(address siweAuthAddress) Accounting(siweAuthAddress) {}
-
-    function _generateKeypair() internal pure override returns (address, bytes32) {
-        return (TEST_ADDRESS, TEST_SECRET);
-    }
-
     /**
      * @notice Test helper to read user balance directly (bypassing privacy checks)
      * @dev Only for testing purposes - NOT for production use
@@ -43,7 +36,7 @@ contract MockAccounting is Accounting {
      * @dev Only for testing purposes - NOT for production use
      */
     function _checkRoflAppId() internal view override {
-        if (roflAppID != bytes21(0)) {
+        if (roflAppId() != bytes21(0)) {
             super._checkRoflAppId();
         }
     }

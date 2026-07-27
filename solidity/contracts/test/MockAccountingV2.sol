@@ -10,9 +10,6 @@ import {MockAccounting} from "./MockAccounting.sol";
 contract MockAccountingV2 is MockAccounting {
     uint256 public newStateVar;
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor(address siweAuthAddress) MockAccounting(siweAuthAddress) {}
-
     function initializeV2(uint256 _newStateVar) external reinitializer(2) {
         newStateVar = _newStateVar;
     }
