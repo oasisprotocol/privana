@@ -179,6 +179,18 @@ npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540
 npx hardhat upgrade --network sapphire --address <accounting-proxy-address> --output-safe accounting-upgrade-safe.json
 ```
 
+### Check status
+
+You can view all public info of the contract by running:
+
+```shell
+# Sapphire Testnet
+npx hardhat show <accounting-proxy-address> --network sapphire-testnet
+
+# Sapphire Mainnet
+npx hardhat show <accounting-proxy-address> --network sapphire
+```
+
 ## Configuration
 
 ### Adding Token Support

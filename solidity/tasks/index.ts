@@ -1,5 +1,5 @@
 import "./deploy";
-import "./verify";
+import "./show";
 import "./tokens";
 import "./sign";
 import "./accounts";
