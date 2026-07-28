@@ -20,6 +20,8 @@ logging.basicConfig(
 
 _settings: Optional[Settings] = None
 
+DEFAULT_ONRAMP_INTENT_SIGNING_KEY_ID = "onramp_intent_signing_key.v1.key"
+
 ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
     84532: "base-sepolia",
     11155111: "eth-sepolia",
@@ -69,14 +71,6 @@ def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
     if not value:
         return ()
     return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
-
-
-def _parse_secret_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
-    """Split a secret key ring without changing key material."""
-
-    if not value:
-        return ()
-    return tuple(piece for piece in value.split(",") if piece)
 
 
 def _get_bool(name: str) -> bool:
@@ -217,9 +211,12 @@ def load_settings(refresh: bool = False) -> Settings:
             trust_x_forwarded_for=_get_bool("TRUST_X_FORWARDED_FOR"),
             moonpay_api_key=os.getenv("MOONPAY_API_KEY"),
             moonpay_secret_key=os.getenv("MOONPAY_SECRET_KEY"),
-            onramp_intent_signing_key=os.getenv("ONRAMP_INTENT_SIGNING_KEY"),
-            onramp_intent_previous_signing_keys=_parse_secret_csv_tuple(
-                os.getenv("ONRAMP_INTENT_PREVIOUS_SIGNING_KEYS")
+            onramp_intent_signing_key_id=os.getenv(
+                "ONRAMP_INTENT_SIGNING_KEY_ID",
+                DEFAULT_ONRAMP_INTENT_SIGNING_KEY_ID,
+            ),
+            onramp_intent_previous_signing_key_ids=_parse_csv_tuple(
+                os.getenv("ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS")
             ),
             moonpay_api_base_url=os.getenv("MOONPAY_API_BASE_URL", "https://api.moonpay.com"),
             moonpay_webhook_secret_key=os.getenv("MOONPAY_WEBHOOK_SECRET_KEY"),

@@ -16,14 +16,20 @@ import binascii
 import hashlib
 import hmac
 import json
+import logging
+import os
 import re
 import secrets
 import time
 from typing import Any
 
+from oasis_rofl_client import KeyKind
 from web3 import Web3
 
+from src.clients.rofl import RoflAppdClient
 from src.config import load_settings
+
+logger = logging.getLogger(__name__)
 
 INTENT_VERSION = 1
 INTENT_PREFIX = "privana_"
@@ -32,11 +38,10 @@ INTENT_PREFIX = "privana_"
 INTENT_MAX_LENGTH = 512
 INTENT_TTL_SECONDS = 24 * 60 * 60
 INTENT_MAX_ASSET_BYTES = 32
-INTENT_MIN_SIGNING_KEY_BYTES = 32
 
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]+\Z")
 _ASSET_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:-]{0,31}\Z")
-_INVALID_SIGNING_KEY_MESSAGE = "On-ramp intent signing key configuration is invalid"
+_RAW_256_HEX_PATTERN = re.compile(r"[0-9a-fA-F]{64}\Z")
 _PAYLOAD_FIELDS = frozenset({"v", "p", "u", "w", "t", "c", "a", "iat", "exp", "n"})
 
 PROVIDER_MOONPAY = "moonpay"
@@ -50,6 +55,81 @@ class OnRampError(ValueError):
 
 class OnRampNotConfiguredError(OnRampError):
     """Raised when no usable on-ramp intent signing key is configured."""
+
+
+class OnRampIntentKeyManager:
+    """Derive and retain the provider-neutral intent key ring."""
+
+    def __init__(self) -> None:
+        self._current_key: bytes | None = None
+        self._verification_keys: tuple[bytes, ...] = ()
+
+    async def initialize(self, use_rofl: bool = True) -> None:
+        """Derive the configured key ring once during application startup."""
+
+        if self._current_key is not None:
+            return
+
+        key_ids = _configured_key_ids()
+        try:
+            if use_rofl and not os.getenv("DISABLE_ROFL_KEYS"):
+                derived_keys = []
+                for key_id in key_ids:
+                    derived_keys.append(await self._derive_rofl_key(key_id))
+                keys = tuple(derived_keys)
+            else:
+                logger.warning("Using publicly derivable local on-ramp intent keys (non-TEE mode)")
+                keys = tuple(_derive_local_key(key_id) for key_id in key_ids)
+        except Exception as exc:
+            raise RuntimeError("Failed to derive on-ramp intent signing keys") from exc
+
+        self._current_key = keys[0]
+        self._verification_keys = keys
+        logger.info("On-ramp intent keys initialized for key IDs: %s", ", ".join(key_ids))
+
+    async def _derive_rofl_key(self, key_id: str) -> bytes:
+        key_hex = await RoflAppdClient()._client.generate_key(key_id, KeyKind.RAW_256)
+        if not isinstance(key_hex, str) or not _RAW_256_HEX_PATTERN.fullmatch(key_hex):
+            raise ValueError("ROFL returned an invalid on-ramp intent key")
+        return bytes.fromhex(key_hex)
+
+    @property
+    def current_key(self) -> bytes:
+        if self._current_key is None:
+            raise RuntimeError("On-ramp intent key manager is not initialized")
+        return self._current_key
+
+    @property
+    def verification_keys(self) -> tuple[bytes, ...]:
+        if not self._verification_keys:
+            raise RuntimeError("On-ramp intent key manager is not initialized")
+        return self._verification_keys
+
+
+_onramp_intent_key_manager_instance: OnRampIntentKeyManager | None = None
+
+
+def get_onramp_intent_key_manager() -> OnRampIntentKeyManager:
+    """Return the process-wide on-ramp intent key manager."""
+
+    global _onramp_intent_key_manager_instance
+    if _onramp_intent_key_manager_instance is None:
+        _onramp_intent_key_manager_instance = OnRampIntentKeyManager()
+    return _onramp_intent_key_manager_instance
+
+
+def _configured_key_ids() -> tuple[str, ...]:
+    settings = load_settings()
+    current = settings.onramp_intent_signing_key_id
+    if not current or current != current.strip():
+        raise RuntimeError("On-ramp intent signing key ID is invalid")
+    return tuple(dict.fromkeys((current, *settings.onramp_intent_previous_signing_key_ids)))
+
+
+def _derive_local_key(key_id: str) -> bytes:
+    """Derive a deterministic non-TEE key for local development and tests."""
+
+    return hashlib.sha256(f"privana:onramp:intent:local:{key_id}".encode()).digest()
 
 
 def create_intent(
@@ -138,52 +218,27 @@ def _encode_intent(payload: dict[str, Any]) -> str:
     return token
 
 
-def _signature(payload_b64: str, key: str) -> bytes:
+def _signature(payload_b64: str, key: bytes) -> bytes:
     message = f"privana:onramp:intent:v{INTENT_VERSION}:{payload_b64}".encode()
-    return hmac.new(key.encode(), message, hashlib.sha256).digest()
+    return hmac.new(key, message, hashlib.sha256).digest()
 
 
-def _signing_key() -> str:
+def _signing_key() -> bytes:
     current, _keys = _key_ring()
-    if not current:
-        raise OnRampNotConfiguredError("On-ramp intents are not configured")
     return current
 
 
-def _verification_keys() -> tuple[str, ...]:
+def _verification_keys() -> tuple[bytes, ...]:
     _current, keys = _key_ring()
-    if not keys:
-        raise OnRampNotConfiguredError("On-ramp intents are not configured")
     return keys
 
 
-def _key_ring() -> tuple[str | None, tuple[str, ...]]:
-    settings = load_settings()
-    current = _validated_signing_key(settings.onramp_intent_signing_key)
-    previous = tuple(
-        _validated_signing_key(key) for key in settings.onramp_intent_previous_signing_keys
-    )
-    candidates = (current, *previous)
-    keys = tuple(
-        key for index, key in enumerate(candidates) if key and key not in candidates[:index]
-    )
-    return current, keys
-
-
-def _validated_signing_key(value: str | None) -> str | None:
-    if value is None or value == "":
-        return None
+def _key_ring() -> tuple[bytes, tuple[bytes, ...]]:
     try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise OnRampNotConfiguredError(_INVALID_SIGNING_KEY_MESSAGE) from exc
-    if (
-        len(encoded) < INTENT_MIN_SIGNING_KEY_BYTES
-        or "," in value
-        or any(character.isspace() for character in value)
-    ):
-        raise OnRampNotConfiguredError(_INVALID_SIGNING_KEY_MESSAGE)
-    return value
+        manager = get_onramp_intent_key_manager()
+        return manager.current_key, manager.verification_keys
+    except RuntimeError as exc:
+        raise OnRampNotConfiguredError("On-ramp intents are not configured") from exc
 
 
 def _json_payload(payload: dict[str, Any]) -> bytes:
@@ -292,14 +347,15 @@ def _b64url_decode(value: str) -> bytes:
 __all__ = [
     "INTENT_MAX_ASSET_BYTES",
     "INTENT_MAX_LENGTH",
-    "INTENT_MIN_SIGNING_KEY_BYTES",
     "INTENT_PREFIX",
     "INTENT_TTL_SECONDS",
     "INTENT_VERSION",
+    "OnRampIntentKeyManager",
     "OnRampError",
     "OnRampNotConfiguredError",
     "PROVIDER_MOONPAY",
     "PROVIDER_TRANSAK",
     "create_intent",
     "decode_intent",
+    "get_onramp_intent_key_manager",
 ]

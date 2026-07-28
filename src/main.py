@@ -20,6 +20,7 @@ from src.config import load_settings
 from src.services.accounting_contract import get_accounting_contract_service
 from src.services.deposit_processor import get_deposit_processor
 from src.services.gas_price_bootstrap import bootstrap_gas_prices
+from src.services.onramp_intent import get_onramp_intent_key_manager
 from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
 from src.services.token_info_bootstrap import bootstrap_token_info
 from src.services.withdrawal_processor import get_withdrawal_processor
@@ -85,6 +86,10 @@ async def lifespan(_app: FastAPI):
     auth_token_key_manager = get_auth_token_key_manager()
     await auth_token_key_manager.initialize()
     logger.info("AuthToken key manager initialized")
+
+    onramp_intent_key_manager = get_onramp_intent_key_manager()
+    await onramp_intent_key_manager.initialize()
+    logger.info("On-ramp intent key manager initialized")
 
     # Sync the encryption key to the contract (skipped when DISABLE_ROFL_KEYS is set).
     # TODO: Remove DISABLE_ROFL_KEYS check when Sapphire localnet e2e tests are available.

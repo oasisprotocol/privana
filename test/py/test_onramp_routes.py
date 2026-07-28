@@ -27,8 +27,10 @@ TOKEN_ID = "0x" + "11" * 32
 TX_HASH = "0x" + "22" * 32
 PRIVATE_READ_TOKEN = b"\x12" * 65
 RESOLVED_PRIVATE_READ_TOKEN = b"\x34" * 65
-INTENT_SIGNING_KEY = "route-intent-signing-key-00000001"
-ROTATED_INTENT_SIGNING_KEY = "route-intent-signing-key-00000002"
+INTENT_SIGNING_KEY = b"route-intent-signing-key-00000001"
+ROTATED_INTENT_SIGNING_KEY = b"route-intent-signing-key-00000002"
+INTENT_SIGNING_KEY_ID = "onramp_intent_signing_key.v1.key"
+ROTATED_INTENT_SIGNING_KEY_ID = "onramp_intent_signing_key.v2.key"
 
 
 class _FakeMoonPayResponse:
@@ -90,8 +92,8 @@ def _set_required_env(monkeypatch, tmp_path) -> None:
         "TRUST_X_FORWARDED_FOR": "false",
         "MOONPAY_API_KEY": "pk_test_key",
         "MOONPAY_SECRET_KEY": "sk_test_key",
-        "ONRAMP_INTENT_SIGNING_KEY": INTENT_SIGNING_KEY,
-        "ONRAMP_INTENT_PREVIOUS_SIGNING_KEYS": "",
+        "ONRAMP_INTENT_SIGNING_KEY_ID": INTENT_SIGNING_KEY_ID,
+        "ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS": "",
         "MOONPAY_API_BASE_URL": "https://api.moonpay.com",
         "MOONPAY_WEBHOOK_SECRET_KEY": "wh_test_key",
         "MOONPAY_ALLOWED_HOSTS": "buy.moonpay.com,buy-sandbox.moonpay.com",
@@ -104,6 +106,18 @@ def _set_required_env(monkeypatch, tmp_path) -> None:
     if rate_limiter._auth_rate_limiter_instance is not None:
         rate_limiter._auth_rate_limiter_instance.close()
     rate_limiter._auth_rate_limiter_instance = None
+    _configure_intent_keys(current=INTENT_SIGNING_KEY)
+
+
+def _configure_intent_keys(
+    *,
+    current: bytes,
+    previous: tuple[bytes, ...] = (),
+) -> None:
+    manager = onramp_intent.OnRampIntentKeyManager()
+    manager._current_key = current
+    manager._verification_keys = tuple(dict.fromkeys((current, *previous)))
+    onramp_intent._onramp_intent_key_manager_instance = manager
 
 
 def _use_fake_moonpay_client(monkeypatch, responses: list[object]) -> type[_FakeMoonPayClient]:
@@ -226,44 +240,40 @@ def test_intent_is_signed_and_sign_url_returns_moonpay_signature(monkeypatch, tm
     ]
 
 
-def test_sign_url_accepts_previous_key_from_environment_after_rotation(
+def test_sign_url_accepts_previous_key_after_rotation(
     monkeypatch,
     tmp_path,
 ) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
     intent = _create_intent(client)
 
-    monkeypatch.setenv("ONRAMP_INTENT_SIGNING_KEY", ROTATED_INTENT_SIGNING_KEY)
-    monkeypatch.setenv("ONRAMP_INTENT_PREVIOUS_SIGNING_KEYS", INTENT_SIGNING_KEY)
-    src.config._settings = None
-
+    _configure_intent_keys(
+        current=ROTATED_INTENT_SIGNING_KEY,
+        previous=(INTENT_SIGNING_KEY,),
+    )
     response = client.post(
         "/v1/accounting/onramp/sign-url",
         json={"url": _moonpay_url(intent["transaction_id"])},
     )
 
     assert response.status_code == 200
-    assert src.config.load_settings().onramp_intent_previous_signing_keys == (INTENT_SIGNING_KEY,)
 
 
-def test_sign_url_rejects_whitespace_changed_previous_key(
+def test_signing_key_id_configuration_strips_previous_ids(
     monkeypatch,
     tmp_path,
 ) -> None:
-    client, _mock_service = _make_client(monkeypatch, tmp_path)
-    intent = _create_intent(client)
-
-    monkeypatch.setenv("ONRAMP_INTENT_SIGNING_KEY", ROTATED_INTENT_SIGNING_KEY)
-    monkeypatch.setenv("ONRAMP_INTENT_PREVIOUS_SIGNING_KEYS", " " + INTENT_SIGNING_KEY)
+    _set_required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS",
+        f" {INTENT_SIGNING_KEY_ID}, ,{ROTATED_INTENT_SIGNING_KEY_ID} ",
+    )
     src.config._settings = None
 
-    response = client.post(
-        "/v1/accounting/onramp/sign-url",
-        json={"url": _moonpay_url(intent["transaction_id"])},
+    assert src.config.load_settings().onramp_intent_previous_signing_key_ids == (
+        INTENT_SIGNING_KEY_ID,
+        ROTATED_INTENT_SIGNING_KEY_ID,
     )
-
-    assert response.status_code == 503
-    assert response.json()["detail"] == ("On-ramp intent signing key configuration is invalid")
 
 
 def test_sign_url_rejects_tampered_or_wrong_currency_intent(monkeypatch, tmp_path) -> None:
@@ -674,7 +684,10 @@ def test_pending_returns_502_when_all_moonpay_lookups_fail(monkeypatch, tmp_path
     mock_fetch_external.assert_awaited_once_with(intent["transaction_id"])
 
 
-def test_pending_returns_503_when_intent_signing_key_is_missing(monkeypatch, tmp_path) -> None:
+def test_pending_returns_503_when_intent_key_manager_is_uninitialized(
+    monkeypatch,
+    tmp_path,
+) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
     intent = _create_intent(client)
     monkeypatch.setattr(
@@ -682,8 +695,7 @@ def test_pending_returns_503_when_intent_signing_key_is_missing(monkeypatch, tmp
         "fetch_moonpay_buy_transactions",
         AsyncMock(return_value=[_moonpay_transaction(intent["transaction_id"])]),
     )
-    monkeypatch.delenv("ONRAMP_INTENT_SIGNING_KEY")
-    src.config._settings = None
+    onramp_intent._onramp_intent_key_manager_instance = onramp_intent.OnRampIntentKeyManager()
 
     response = client.get("/v1/accounting/onramp/pending")
 

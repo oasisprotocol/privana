@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -14,9 +15,11 @@ from src.services import onramp_intent as oi
 USER = "0x" + "11" * 20
 WALLET = "0x" + "22" * 20
 TOKEN_ID = "0x" + "33" * 32
-SIGNING_KEY = "0123456789abcdef0123456789abcdef"
+SIGNING_KEY = b"0123456789abcdef0123456789abcdef"
 ISSUED_AT = 1_781_000_000
 NONCE = "0102030405060708"
+CURRENT_KEY_ID = "onramp_intent_signing_key.v2.key"
+PREVIOUS_KEY_ID = "onramp_intent_signing_key.v1.key"
 
 # This freezes the initial canonical JSON encoding and v1 HMAC domain. Any
 # intentional incompatible change requires a new wire version.
@@ -30,14 +33,13 @@ GOLDEN_TOKEN = (
 def _configure_keys(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    current: str | None = SIGNING_KEY,
-    previous: tuple[str, ...] = (),
+    current: bytes = SIGNING_KEY,
+    previous: tuple[bytes, ...] = (),
 ) -> None:
-    settings = SimpleNamespace(
-        onramp_intent_signing_key=current,
-        onramp_intent_previous_signing_keys=previous,
-    )
-    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    manager = oi.OnRampIntentKeyManager()
+    manager._current_key = current
+    manager._verification_keys = tuple(dict.fromkeys((current, *previous)))
+    monkeypatch.setattr(oi, "_onramp_intent_key_manager_instance", manager)
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +47,7 @@ def _keys(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_keys(monkeypatch)
 
 
-def _signed_raw(payload: bytes, *, key: str = SIGNING_KEY) -> str:
+def _signed_raw(payload: bytes, *, key: bytes = SIGNING_KEY) -> str:
     payload_b64 = oi._b64url_encode(payload)
     signature = oi._signature(payload_b64, key)
     return f"{oi.INTENT_PREFIX}{payload_b64}.{oi._b64url_encode(signature)}"
@@ -154,7 +156,11 @@ def test_moonpay_adapter_rejects_valid_intent_for_another_provider() -> None:
 def test_mint_and_verify_fail_closed_without_any_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _configure_keys(monkeypatch, current=None)
+    monkeypatch.setattr(
+        oi,
+        "_onramp_intent_key_manager_instance",
+        oi.OnRampIntentKeyManager(),
+    )
 
     with pytest.raises(oi.OnRampNotConfiguredError, match="not configured"):
         _create_transak_intent()
@@ -165,8 +171,8 @@ def test_mint_and_verify_fail_closed_without_any_key(
 def test_rotation_verifies_previous_keys_but_mints_only_with_current_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old_key = "old_provider_neutral_signing_key_01"
-    new_key = "new_provider_neutral_signing_key_02"
+    old_key = b"old_provider_neutral_signing_key_01"
+    new_key = b"new_provider_neutral_signing_key_02"
     _configure_keys(monkeypatch, current=old_key)
     old_token, old_payload = _create_transak_intent()
 
@@ -175,43 +181,145 @@ def test_rotation_verifies_previous_keys_but_mints_only_with_current_key(
     new_token, new_payload = _create_transak_intent()
     assert oi.decode_intent(new_token) == new_payload
 
-    _configure_keys(monkeypatch, current=None, previous=(old_key,))
-    assert oi.decode_intent(old_token) == old_payload
-    with pytest.raises(oi.OnRampNotConfiguredError, match="not configured"):
-        _create_transak_intent()
+    _configure_keys(monkeypatch, current=new_key)
     with pytest.raises(oi.OnRampError, match="signature mismatch"):
-        oi.decode_intent(new_token)
+        oi.decode_intent(old_token)
+    assert oi.decode_intent(new_token) == new_payload
+
+
+async def test_key_manager_derives_current_and_previous_raw_256_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(
+            PREVIOUS_KEY_ID,
+            CURRENT_KEY_ID,
+            PREVIOUS_KEY_ID,
+        ),
+    )
+    generate_key = AsyncMock(side_effect=["11" * 32, "22" * 32])
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
+
+    await manager.initialize()
+
+    assert generate_key.await_args_list == [
+        call(CURRENT_KEY_ID, oi.KeyKind.RAW_256),
+        call(PREVIOUS_KEY_ID, oi.KeyKind.RAW_256),
+    ]
+    assert manager.current_key == b"\x11" * 32
+    assert manager.verification_keys == (b"\x11" * 32, b"\x22" * 32)
+    monkeypatch.setattr(oi, "_onramp_intent_key_manager_instance", manager)
+    token, payload = _create_transak_intent()
+    assert oi.decode_intent(token) == payload
 
 
 @pytest.mark.parametrize(
-    "key",
-    [
-        "too-short",
-        " " + SIGNING_KEY,
-        SIGNING_KEY + "\n",
-        SIGNING_KEY[:16] + "," + SIGNING_KEY[17:],
-        "é" * oi.INTENT_MIN_SIGNING_KEY_BYTES,
-    ],
+    "key_hex",
+    [None, "not-hex", "11" * 31, "11" * 33, ("11 " * 32).strip()],
 )
-def test_invalid_current_signing_key_fails_closed(
+async def test_key_manager_rejects_invalid_rofl_key_material(
     monkeypatch: pytest.MonkeyPatch,
-    key: str,
+    key_hex: str | None,
 ) -> None:
-    _configure_keys(monkeypatch, current=key)
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(),
+    )
+    generate_key = AsyncMock(return_value=key_hex)
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
 
-    with pytest.raises(oi.OnRampNotConfiguredError, match="configuration is invalid"):
-        _create_transak_intent()
+    with pytest.raises(RuntimeError, match="Failed to derive on-ramp intent signing keys"):
+        await manager.initialize()
+
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = manager.current_key
 
 
-def test_invalid_previous_signing_key_fails_closed(
+async def test_key_manager_does_not_publish_a_partial_key_ring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _configure_keys(monkeypatch, previous=(" " + SIGNING_KEY,))
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(PREVIOUS_KEY_ID,),
+    )
+    generate_key = AsyncMock(side_effect=["11" * 32, RuntimeError("appd failed")])
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
 
-    with pytest.raises(oi.OnRampNotConfiguredError, match="configuration is invalid"):
-        _create_transak_intent()
-    with pytest.raises(oi.OnRampNotConfiguredError, match="configuration is invalid"):
-        oi.decode_intent(GOLDEN_TOKEN, allow_expired=True)
+    with pytest.raises(RuntimeError, match="Failed to derive on-ramp intent signing keys"):
+        await manager.initialize()
+
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = manager.current_key
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = manager.verification_keys
+
+
+async def test_key_manager_local_keys_are_deterministic_and_separated_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(PREVIOUS_KEY_ID,),
+    )
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
+    first = oi.OnRampIntentKeyManager()
+    second = oi.OnRampIntentKeyManager()
+
+    await first.initialize()
+    await second.initialize()
+
+    assert first.verification_keys == second.verification_keys
+    assert first.current_key != first.verification_keys[1]
+
+
+@pytest.mark.parametrize("key_id", ["", " onramp.key", "onramp.key "])
+async def test_key_manager_rejects_invalid_current_key_id(
+    monkeypatch: pytest.MonkeyPatch,
+    key_id: str,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=key_id,
+        onramp_intent_previous_signing_key_ids=(),
+    )
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    manager = oi.OnRampIntentKeyManager()
+
+    with pytest.raises(RuntimeError, match="key ID is invalid"):
+        await manager.initialize(use_rofl=False)
+
+
+async def test_key_manager_initialization_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(),
+    )
+    generate_key = AsyncMock(return_value="11" * 32)
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
+
+    await manager.initialize()
+    await manager.initialize()
+
+    generate_key.assert_awaited_once_with(CURRENT_KEY_ID, oi.KeyKind.RAW_256)
 
 
 def test_payload_or_signature_tampering_is_rejected() -> None:
