@@ -12,6 +12,7 @@ import src.auth.jwt_service as jwt_service
 import src.auth.rate_limiter as rate_limiter
 import src.auth.token_store as token_store
 import src.config
+import src.services.onramp_intent as onramp_intent
 
 load_dotenv(".env.localnet")
 
@@ -39,6 +40,7 @@ def reset_auth_singletons(monkeypatch, tmp_path):
     token_store._token_store_instance = None
     auth_token_keys._auth_token_key_manager_instance = None
     auth_token_service._auth_token_service_instance = None
+    onramp_intent._onramp_intent_key_manager_instance = None
     if rate_limiter._auth_rate_limiter_instance is not None:
         rate_limiter._auth_rate_limiter_instance.close()
     rate_limiter._auth_rate_limiter_instance = None
@@ -56,6 +58,7 @@ def reset_auth_singletons(monkeypatch, tmp_path):
     token_store._token_store_instance = None
     auth_token_keys._auth_token_key_manager_instance = None
     auth_token_service._auth_token_service_instance = None
+    onramp_intent._onramp_intent_key_manager_instance = None
     if rate_limiter._auth_rate_limiter_instance is not None:
         rate_limiter._auth_rate_limiter_instance.close()
     rate_limiter._auth_rate_limiter_instance = None
@@ -76,3 +79,7 @@ def disable_rofl_keys(monkeypatch):
     # Initialize AuthToken key manager
     auth_key_manager = auth_token_keys.get_auth_token_key_manager()
     _run_async(auth_key_manager.initialize(use_rofl=False))
+
+    # Initialize provider-neutral on-ramp intent keys
+    intent_key_manager = onramp_intent.get_onramp_intent_key_manager()
+    _run_async(intent_key_manager.initialize(use_rofl=False))

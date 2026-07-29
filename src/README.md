@@ -24,6 +24,7 @@ src/
 │   ├── sweep_engine.py        #   Per-deposit state machine, persistence, recovery
 │   ├── withdrawal_processor.py#   Polls Sapphire, resolves, broadcasts
 │   ├── accounting_contract.py #   Sapphire client (ROFL or direct-key path)
+│   ├── onramp_intent.py       #   Signed intent codec + ROFL-derived key ring
 │   ├── rofl_signer_bootstrap.py # Publish roflSignerAddress at startup
 │   ├── gas_price_bootstrap.py #   Sync per-chain gas prices at startup
 │   ├── token_info_bootstrap.py #  Register configured tokens at startup
@@ -194,6 +195,7 @@ Key file: `services/token_info_bootstrap.py`.
 | Sweep records | `/data/sweep-engine/sweep_<deposit_id>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
 | JWT signing key | Derived in-memory from ROFL TEE seed at startup | Re-derived on each start; deterministic per ROFL app. |
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
+| On-ramp intent key ring | Derived in-memory from ROFL raw-256 key IDs at startup | Re-derived on each start; deterministic per ROFL app and key ID. |
 | Withdrawal high-water marks | In-memory only (`WithdrawalProcessor._chain_high_water_mark`) | Rebuilt on restart via the catch-up pass. |
 
 ## Configuration
@@ -220,8 +222,10 @@ Environment variables: see `.env.example`. Notable ones:
 - `ACCOUNTING_GAS_PRICE` — JSON object mapping chain_id to desired gas price (wei), synced on-chain at startup (see Gas Price Bootstrap above)
 - `ACCOUNTING_TOKEN_INFO` — JSON array of token descriptors to register on-chain at startup (see Token Info Bootstrap above)
 - `SIWE_DOMAINS` — comma-separated allowed SIWE domains
+- `ONRAMP_INTENT_SIGNING_KEY_ID` — current ROFL key ID for provider-neutral intent signing
+- `ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS` — comma-separated old IDs retained for intent verification
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
-- `DISABLE_ROFL_KEYS` (local dev only) — skip AuthToken/JWT key sync at startup
+- `DISABLE_ROFL_KEYS` (local dev only) — use non-TEE AuthToken/JWT keys and publicly derivable on-ramp intent keys; never enable in production
 - `SWEEP_STATE_DIR` (default `/data/sweep-engine`) — sweep state directory
 
 ## Running Locally

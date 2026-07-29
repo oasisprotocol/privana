@@ -1,0 +1,489 @@
+"""Provider-neutral signed on-ramp intent codec tests."""
+
+from __future__ import annotations
+
+import base64
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, call
+
+import pytest
+
+from src.services import onramp
+from src.services import onramp_intent as oi
+
+USER = "0x" + "11" * 20
+WALLET = "0x" + "22" * 20
+TOKEN_ID = "0x" + "33" * 32
+SIGNING_KEY = b"0123456789abcdef0123456789abcdef"
+ISSUED_AT = 1_781_000_000
+NONCE = "0102030405060708"
+CURRENT_KEY_ID = "onramp_intent_signing_key.v2.key"
+PREVIOUS_KEY_ID = "onramp_intent_signing_key.v1.key"
+
+# This freezes the initial canonical JSON encoding and v1 HMAC domain. Any
+# intentional incompatible change requires a new wire version.
+GOLDEN_TOKEN = (
+    "privana_"
+    "eyJhIjoidXNkYzpiYXNlIiwiYyI6ODQ1MzIsImV4cCI6MTc4MTA4NjQwMCwiaWF0IjoxNzgxMDAwMDAwLCJuIjoiMDEwMjAzMDQwNTA2MDcwOCIsInAiOiJ0cmFuc2FrIiwidCI6IjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMiLCJ1IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjEsInciOiIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIn0"
+    ".jxKFoY8aXEZxIBBnII3lM-biUP-VS00Hknalnc9u4fE"
+)
+
+
+def _configure_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    current: bytes = SIGNING_KEY,
+    previous: tuple[bytes, ...] = (),
+) -> None:
+    manager = oi.OnRampIntentKeyManager()
+    manager._current_key = current
+    manager._verification_keys = tuple(dict.fromkeys((current, *previous)))
+    monkeypatch.setattr(oi, "_onramp_intent_key_manager_instance", manager)
+
+
+@pytest.fixture(autouse=True)
+def _keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_keys(monkeypatch)
+
+
+def _signed_raw(payload: bytes, *, key: bytes = SIGNING_KEY) -> str:
+    payload_b64 = oi._b64url_encode(payload)
+    signature = oi._signature(payload_b64, key)
+    return f"{oi.INTENT_PREFIX}{payload_b64}.{oi._b64url_encode(signature)}"
+
+
+def _token_payload_bytes(token: str) -> bytes:
+    payload_b64 = token.removeprefix(oi.INTENT_PREFIX).split(".", 1)[0]
+    return base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4))
+
+
+def _token_payload(token: str) -> dict:
+    return json.loads(_token_payload_bytes(token))
+
+
+def _create_transak_intent() -> tuple[str, dict]:
+    return oi.create_intent(
+        provider=oi.PROVIDER_TRANSAK,
+        user_address=USER,
+        wallet_address=WALLET,
+        token_id=TOKEN_ID,
+        chain_id=84_532,
+        asset_code="USDC:Base",
+    )
+
+
+def test_frozen_initial_token_decodes_from_canonical_json() -> None:
+    expected = {
+        "v": oi.INTENT_VERSION,
+        "p": oi.PROVIDER_TRANSAK,
+        "u": USER.removeprefix("0x"),
+        "w": WALLET.removeprefix("0x"),
+        "t": TOKEN_ID.removeprefix("0x"),
+        "c": 84_532,
+        "a": "usdc:base",
+        "iat": ISSUED_AT,
+        "exp": ISSUED_AT + oi.INTENT_TTL_SECONDS,
+        "n": NONCE,
+    }
+
+    assert _token_payload(GOLDEN_TOKEN) == expected
+    assert oi.decode_intent(GOLDEN_TOKEN, allow_expired=True) == expected
+
+
+def test_mint_is_byte_identical_to_frozen_initial_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(oi.time, "time", lambda: ISSUED_AT)
+    monkeypatch.setattr(oi.secrets, "token_hex", lambda _length: NONCE)
+
+    token, payload = _create_transak_intent()
+
+    assert token == GOLDEN_TOKEN
+    assert payload["v"] == oi.INTENT_VERSION
+    assert payload["p"] == oi.PROVIDER_TRANSAK
+    assert payload["a"] == "usdc:base"
+
+
+@pytest.mark.parametrize("provider", [oi.PROVIDER_MOONPAY, oi.PROVIDER_TRANSAK])
+def test_roundtrip_binds_provider_and_complete_privana_context(provider: str) -> None:
+    token, payload = oi.create_intent(
+        provider=provider,
+        user_address=USER,
+        wallet_address=WALLET,
+        token_id=TOKEN_ID,
+        chain_id=84_532,
+        asset_code="USDC:Base",
+    )
+
+    assert _token_payload(token)["p"] == provider
+    assert len(token) <= oi.INTENT_MAX_LENGTH
+    assert oi.decode_intent(token) == payload
+    assert payload == {
+        "v": oi.INTENT_VERSION,
+        "p": provider,
+        "u": USER.removeprefix("0x"),
+        "w": WALLET.removeprefix("0x"),
+        "t": TOKEN_ID.removeprefix("0x"),
+        "c": 84_532,
+        "a": "usdc:base",
+        "iat": payload["iat"],
+        "exp": payload["iat"] + oi.INTENT_TTL_SECONDS,
+        "n": payload["n"],
+    }
+
+
+def test_moonpay_adapter_accepts_the_provider_neutral_payload() -> None:
+    token, payload = oi.create_intent(
+        provider=oi.PROVIDER_MOONPAY,
+        user_address=USER,
+        wallet_address=WALLET,
+        token_id=TOKEN_ID,
+        chain_id=84_532,
+        asset_code="USDC",
+    )
+
+    assert onramp.decode_onramp_intent(token) == payload
+
+
+def test_moonpay_adapter_rejects_valid_intent_for_another_provider() -> None:
+    token, _payload = _create_transak_intent()
+
+    with pytest.raises(onramp.OnRampError, match="not a MoonPay intent"):
+        onramp.decode_onramp_intent(token)
+
+
+def test_mint_and_verify_fail_closed_without_any_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        oi,
+        "_onramp_intent_key_manager_instance",
+        oi.OnRampIntentKeyManager(),
+    )
+
+    with pytest.raises(oi.OnRampNotConfiguredError, match="not configured"):
+        _create_transak_intent()
+    with pytest.raises(oi.OnRampNotConfiguredError, match="not configured"):
+        oi.decode_intent(GOLDEN_TOKEN, allow_expired=True)
+
+
+def test_rotation_verifies_previous_keys_but_mints_only_with_current_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_key = b"old_provider_neutral_signing_key_01"
+    new_key = b"new_provider_neutral_signing_key_02"
+    _configure_keys(monkeypatch, current=old_key)
+    old_token, old_payload = _create_transak_intent()
+
+    _configure_keys(monkeypatch, current=new_key, previous=(old_key, old_key))
+    assert oi.decode_intent(old_token) == old_payload
+    new_token, new_payload = _create_transak_intent()
+    assert oi.decode_intent(new_token) == new_payload
+
+    _configure_keys(monkeypatch, current=new_key)
+    with pytest.raises(oi.OnRampError, match="signature mismatch"):
+        oi.decode_intent(old_token)
+    assert oi.decode_intent(new_token) == new_payload
+
+
+async def test_key_manager_derives_current_and_previous_raw_256_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(
+            PREVIOUS_KEY_ID,
+            CURRENT_KEY_ID,
+            PREVIOUS_KEY_ID,
+        ),
+    )
+    generate_key = AsyncMock(side_effect=["11" * 32, "22" * 32])
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
+
+    await manager.initialize()
+
+    assert generate_key.await_args_list == [
+        call(CURRENT_KEY_ID, oi.KeyKind.RAW_256),
+        call(PREVIOUS_KEY_ID, oi.KeyKind.RAW_256),
+    ]
+    assert manager.current_key == b"\x11" * 32
+    assert manager.verification_keys == (b"\x11" * 32, b"\x22" * 32)
+    monkeypatch.setattr(oi, "_onramp_intent_key_manager_instance", manager)
+    token, payload = _create_transak_intent()
+    assert oi.decode_intent(token) == payload
+
+
+@pytest.mark.parametrize(
+    "key_hex",
+    [None, "not-hex", "11" * 31, "11" * 33, ("11 " * 32).strip()],
+)
+async def test_key_manager_rejects_invalid_rofl_key_material(
+    monkeypatch: pytest.MonkeyPatch,
+    key_hex: str | None,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(),
+    )
+    generate_key = AsyncMock(return_value=key_hex)
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
+
+    with pytest.raises(RuntimeError, match="Failed to derive on-ramp intent signing keys"):
+        await manager.initialize()
+
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = manager.current_key
+
+
+async def test_key_manager_does_not_publish_a_partial_key_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(PREVIOUS_KEY_ID,),
+    )
+    generate_key = AsyncMock(side_effect=["11" * 32, RuntimeError("appd failed")])
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
+
+    with pytest.raises(RuntimeError, match="Failed to derive on-ramp intent signing keys"):
+        await manager.initialize()
+
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = manager.current_key
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = manager.verification_keys
+
+
+async def test_key_manager_local_keys_are_deterministic_and_separated_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(PREVIOUS_KEY_ID,),
+    )
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
+    first = oi.OnRampIntentKeyManager()
+    second = oi.OnRampIntentKeyManager()
+
+    await first.initialize()
+    await second.initialize()
+
+    assert first.verification_keys == second.verification_keys
+    assert first.current_key != first.verification_keys[1]
+
+
+@pytest.mark.parametrize("key_id", ["", " onramp.key", "onramp.key "])
+async def test_key_manager_rejects_invalid_current_key_id(
+    monkeypatch: pytest.MonkeyPatch,
+    key_id: str,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=key_id,
+        onramp_intent_previous_signing_key_ids=(),
+    )
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    manager = oi.OnRampIntentKeyManager()
+
+    with pytest.raises(RuntimeError, match="key ID is invalid"):
+        await manager.initialize(use_rofl=False)
+
+
+async def test_key_manager_initialization_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        onramp_intent_signing_key_id=CURRENT_KEY_ID,
+        onramp_intent_previous_signing_key_ids=(),
+    )
+    generate_key = AsyncMock(return_value="11" * 32)
+    client = SimpleNamespace(_client=SimpleNamespace(generate_key=generate_key))
+    monkeypatch.setattr(oi, "load_settings", lambda: settings)
+    monkeypatch.setattr(oi, "RoflAppdClient", lambda: client)
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    manager = oi.OnRampIntentKeyManager()
+
+    await manager.initialize()
+    await manager.initialize()
+
+    generate_key.assert_awaited_once_with(CURRENT_KEY_ID, oi.KeyKind.RAW_256)
+
+
+def test_payload_or_signature_tampering_is_rejected() -> None:
+    token, _payload = _create_transak_intent()
+    payload_b64, signature_b64 = token.removeprefix(oi.INTENT_PREFIX).split(".")
+
+    payload_bytes = bytearray(oi._b64url_decode(payload_b64))
+    payload_bytes[-1] ^= 1
+    tampered_payload = (
+        f"{oi.INTENT_PREFIX}{oi._b64url_encode(bytes(payload_bytes))}.{signature_b64}"
+    )
+    signature_bytes = bytearray(oi._b64url_decode(signature_b64))
+    signature_bytes[0] ^= 1
+    tampered_signature = (
+        f"{oi.INTENT_PREFIX}{payload_b64}.{oi._b64url_encode(bytes(signature_bytes))}"
+    )
+
+    with pytest.raises(oi.OnRampError, match="signature mismatch"):
+        oi.decode_intent(tampered_payload)
+    with pytest.raises(oi.OnRampError, match="signature mismatch"):
+        oi.decode_intent(tampered_signature)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda token: token + ".extra",
+        lambda token: token + "=",
+        lambda token: token.replace(".", "=.", 1),
+        lambda token: token.rsplit(".", 1)[0] + ".AA",
+        lambda _token: "not_privana",
+    ],
+)
+def test_noncanonical_or_malformed_encoding_is_rejected(mutate) -> None:
+    token, _payload = _create_transak_intent()
+
+    with pytest.raises(oi.OnRampError):
+        oi.decode_intent(mutate(token))
+
+
+def test_oversized_token_is_rejected_before_decode() -> None:
+    token = oi.INTENT_PREFIX + "a" * oi.INTENT_MAX_LENGTH
+
+    with pytest.raises(oi.OnRampError, match="too large"):
+        oi.decode_intent(token)
+
+
+def test_expiry_boundary_and_explicit_recovery_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued_at = 1_800_000_000
+    monkeypatch.setattr(oi.time, "time", lambda: issued_at)
+    token, payload = _create_transak_intent()
+
+    monkeypatch.setattr(oi.time, "time", lambda: payload["exp"])
+    assert oi.decode_intent(token)["exp"] == payload["exp"]
+
+    monkeypatch.setattr(oi.time, "time", lambda: payload["exp"] + 1)
+    with pytest.raises(oi.OnRampError, match="expired"):
+        oi.decode_intent(token)
+    assert oi.decode_intent(token, allow_expired=True)["p"] == oi.PROVIDER_TRANSAK
+
+
+@pytest.mark.parametrize("raw_payload", [b"not-json", b"[]", b'{"v":1}'])
+def test_validly_signed_malformed_payloads_are_rejected(raw_payload: bytes) -> None:
+    signed = _signed_raw(raw_payload)
+
+    with pytest.raises(oi.OnRampError):
+        oi.decode_intent(signed, allow_expired=True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("v", 2, "version"),
+        ("p", "unknown", "provider"),
+        ("u", "11" * 19, "user"),
+        ("t", "33" * 31, "token_id"),
+        ("c", True, "chain_id"),
+        ("c", 84_532.0, "chain_id"),
+        ("iat", str(ISSUED_AT), "issued_at"),
+        ("a", "USDC:Base", "asset code"),
+    ],
+)
+def test_validly_signed_invalid_json_fields_are_rejected(
+    field: str, value: object, error: str
+) -> None:
+    payload = _token_payload(GOLDEN_TOKEN)
+    payload[field] = value
+    signed = _signed_raw(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("ascii"))
+
+    with pytest.raises(oi.OnRampError, match=error):
+        oi.decode_intent(signed, allow_expired=True)
+
+
+def test_validly_signed_noncanonical_or_ambiguous_json_is_rejected() -> None:
+    canonical = _token_payload_bytes(GOLDEN_TOKEN)
+    duplicate_key = canonical.replace(b'{"a"', b'{"v":1,"a"', 1)
+    extra_payload = _token_payload(GOLDEN_TOKEN) | {"x": 1}
+    extra_field = json.dumps(extra_payload, separators=(",", ":"), sort_keys=True).encode("ascii")
+
+    for raw_payload in (b" " + canonical, duplicate_key, extra_field):
+        with pytest.raises(oi.OnRampError, match="payload is malformed"):
+            oi.decode_intent(_signed_raw(raw_payload), allow_expired=True)
+
+
+def test_validly_signed_expiry_before_issue_is_rejected() -> None:
+    payload = _token_payload(GOLDEN_TOKEN)
+    payload["exp"] = ISSUED_AT - 1
+    raw_payload = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("ascii")
+
+    with pytest.raises(oi.OnRampError, match="expires before"):
+        oi.decode_intent(_signed_raw(raw_payload), allow_expired=True)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"provider": "unknown"}, "provider"),
+        ({"user_address": "not-an-address"}, "user_address"),
+        ({"wallet_address": "not-an-address"}, "wallet_address"),
+        ({"token_id": "0x1234"}, "token_id"),
+        ({"chain_id": -1}, "chain_id"),
+        ({"chain_id": 0x1_0000_0000}, "chain_id"),
+        ({"chain_id": True}, "chain_id"),
+        ({"asset_code": "usdc base"}, "asset code"),
+        ({"asset_code": "usdç"}, "asset code"),
+        ({"asset_code": "a" * 33}, "asset code"),
+    ],
+)
+def test_creation_rejects_invalid_fields(overrides, error: str) -> None:
+    arguments = {
+        "provider": oi.PROVIDER_TRANSAK,
+        "user_address": USER,
+        "wallet_address": WALLET,
+        "token_id": TOKEN_ID,
+        "chain_id": 84_532,
+        "asset_code": "usdc:base",
+    }
+    arguments.update(overrides)
+
+    with pytest.raises(oi.OnRampError, match=error):
+        oi.create_intent(**arguments)
+
+
+def test_signed_json_length_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oi.time, "time", lambda: ISSUED_AT)
+    monkeypatch.setattr(oi.secrets, "token_hex", lambda _length: NONCE)
+    token, payload = oi.create_intent(
+        provider=oi.PROVIDER_TRANSAK,
+        user_address=USER,
+        wallet_address=WALLET,
+        token_id=TOKEN_ID,
+        chain_id=84_532,
+        asset_code="a" * oi.INTENT_MAX_ASSET_BYTES,
+    )
+
+    assert len(token) == 442
+    assert len(token) <= oi.INTENT_MAX_LENGTH
+    assert oi.decode_intent(token) == payload
+
+    absolute_max = payload | {
+        "c": 0xFFFFFFFF,
+        "iat": 0xFFFFFFFF - oi.INTENT_TTL_SECONDS,
+        "exp": 0xFFFFFFFF,
+    }
+    assert len(oi._encode_intent(absolute_max)) == 448

@@ -16,6 +16,7 @@ import src.api.routes as routes
 import src.auth.rate_limiter as rate_limiter
 import src.config
 import src.services.onramp as onramp
+import src.services.onramp_intent as onramp_intent
 from src.models.private_read import PrivateReadAuth
 
 BENEFICIARY = Web3.to_checksum_address("0x" + "bb" * 20)
@@ -26,6 +27,10 @@ TOKEN_ID = "0x" + "11" * 32
 TX_HASH = "0x" + "22" * 32
 PRIVATE_READ_TOKEN = b"\x12" * 65
 RESOLVED_PRIVATE_READ_TOKEN = b"\x34" * 65
+INTENT_SIGNING_KEY = b"route-intent-signing-key-00000001"
+ROTATED_INTENT_SIGNING_KEY = b"route-intent-signing-key-00000002"
+INTENT_SIGNING_KEY_ID = "onramp_intent_signing_key.v1.key"
+ROTATED_INTENT_SIGNING_KEY_ID = "onramp_intent_signing_key.v2.key"
 
 
 class _FakeMoonPayResponse:
@@ -87,7 +92,8 @@ def _set_required_env(monkeypatch, tmp_path) -> None:
         "TRUST_X_FORWARDED_FOR": "false",
         "MOONPAY_API_KEY": "pk_test_key",
         "MOONPAY_SECRET_KEY": "sk_test_key",
-        "MOONPAY_INTENT_SIGNING_KEY": "intent_test_key",
+        "ONRAMP_INTENT_SIGNING_KEY_ID": INTENT_SIGNING_KEY_ID,
+        "ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS": "",
         "MOONPAY_API_BASE_URL": "https://api.moonpay.com",
         "MOONPAY_WEBHOOK_SECRET_KEY": "wh_test_key",
         "MOONPAY_ALLOWED_HOSTS": "buy.moonpay.com,buy-sandbox.moonpay.com",
@@ -100,6 +106,18 @@ def _set_required_env(monkeypatch, tmp_path) -> None:
     if rate_limiter._auth_rate_limiter_instance is not None:
         rate_limiter._auth_rate_limiter_instance.close()
     rate_limiter._auth_rate_limiter_instance = None
+    _configure_intent_keys(current=INTENT_SIGNING_KEY)
+
+
+def _configure_intent_keys(
+    *,
+    current: bytes,
+    previous: tuple[bytes, ...] = (),
+) -> None:
+    manager = onramp_intent.OnRampIntentKeyManager()
+    manager._current_key = current
+    manager._verification_keys = tuple(dict.fromkeys((current, *previous)))
+    onramp_intent._onramp_intent_key_manager_instance = manager
 
 
 def _use_fake_moonpay_client(monkeypatch, responses: list[object]) -> type[_FakeMoonPayClient]:
@@ -201,7 +219,7 @@ def test_intent_is_signed_and_sign_url_returns_moonpay_signature(monkeypatch, tm
     intent = _create_intent(client)
     intent_id = intent["transaction_id"]
 
-    assert len(intent_id) <= 255
+    assert len(intent_id) <= onramp_intent.INTENT_MAX_LENGTH
     decoded = onramp.decode_onramp_intent(intent_id)
     assert Web3.to_checksum_address("0x" + decoded["u"]) == BENEFICIARY
     assert Web3.to_checksum_address("0x" + decoded["w"]) == DEPOSIT_ADDRESS
@@ -220,6 +238,42 @@ def test_intent_is_signed_and_sign_url_returns_moonpay_signature(monkeypatch, tm
         call("evm", 0, RESOLVED_PRIVATE_READ_TOKEN),
         call("evm", 0, RESOLVED_PRIVATE_READ_TOKEN),
     ]
+
+
+def test_sign_url_accepts_previous_key_after_rotation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    client, _mock_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+
+    _configure_intent_keys(
+        current=ROTATED_INTENT_SIGNING_KEY,
+        previous=(INTENT_SIGNING_KEY,),
+    )
+    response = client.post(
+        "/v1/accounting/onramp/sign-url",
+        json={"url": _moonpay_url(intent["transaction_id"])},
+    )
+
+    assert response.status_code == 200
+
+
+def test_signing_key_id_configuration_strips_previous_ids(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS",
+        f" {INTENT_SIGNING_KEY_ID}, ,{ROTATED_INTENT_SIGNING_KEY_ID} ",
+    )
+    src.config._settings = None
+
+    assert src.config.load_settings().onramp_intent_previous_signing_key_ids == (
+        INTENT_SIGNING_KEY_ID,
+        ROTATED_INTENT_SIGNING_KEY_ID,
+    )
 
 
 def test_sign_url_rejects_tampered_or_wrong_currency_intent(monkeypatch, tmp_path) -> None:
@@ -288,14 +342,14 @@ def test_sign_url_rejects_expired_intent_but_pending_can_recover(monkeypatch, tm
     monkeypatch.setattr(
         onramp.time,
         "time",
-        lambda: base_time + onramp._ONRAMP_INTENT_TTL_SECONDS + 1,
+        lambda: base_time + onramp_intent.INTENT_TTL_SECONDS + 1,
     )
     sign_response = client.post(
         "/v1/accounting/onramp/sign-url",
         json={"url": _moonpay_url(intent["transaction_id"])},
     )
     assert sign_response.status_code == 400
-    assert sign_response.json()["detail"] == "MoonPay externalTransactionId has expired"
+    assert sign_response.json()["detail"] == "On-ramp intent has expired"
 
     monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", AsyncMock(return_value=[]))
     monkeypatch.setattr(
@@ -630,7 +684,10 @@ def test_pending_returns_502_when_all_moonpay_lookups_fail(monkeypatch, tmp_path
     mock_fetch_external.assert_awaited_once_with(intent["transaction_id"])
 
 
-def test_pending_returns_503_when_intent_signing_key_is_missing(monkeypatch, tmp_path) -> None:
+def test_pending_returns_503_when_intent_key_manager_is_uninitialized(
+    monkeypatch,
+    tmp_path,
+) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
     intent = _create_intent(client)
     monkeypatch.setattr(
@@ -638,13 +695,12 @@ def test_pending_returns_503_when_intent_signing_key_is_missing(monkeypatch, tmp
         "fetch_moonpay_buy_transactions",
         AsyncMock(return_value=[_moonpay_transaction(intent["transaction_id"])]),
     )
-    monkeypatch.delenv("MOONPAY_INTENT_SIGNING_KEY")
-    src.config._settings = None
+    onramp_intent._onramp_intent_key_manager_instance = onramp_intent.OnRampIntentKeyManager()
 
     response = client.get("/v1/accounting/onramp/pending")
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "MoonPay on-ramp intents are not configured"
+    assert response.json()["detail"] == "On-ramp intents are not configured"
 
 
 def test_pending_rejects_too_many_exact_intent_lookups(monkeypatch, tmp_path) -> None:
