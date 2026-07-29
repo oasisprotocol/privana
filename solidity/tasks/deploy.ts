@@ -1,7 +1,23 @@
-import { task } from "hardhat/config";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+
+import '@nomicfoundation/hardhat-ethers';
+import '@oasisprotocol/sapphire-hardhat';
+import '@typechain/hardhat';
+import {JsonRpcProvider} from "ethers";
+import { task } from "hardhat/config";
+import {HardhatEthersSigner} from "@nomicfoundation/hardhat-ethers/signers";
+import {HardhatRuntimeEnvironment} from "hardhat/types";
+import {HttpNetworkConfig} from "hardhat/types/config";
 import { parseRoflAppId } from "./utils/rofl";
+
+// Return unwrapped Sapphire client bound to SECRET_KEY with plain text
+// transactions. Used for all contract management that should be public.
+async function getUwDeployer(hre: HardhatRuntimeEnvironment): Promise<HardhatEthersSigner> {
+  const { network } = hre;
+  const uwProvider = new JsonRpcProvider((network.config as HttpNetworkConfig).url);
+  return new hre.ethers.Wallet(process.env.SECRET_KEY as string, uwProvider) as any;
+}
 
 // Read VERSION from the local Accounting.sol.
 function getAvailableAccountingVersion(): bigint {
@@ -49,7 +65,7 @@ task("deploy")
   .setAction(async (args, hre) => {
     await hre.run("compile");
 
-    const [deployer] = await hre.ethers.getSigners();
+    const deployer = await getUwDeployer(hre);
     const ownerAddress: string = args.owner ?? deployer.address;
 
     if (!hre.ethers.isAddress(ownerAddress)) {
@@ -72,7 +88,7 @@ task("deploy")
     // `ownerAddress` (e.g. a Safe) is set directly via initialize(), independent of who
     // sends this deployment transaction — no Safe transaction is needed to hand over
     // ownership.
-    const Accounting = await hre.ethers.getContractFactory("Accounting");
+    const Accounting = await hre.ethers.getContractFactory("Accounting", deployer);
     const proxy = await hre.upgrades.deployProxy(
       Accounting,
       [roflAppIdHex, ownerAddress],
@@ -122,7 +138,7 @@ task("deploy-siwe-auth")
 
     const roflAppIdHex = parseRoflAppId(args.roflappid);
 
-    const AccountingSiweAuth = await hre.ethers.getContractFactory("AccountingSiweAuth");
+    const AccountingSiweAuth = await hre.ethers.getContractFactory("AccountingSiweAuth", await getUwDeployer(hre));
 
     if (args.outputSafe) {
       const deployTx = await AccountingSiweAuth.getDeployTransaction(roflAppIdHex);
@@ -165,6 +181,8 @@ task("force-import")
   .addParam("proxy", "The proxy contract address to import")
   .setDescription("Force import an existing proxy into OpenZeppelin's deployment state")
   .setAction(async (args, hre) => {
+    await hre.run("compile");
+
     const Accounting = await hre.ethers.getContractFactory("Accounting");
 
     // Get current siweAuth from proxy
@@ -188,7 +206,7 @@ task("upgrade")
   .setAction(async (args, hre) => {
     await hre.run("compile");
 
-    const Accounting = await hre.ethers.getContractFactory("Accounting");
+    const Accounting = await hre.ethers.getContractFactory("Accounting", await getUwDeployer(hre));
     const current = await hre.ethers.getContractAt("Accounting", args.address);
     let siweAuthAddress: string = args.siweauth;
 
@@ -238,7 +256,10 @@ task("upgrade")
         redeployImplementation: 'always',
         txOverrides: { gasLimit: 15000000 }
       });
-      await upgraded.waitForDeployment();
+      // await upgraded.waitForDeployment(); doesn't work for unwrapped providers.
+      // Extract the upgrade tx and wait for it directly.
+      const upgradeTx = (upgraded as unknown as { deployTransaction?: { wait: () => Promise<unknown> } }).deployTransaction;
+      await upgradeTx!.wait();
 
       newImplAddress = await hre.upgrades.erc1967.getImplementationAddress(args.address);
       console.log(`Upgraded! New implementation: ${newImplAddress}`);
@@ -298,7 +319,7 @@ task("transferOwnership")
       throw new Error(`Invalid new owner address: ${args.newowner}`);
     }
 
-    const accounting = await hre.ethers.getContractAt("Accounting", args.address);
+    const accounting = await hre.ethers.getContractAt("Accounting", args.address, await getUwDeployer(hre));
     const currentOwner = await accounting.owner();
     console.log(`Current owner: ${currentOwner}`);
     console.log(`New owner:     ${args.newowner}`);

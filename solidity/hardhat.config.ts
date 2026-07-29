@@ -1,15 +1,18 @@
 import { config as dotenvConfig } from 'dotenv';
 import { join } from 'path';
+
 import {
   sapphireLocalnet,
   sapphireTestnet,
   sapphireMainnet,
 } from '@oasisprotocol/sapphire-hardhat';
+
 import '@nomicfoundation/hardhat-ignition-ethers';
 import '@nomicfoundation/hardhat-toolbox';
 import { HardhatUserConfig } from 'hardhat/config';
 import { HDAccountsUserConfig } from 'hardhat/types';
 import 'solidity-coverage';
+
 import './tasks';
 
 // Fixate .openzeppelin location to this folder.
