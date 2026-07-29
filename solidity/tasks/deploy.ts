@@ -285,3 +285,46 @@ task("upgrade")
       console.log(`Safe Transaction Builder JSON written to ${args.outputSafe}`);
     }
   });
+
+task("transferOwnership")
+  .addParam("address", "The Accounting proxy contract address")
+  .addParam("newowner", "The address of the new owner")
+  .addOptionalParam("outputSafe", "Instead of submitting the transaction write it to file as Safe Transaction Builder JSON.")
+  .setDescription("Transfer ownership of the Accounting contract to a new address")
+  .setAction(async (args, hre) => {
+    await hre.run("compile");
+
+    if (!hre.ethers.isAddress(args.newowner)) {
+      throw new Error(`Invalid new owner address: ${args.newowner}`);
+    }
+
+    const accounting = await hre.ethers.getContractAt("Accounting", args.address);
+    const currentOwner = await accounting.owner();
+    console.log(`Current owner: ${currentOwner}`);
+    console.log(`New owner:     ${args.newowner}`);
+
+    if (currentOwner.toLowerCase() === (args.newowner as string).toLowerCase()) {
+      console.log("Skipping: new owner is already the current owner.");
+      return;
+    }
+
+    if (args.outputSafe) {
+      const data = accounting.interface.encodeFunctionData("transferOwnership", [args.newowner]);
+      const json = await createSafeJson(
+        args.address,
+        data,
+        "Transfer Accounting Ownership",
+        `Transfer ownership of Accounting contract ${args.address} to ${args.newowner}`,
+        (await hre.ethers.provider.getNetwork()).chainId.toString()
+      );
+      writeFileSync(args.outputSafe, json);
+      console.log(`Safe Transaction Builder JSON written to ${args.outputSafe}`);
+      return;
+    }
+
+    const tx = await accounting.transferOwnership(args.newowner);
+    console.log(`Transaction hash: ${tx.hash}`);
+    await tx.wait();
+
+    console.log(`Ownership transferred. New owner: ${await accounting.owner()}`);
+  });

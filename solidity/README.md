@@ -239,20 +239,22 @@ User-driven escape hatch from a per-user deposit address, with no ROFL involveme
 
 ## Hardhat Tasks
 
-| Task | Purpose |
-|------|---------|
-| `deploy` | Deploy Accounting + SIWE auth |
-| `deploy-siwe-auth` | Deploy `AccountingSiweAuth` standalone |
-| `force-import` | Import an existing proxy into hardhat-upgrades |
-| `upgrade` | UUPS upgrade Accounting implementation |
-| `getBalance` | Read user balance |
-| `transferERC20` | Sign + submit an EIP-712 transfer |
-| `withdraw` / `watchWithdrawal` | User-side withdrawal flow |
-| `directWithdraw` | Withdraw on-chain without ROFL/API |
-| `emergencyRequest` / `emergencyExecute` / `emergencyStatus` | Emergency-withdraw flow from deposit address |
-| `getDepositAddress` / `checkDeposit` | User-side deposit helpers |
-| `accounts` | List configured signer accounts |
-| `getAuthKeyHash` / `sign` / `transfer` | Auth/SIWE helpers |
+| Task                                                        | Purpose                                          |
+|-------------------------------------------------------------|--------------------------------------------------|
+| `deploy`                                                    | Deploy Accounting + SIWE auth                    |
+| `deploy-siwe-auth`                                          | Deploy `AccountingSiweAuth` standalone           |
+| `force-import`                                              | Import an existing proxy into hardhat-upgrades   |
+| `upgrade`                                                   | UUPS upgrade Accounting implementation           |
+| `show`                                                      | Print out all Accounting contract available info |
+| `transferOwnership`                                         | Change Accounting owner to a new one             |
+| `getBalance`                                                | Read user balance                                |
+| `transferERC20`                                             | Sign + submit an EIP-712 transfer                |
+| `withdraw` / `watchWithdrawal`                              | User-side withdrawal flow                        |
+| `directWithdraw`                                            | Withdraw on-chain without ROFL/API               |
+| `emergencyRequest` / `emergencyExecute` / `emergencyStatus` | Emergency-withdraw flow from deposit address     |
+| `getDepositAddress` / `checkDeposit`                        | User-side deposit helpers                        |
+| `accounts`                                                  | List configured signer accounts                  |
+| `getAuthKeyHash` / `sign` / `transfer`                      | Auth/SIWE helpers                                |
 
 Run `npx hardhat <task> --help` for parameter details.
 
