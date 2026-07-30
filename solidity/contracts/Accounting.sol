@@ -15,7 +15,7 @@ import {
 } from "./Types.sol";
 import {IAccountingSiweAuth} from "./interfaces/IAccountingSiweAuth.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {UPUPSUpgradeable} from "./lib/UPUPSUpgradeable.sol";
 
 /**
  * @title Accounting
@@ -25,7 +25,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * addresses derived on-chain from contract's secretKey. Fund locking, P2P transfers,
  * and automated withdrawals via EIP-712 signatures.
  */
-contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UUPSUpgradeable {
+contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UPUPSUpgradeable {
     /// @notice Contract version, bumped on each upgrade for tracking/verification.
     uint64 public constant VERSION = 1;
 
@@ -143,11 +143,17 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     }
 
     /**
+     * @notice Authorizes the upgrade proposal.
+     * @dev Required by UPUPSUpgradeable. Only the contract owner can propose the upgrade.
+     */
+    function _authorizeProposeUpgrade() internal override onlyOwner {}
+
+    /**
      * @notice Authorizes an upgrade to a new implementation.
      * @dev Required by UUPSUpgradeable. Only the contract owner can upgrade.
      * @param newImplementation Address of the new implementation contract
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner acceptProposedUpgrade(newImplementation) {}
 
     /// @dev Ownership renunciation is disabled to prevent bricking the proxy.
     function renounceOwnership() public pure override {
