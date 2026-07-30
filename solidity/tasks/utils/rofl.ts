@@ -39,3 +39,15 @@ export function parseRoflAppId(input: string): string {
 
   throw new Error("Invalid ROFL app ID format: must be hex (0x-prefixed) or bech32 (rofl1...)");
 }
+
+/**
+ * Format a 21-byte hex ROFL app ID (0x-prefixed) as a bech32 rofl1... address.
+ */
+export function formatRoflAppId(hex: string): string {
+  const hexBytes = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (hexBytes.length !== 42) {
+    throw new Error(`Invalid ROFL app ID: expected 21 bytes (42 hex chars), got ${hexBytes.length / 2} bytes`);
+  }
+  const bytes = Buffer.from(hexBytes, "hex");
+  return bech32.encode("rofl", bech32.toWords(bytes));
+}

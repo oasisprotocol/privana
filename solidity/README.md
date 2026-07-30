@@ -38,11 +38,11 @@ The Accounting module consists of these main components:
          ▼             │             │  onlyROFL    │            │
 ┌─────────────────┐    │             ▼              │            │
 │   ROFL TEE      │◀──▶│  ┌──────────────────────┐  │            │
-│ (Python svc)   │    │  │ creditDeposit        │  │            │
+│ (Python svc)    │    │  │ creditDeposit        │  │            │
 ├─────────────────┤    │  │ resolveWithdrawal    │  │            │
-│ • Verify deps. │    │  │ setRoflSignerAddress │  │            │
-│ • Sweep engine │    │  └──────────────────────┘  │            │
-│ • Withdraw poll│    └────────────────────────────┘            │
+│ • Verify deps.  │    │  │ setRoflSignerAddress │  │            │
+│ • Sweep engine  │    │  └──────────────────────┘  │            │
+│ • Withdraw poll │    └────────────────────────────┘            │
 └────────┬────────┘                                              │
          │                                                       │
          └───────── RPC reads / broadcasts ──────────────────────┘
@@ -124,75 +124,72 @@ Generate test coverage reports:
 bun run coverage
 ```
 
-## Deployment
+## Deployment and Upgrades
+
+Define `SECRET_KEY` env variable that has enough gas for deployment or upgrade.
+
+```shell
+export SECRET_KEY=0x...
+```
+
+### Deploy
 
 The `deploy` task provisions both the SIWE auth helper and the Accounting proxy/implementation in one step.
 
-### Deploy to Sapphire Localnet
-
 ```shell
+# Sapphire Localnet
 npx hardhat deploy --network sapphire-localnet --roflappid <rofl1…>
-```
 
-### Deploy to Sapphire Testnet
-
-```shell
+# Sapphire Testnet
 npx hardhat deploy --network sapphire-testnet --roflappid <rofl1…>
 ```
 
-Outputs: SIWE-auth address, proxy address, implementation address, EVM signing address, owner.
+If you want to assign ownership to another account e.g. Safe, also pass the 
+`--owner <address>` parameter.
 
-### Standalone subtasks
+#### Standalone subtasks
 
 ```shell
 # Deploy AccountingSiweAuth alone (e.g., to roll the auth contract):
 npx hardhat deploy-siwe-auth --network sapphire-testnet --roflappid <rofl1…>
-
-# Force-import an existing proxy into hardhat-upgrades' deployment registry:
-npx hardhat force-import --network sapphire-testnet --proxy <proxy-address>
 ```
 
 ### Upgrade
 
 The Accounting contract uses the UUPS upgradeable proxy pattern. To upgrade:
 
-#### 1. Make contract changes and compile
+*Option 1:* With `SECRET_KEY` containing the EOA contract owner:
 
 ```shell
-cd solidity
-bun run build
+# Sapphire Testnet
+npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642
+
+# Sapphire Mainnet
+npx hardhat upgrade --network sapphire --address <accounting-proxy-address>
 ```
 
-#### 2. Run the upgrade task
-
-For staging (Sapphire Testnet):
-```shell
-npx hardhat upgrade --network sapphire-testnet --proxy 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642
-```
-
-For production (Sapphire Mainnet):
-```shell
-npx hardhat upgrade --network sapphire --proxy <accounting-proxy-address>
-```
-
-If the task cannot resolve `siweAuth()` from the existing proxy, pass it explicitly:
-```shell
-npx hardhat upgrade --network sapphire-testnet --proxy <proxy-address> --siweauth <siwe-auth-address>
-```
-
-#### 3. Update the README
-
-After a successful upgrade, refresh the implementation address in the [Contract Addresses](#contract-addresses) section below.
-
-#### Troubleshooting
-
-If the proxy was deployed outside of hardhat-upgrades (or on a fresh machine), you may need to import it first:
+*Option 2:* With `SECRET_KEY` used to deploy an implementation only; the 
+owner is Safe account that will be signed and submitted afterwards: 
 
 ```shell
-npx hardhat force-import --network sapphire-testnet --proxy <accounting-proxy-address>
+# Sapphire Testnet
+npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642 --output-safe accounting-upgrade-safe.json
+
+# Sapphire Mainnet
+npx hardhat upgrade --network sapphire --address <accounting-proxy-address> --output-safe accounting-upgrade-safe.json
 ```
 
-The upgrade task uses `redeployImplementation: 'always'` to ensure a fresh implementation is deployed. If you see the same implementation address after an upgrade, verify the contract was actually recompiled with your changes.
+### Check status
+
+You can view all public info of the contract by running:
+
+```shell
+# Sapphire Testnet
+npx hardhat show <accounting-proxy-address> --network sapphire-testnet
+
+# Sapphire Mainnet
+npx hardhat show <accounting-proxy-address> --network sapphire
+```
 
 ## Configuration
 
@@ -242,20 +239,22 @@ User-driven escape hatch from a per-user deposit address, with no ROFL involveme
 
 ## Hardhat Tasks
 
-| Task | Purpose |
-|------|---------|
-| `deploy` | Deploy Accounting + SIWE auth |
-| `deploy-siwe-auth` | Deploy `AccountingSiweAuth` standalone |
-| `force-import` | Import an existing proxy into hardhat-upgrades |
-| `upgrade` | UUPS upgrade Accounting implementation |
-| `getBalance` | Read user balance |
-| `transferERC20` | Sign + submit an EIP-712 transfer |
-| `withdraw` / `watchWithdrawal` | User-side withdrawal flow |
-| `directWithdraw` | Withdraw on-chain without ROFL/API |
-| `emergencyRequest` / `emergencyExecute` / `emergencyStatus` | Emergency-withdraw flow from deposit address |
-| `getDepositAddress` / `checkDeposit` | User-side deposit helpers |
-| `accounts` | List configured signer accounts |
-| `getAuthKeyHash` / `sign` / `transfer` | Auth/SIWE helpers |
+| Task                                                        | Purpose                                          |
+|-------------------------------------------------------------|--------------------------------------------------|
+| `deploy`                                                    | Deploy Accounting + SIWE auth                    |
+| `deploy-siwe-auth`                                          | Deploy `AccountingSiweAuth` standalone           |
+| `force-import`                                              | Import an existing proxy into hardhat-upgrades   |
+| `upgrade`                                                   | UUPS upgrade Accounting implementation           |
+| `show`                                                      | Print out all Accounting contract available info |
+| `transferOwnership`                                         | Change Accounting owner to a new one             |
+| `getBalance`                                                | Read user balance                                |
+| `transferERC20`                                             | Sign + submit an EIP-712 transfer                |
+| `withdraw` / `watchWithdrawal`                              | User-side withdrawal flow                        |
+| `directWithdraw`                                            | Withdraw on-chain without ROFL/API               |
+| `emergencyRequest` / `emergencyExecute` / `emergencyStatus` | Emergency-withdraw flow from deposit address     |
+| `getDepositAddress` / `checkDeposit`                        | User-side deposit helpers                        |
+| `accounts`                                                  | List configured signer accounts                  |
+| `getAuthKeyHash` / `sign` / `transfer`                      | Auth/SIWE helpers                                |
 
 Run `npx hardhat <task> --help` for parameter details.
 

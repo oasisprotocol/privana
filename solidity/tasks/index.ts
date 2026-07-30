@@ -1,4 +1,5 @@
 import "./deploy";
+import "./show";
 import "./tokens";
 import "./sign";
 import "./accounts";
@@ -7,3 +8,4 @@ import "./transfer";
 import "./deposits";
 import "./emergencyWithdraw";
 import "./directWithdraw";
+import "./verify";

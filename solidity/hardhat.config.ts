@@ -1,15 +1,24 @@
 import { config as dotenvConfig } from 'dotenv';
+import { join } from 'path';
+
 import {
   sapphireLocalnet,
   sapphireTestnet,
   sapphireMainnet,
 } from '@oasisprotocol/sapphire-hardhat';
+
 import '@nomicfoundation/hardhat-ignition-ethers';
 import '@nomicfoundation/hardhat-toolbox';
 import { HardhatUserConfig } from 'hardhat/config';
 import { HDAccountsUserConfig } from 'hardhat/types';
 import 'solidity-coverage';
+
 import './tasks';
+
+// Fixate .openzeppelin location to this folder.
+if (!process.env.MANIFEST_DEFAULT_DIR) {
+  process.env.MANIFEST_DEFAULT_DIR = join(__dirname, '.openzeppelin');
+}
 
 import '@openzeppelin/hardhat-upgrades'; // NB: Must be imported after hardhat packages to preserve network configuration!
 
@@ -23,9 +32,9 @@ const TEST_HDWALLET = {
   passphrase: '',
 } as const satisfies HDAccountsUserConfig;
 
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const SECRET_KEY = process.env.SECRET_KEY;
 
-const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : TEST_HDWALLET;
+const accounts = SECRET_KEY ? [SECRET_KEY] : TEST_HDWALLET;
 
 const config: HardhatUserConfig = {
   networks: {

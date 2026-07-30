@@ -26,6 +26,9 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
  * and automated withdrawals via EIP-712 signatures.
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UUPSUpgradeable {
+    /// @notice Contract version, bumped on each upgrade for tracking/verification.
+    uint64 public constant VERSION = 1;
+
     /// @dev Maximum entries returned by `getHistory` in a single call.
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
 
