@@ -4,7 +4,7 @@ import { join } from "path";
 import '@nomicfoundation/hardhat-ethers';
 import '@oasisprotocol/sapphire-hardhat';
 import '@typechain/hardhat';
-import {JsonRpcProvider} from "ethers";
+import {JsonRpcProvider, TransactionResponse} from "ethers";
 import { task } from "hardhat/config";
 import {HardhatEthersSigner} from "@nomicfoundation/hardhat-ethers/signers";
 import {HardhatRuntimeEnvironment} from "hardhat/types";
@@ -207,7 +207,7 @@ task("upgrade")
     await hre.run("compile");
 
     const Accounting = await hre.ethers.getContractFactory("Accounting", await getUwDeployer(hre));
-    const current = await hre.ethers.getContractAt("Accounting", args.address);
+    const current = await hre.ethers.getContractAt("Accounting", args.address, await getUwDeployer(hre));
     let siweAuthAddress: string = args.siweauth;
 
     if (!siweAuthAddress) {
@@ -248,35 +248,16 @@ task("upgrade")
       constructorArgs: [siweAuthAddress],
     });
 
-    let newImplAddress: string
-    if (!args.outputSafe) {
-      const upgraded = await hre.upgrades.upgradeProxy(args.address, Accounting, {
-        kind: 'uups',
-        constructorArgs: [siweAuthAddress],
-        redeployImplementation: 'always',
-        txOverrides: { gasLimit: 15000000 }
-      });
-      // await upgraded.waitForDeployment(); doesn't work for unwrapped providers.
-      // Extract the upgrade tx and wait for it directly.
-      const upgradeTx = (upgraded as unknown as { deployTransaction?: { wait: () => Promise<unknown> } }).deployTransaction;
-      await upgradeTx!.wait();
-
-      newImplAddress = await hre.upgrades.erc1967.getImplementationAddress(args.address);
-      console.log(`Upgraded! New implementation: ${newImplAddress}`);
-
-      if (currentImpl === newImplAddress) {
-        console.log(`Warning: Implementation address unchanged. Upgrade may have been a no-op.`);
-      }
-    } else {
-      newImplAddress = await hre.upgrades.prepareUpgrade(args.address, Accounting, {
-        kind: 'uups',
-        constructorArgs: [siweAuthAddress],
-        redeployImplementation: 'always',
-        txOverrides: { gasLimit: 15000000 }
-      }) as string;
-
-      console.log(`Deployed new proposed implementation: ${newImplAddress}`);
-    }
+    const deployTx = await hre.upgrades.prepareUpgrade(args.address, Accounting, {
+      kind: 'uups',
+      constructorArgs: [siweAuthAddress],
+      redeployImplementation: 'always',
+      txOverrides: { gasLimit: 15000000 },
+      getTxResponse: true,
+    }) as TransactionResponse;
+    const deployReceipt = await deployTx.wait();
+    const newImplAddress = deployReceipt!.contractAddress!;
+    console.log(`Deployed new proposed implementation: ${newImplAddress} (tx: ${deployTx.hash})`);
 
     try {
       await hre.run("verify:sourcify", { address: newImplAddress, contract: "Accounting" });
@@ -293,17 +274,39 @@ task("upgrade")
       );
     }
 
-    if (args.outputSafe) {
-      const data = Accounting.interface.encodeFunctionData("upgradeToAndCall", [newImplAddress, "0x"]);
+    if (!args.outputSafe) {
+      const txProposeUpgrade = await (await current.proposeUpgrade(newImplAddress, 0)).wait();
+      console.log(`Proposed upgrade to ${newImplAddress}. (tx: ${txProposeUpgrade?.hash})`);
+
+      const txUpgradeAndCall = await (await current.upgradeToAndCall(newImplAddress, "0x")).wait();
+      console.log(`Upgraded! New implementation: ${newImplAddress}. (tx: ${txUpgradeAndCall?.hash})`);
+
+      const checkImplAddress = await hre.upgrades.erc1967.getImplementationAddress(args.address);
+      if (checkImplAddress === currentImpl) {
+        console.log(`Warning: Implementation address unchanged. Upgrade may have been a no-op.`);
+      }
+    } else {
+      const dataProposeUpgrade = Accounting.interface.encodeFunctionData("proposeUpgrade", [newImplAddress, 0]);
+      const jsonProposeUpgrade = await createSafeJson(
+        args.address,
+        dataProposeUpgrade,
+        "Propose Upgrade of Accounting",
+        `Propose Upgrade of Accounting contract ${args.address} to implementation ${newImplAddress}`,
+        (await hre.ethers.provider.getNetwork()).chainId.toString()
+      );
+      writeFileSync(args.outputSafe+"-1", jsonProposeUpgrade);
+
+      const dataUpgradeToAndCall = Accounting.interface.encodeFunctionData("upgradeToAndCall", [newImplAddress, "0x"]);
       const json = await createSafeJson(
         args.address,
-        data,
+        dataUpgradeToAndCall,
         "Upgrade Accounting",
         `Upgrade Accounting contract ${args.address} to implementation ${newImplAddress}`,
         (await hre.ethers.provider.getNetwork()).chainId.toString()
       );
-      writeFileSync(args.outputSafe, json);
-      console.log(`Safe Transaction Builder JSON written to ${args.outputSafe}`);
+      writeFileSync(args.outputSafe+"-2", json);
+
+      console.log(`Two Safe Transaction Builder JSON batches written to ${args.outputSafe}-1 and ${args.outputSafe}-2. Execute them separately.`);
     }
   });
 
