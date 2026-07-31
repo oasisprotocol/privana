@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.api.auth_routes import auth_router
 from src.api.routes import router
@@ -35,8 +36,46 @@ _LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read
 settings = load_settings()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 # WARNING: oasis-rofl-client DEBUG logs include full tx payloads before appd encryption!
 logging.getLogger().setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+
+
+class SensitiveOnRampAccessLogMiddleware:
+    """Keep signed on-ramp intents out of server access logs.
+
+    The downstream application receives a shallow copy with the original path
+    and query so FastAPI can route and parse the request. The server protocol
+    retains the redacted original scope it uses when writing the access log.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        downstream_scope = dict(scope)
+        redacted = False
+        path = str(scope.get("path") or "")
+        if path.rstrip("/") == "/v1/accounting/onramp/pending" and scope.get("query_string"):
+            scope["query_string"] = b"redacted=1"
+            redacted = True
+
+        dynamic_prefix = "/v1/accounting/onramp/"
+        dynamic_value = path.removeprefix(dynamic_prefix)
+        if path.startswith(dynamic_prefix) and dynamic_value.startswith("privana_"):
+            redacted_path = f"{dynamic_prefix}redacted"
+            scope["path"] = redacted_path
+            scope["raw_path"] = redacted_path.encode()
+            redacted = True
+
+        if redacted:
+            await self.app(downstream_scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 def _parse_cors_origins(raw_origins: str) -> set[str]:
@@ -144,6 +183,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SensitiveOnRampAccessLogMiddleware)
 
 app.include_router(router)
 app.include_router(auth_router)

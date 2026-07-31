@@ -144,15 +144,22 @@
         "type": "object"
       },
       "CreateOnRampIntentRequest": {
-        "description": "Authenticated Privana intent created before opening MoonPay.",
+        "description": "Authenticated Privana intent created before opening the configured provider.",
         "properties": {
           "chain_id": {
             "title": "Chain Id",
             "type": "integer"
           },
           "moonpay_currency_code": {
-            "title": "Moonpay Currency Code",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moonpay Currency Code"
           },
           "token_id": {
             "title": "Token Id",
@@ -172,10 +179,25 @@
         },
         "required": [
           "token_id",
-          "chain_id",
-          "moonpay_currency_code"
+          "chain_id"
         ],
         "title": "CreateOnRampIntentRequest",
+        "type": "object"
+      },
+      "CreateOnRampSessionRequest": {
+        "description": "Request a short-lived session for a signed on-ramp intent.",
+        "properties": {
+          "transaction_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id"
+        ],
+        "title": "CreateOnRampSessionRequest",
         "type": "object"
       },
       "DepositAddressRequest": {
@@ -778,7 +800,7 @@
         "type": "object"
       },
       "OnRampRecord": {
-        "description": "MoonPay on-ramp transaction visible to the SDK.",
+        "description": "Normalized provider transaction visible to the SDK.",
         "properties": {
           "base_currency_amount": {
             "anyOf": [
@@ -905,6 +927,29 @@
             ],
             "title": "On Chain Tx Hash"
           },
+          "provider": {
+            "enum": [
+              "moonpay",
+              "transak"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "provider_asset_code": {
+            "title": "Provider Asset Code",
+            "type": "string"
+          },
+          "provider_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Transaction Id"
+          },
           "quote_currency_amount": {
             "anyOf": [
               {
@@ -959,11 +1004,38 @@
         },
         "required": [
           "transaction_id",
+          "provider",
+          "provider_asset_code",
           "status",
           "created_at",
           "updated_at"
         ],
         "title": "OnRampRecord",
+        "type": "object"
+      },
+      "OnRampSessionResponse": {
+        "description": "Opaque, single-use provider session returned to the browser.",
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "provider": {
+            "const": "transak",
+            "title": "Provider",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "url",
+          "expires_at"
+        ],
+        "title": "OnRampSessionResponse",
         "type": "object"
       },
       "PendingDeposit": {
@@ -1063,7 +1135,7 @@
         "type": "object"
       },
       "PendingOnRampsResponse": {
-        "description": "Completed MoonPay transactions that still need Privana deposit verification.",
+        "description": "Completed provider transactions that still need deposit verification.",
         "properties": {
           "pending": {
             "items": {
@@ -3890,7 +3962,7 @@
     },
     "/v1/accounting/onramp/intent": {
       "post": {
-        "description": "Create a signed Privana MoonPay intent before opening the widget.",
+        "description": "Create a signed Privana intent for the deployment-selected provider.",
         "operationId": "create_onramp_intent_v1_accounting_onramp_intent_post",
         "parameters": [
           {
@@ -3953,13 +4025,60 @@
         ]
       }
     },
+    "/v1/accounting/onramp/moonpay/webhook": {
+      "post": {
+        "description": "Verify and log MoonPay buy webhooks.",
+        "operationId": "moonpay_onramp_webhook_v1_accounting_onramp_moonpay_webhook_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Moonpay-Signature-V2",
+            "required": true,
+            "schema": {
+              "title": "Moonpay-Signature-V2",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Moonpay Onramp Webhook V1 Accounting Onramp Moonpay Webhook Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Moonpay Onramp Webhook",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
     "/v1/accounting/onramp/pending": {
       "get": {
-        "description": "Return completed MoonPay purchases that still need deposit verification.",
+        "description": "Return completed provider purchases that still need deposit verification.",
         "operationId": "get_pending_onramps_v1_accounting_onramp_pending_get",
         "parameters": [
           {
-            "description": "Optional signed Privana MoonPay externalTransactionId values to look up exactly when MoonPay customer metadata is stale.",
+            "description": "Optional signed Privana intent values to look up exactly through their encoded provider.",
             "in": "query",
             "name": "externalTransactionId",
             "required": false,
@@ -3975,7 +4094,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional signed Privana MoonPay externalTransactionId values to look up exactly when MoonPay customer metadata is stale.",
+              "description": "Optional signed Privana intent values to look up exactly through their encoded provider.",
               "title": "Externaltransactionid"
             }
           },
@@ -4024,6 +4143,71 @@
           }
         ],
         "summary": "Get Pending Onramps",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/onramp/session": {
+      "post": {
+        "description": "Create one short-lived Transak widget session for a caller-owned intent.",
+        "operationId": "create_onramp_session_v1_accounting_onramp_session_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOnRampSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnRampSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Onramp Session",
         "tags": [
           "Accounting"
         ]
@@ -4094,21 +4278,10 @@
         ]
       }
     },
-    "/v1/accounting/onramp/webhook": {
+    "/v1/accounting/onramp/transak/webhook": {
       "post": {
-        "description": "Verify and log MoonPay buy webhooks.",
-        "operationId": "moonpay_onramp_webhook_v1_accounting_onramp_webhook_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Moonpay-Signature-V2",
-            "required": true,
-            "schema": {
-              "title": "Moonpay-Signature-V2",
-              "type": "string"
-            }
-          }
-        ],
+        "description": "Verify and log Transak webhooks as non-authoritative observability signals.",
+        "operationId": "transak_onramp_webhook_v1_accounting_onramp_transak_webhook_post",
         "responses": {
           "200": {
             "content": {
@@ -4117,25 +4290,15 @@
                   "additionalProperties": {
                     "type": "boolean"
                   },
-                  "title": "Response Moonpay Onramp Webhook V1 Accounting Onramp Webhook Post",
+                  "title": "Response Transak Onramp Webhook V1 Accounting Onramp Transak Webhook Post",
                   "type": "object"
                 }
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
-        "summary": "Moonpay Onramp Webhook",
+        "summary": "Transak Onramp Webhook",
         "tags": [
           "Accounting"
         ]

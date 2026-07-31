@@ -402,6 +402,9 @@ def test_pending_queries_moonpay_by_customer_and_filters_signed_intents(
         {
             "transaction_id": intent["transaction_id"],
             "external_transaction_id": intent["transaction_id"],
+            "provider": "moonpay",
+            "provider_transaction_id": "moonpay-tx-1",
+            "provider_asset_code": "usdc",
             "moonpay_transaction_id": "moonpay-tx-1",
             "status": "completed",
             "wallet_address": DEPOSIT_ADDRESS,
@@ -867,12 +870,10 @@ def test_pending_rejects_wrong_owner_exact_intent(monkeypatch, tmp_path) -> None
     )
 
     assert response.status_code == 400
-    assert (
-        response.json()["detail"] == "MoonPay externalTransactionId does not belong to the caller"
-    )
+    assert response.json()["detail"] == "Signed on-ramp intent does not belong to the caller"
 
 
-def test_webhook_is_verified_but_pending_comes_from_moonpay_lookup(monkeypatch, tmp_path) -> None:
+def test_moonpay_webhook_is_verified_but_pending_comes_from_lookup(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
     intent = _create_intent(client)
     raw = json.dumps(
@@ -884,7 +885,7 @@ def test_webhook_is_verified_but_pending_comes_from_moonpay_lookup(monkeypatch, 
     ).encode()
 
     webhook = client.post(
-        "/v1/accounting/onramp/webhook",
+        "/v1/accounting/onramp/moonpay/webhook",
         content=raw,
         headers={"Moonpay-Signature-V2": _webhook_signature(raw)},
     )
@@ -905,19 +906,19 @@ def test_webhook_is_verified_but_pending_comes_from_moonpay_lookup(monkeypatch, 
     assert len(pending.json()["pending"]) == 1
 
 
-def test_webhook_rejects_bad_signature_and_large_payload(monkeypatch, tmp_path) -> None:
+def test_moonpay_webhook_rejects_bad_signature_and_large_payload(monkeypatch, tmp_path) -> None:
     client, _mock_service = _make_client(monkeypatch, tmp_path)
     raw = json.dumps({"data": {"id": "moonpay-tx-1"}}).encode()
 
     bad_signature = client.post(
-        "/v1/accounting/onramp/webhook",
+        "/v1/accounting/onramp/moonpay/webhook",
         content=raw,
         headers={"Moonpay-Signature-V2": "t=1,s=bad"},
     )
     assert bad_signature.status_code == 401
 
     stale_signature = client.post(
-        "/v1/accounting/onramp/webhook",
+        "/v1/accounting/onramp/moonpay/webhook",
         content=raw,
         headers={"Moonpay-Signature-V2": _webhook_signature(raw, timestamp=1)},
     )
@@ -925,7 +926,7 @@ def test_webhook_rejects_bad_signature_and_large_payload(monkeypatch, tmp_path) 
     assert stale_signature.json()["detail"] == "MoonPay signature timestamp is outside tolerance"
 
     too_large = client.post(
-        "/v1/accounting/onramp/webhook",
+        "/v1/accounting/onramp/moonpay/webhook",
         content=b"x" * (routes._ONRAMP_WEBHOOK_MAX_BODY_BYTES + 1),
         headers={"Moonpay-Signature-V2": _webhook_signature(b"x")},
     )

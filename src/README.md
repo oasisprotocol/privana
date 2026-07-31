@@ -25,6 +25,8 @@ src/
 │   ├── withdrawal_processor.py#   Polls Sapphire, resolves, broadcasts
 │   ├── accounting_contract.py #   Sapphire client (ROFL or direct-key path)
 │   ├── onramp_intent.py       #   Signed intent codec + ROFL-derived key ring
+│   ├── onramp.py              #   MoonPay adapter
+│   ├── transak.py             #   Bounded Transak token/session/order adapter
 │   ├── rofl_signer_bootstrap.py # Publish roflSignerAddress at startup
 │   ├── gas_price_bootstrap.py #   Sync per-chain gas prices at startup
 │   ├── token_info_bootstrap.py #  Register configured tokens at startup
@@ -85,6 +87,19 @@ Client                       DepositProcessor              SweepEngine          
 ```
 
 Key files: `services/deposit_processor.py`, `services/deposit_verifier.py`, `services/sweep_engine.py`.
+
+### On-Ramp Flow
+
+`ONRAMP_PROVIDER` selects either MoonPay or Transak for new launches. Both providers are thin correlation adapters around the same signed intent and deposit authority:
+
+1. `POST /onramp/intent` binds the authenticated user, freshly derived deposit address, registered token, chain, provider, and asset.
+2. MoonPay uses `POST /onramp/sign-url`; Transak uses backend-only `POST /onramp/session` with a trusted proxy-owned client IP. The browser must preserve `Referer` when it opens the returned opaque URL—never use `noreferrer` or `no-referrer`.
+3. `GET /onramp/pending` performs bounded provider reads and returns only strictly admitted completed orders with an on-chain transaction hash.
+4. The client submits the matching transfer-log amount to `/deposits/check`; only the existing verifier → sweep → ROFL credit path changes balances.
+
+Recovery is stateless. The selected provider supplies wallet bootstrap, while explicitly supplied signed intents dispatch exact recovery to their encoded provider. Transak Partner Access Tokens are cached in memory using returned `expiresAt`, refreshed single-flight, and retried once only after an explicit `401`. Webhooks are verified, redacted observability signals and never create local order state or credit.
+
+Key files: `services/onramp_intent.py`, `services/onramp.py`, `services/transak.py`, `api/routes.py`.
 
 ### Sweep State Machine
 
@@ -197,6 +212,7 @@ Key file: `services/token_info_bootstrap.py`.
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
 | On-ramp intent key ring | Derived in-memory from ROFL raw-256 key IDs at startup | Re-derived on each start; deterministic per ROFL app and key ID. |
 | Withdrawal high-water marks | In-memory only (`WithdrawalProcessor._chain_high_water_mark`) | Rebuilt on restart via the catch-up pass. |
+| Transak Partner Access Token | In-memory only (`TransakService`) | Refreshed from `expiresAt`; the current value authenticates API reads, while current and bounded previous values verify webhooks. |
 
 ## Configuration
 
@@ -215,7 +231,7 @@ ChainConfig(
 
 Adding a new chain is a single `CHAIN_CONFIGS` entry — no parallel dicts to keep in sync.
 
-Environment variables: see `.env.example`. Notable ones:
+Environment variables: see `.env.localnet`, `.env.testnet`, and `.env.localnet.secrets.example`. Notable ones:
 
 - `SAPPHIRE_RPC_URL`, `ALCHEMY_API_KEY` — chain RPC access
 - `ACCOUNTING_CONTRACT_ADDRESS` — the deployed proxy
@@ -227,15 +243,22 @@ Environment variables: see `.env.example`. Notable ones:
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
 - `DISABLE_ROFL_KEYS` (local dev only) — use non-TEE AuthToken/JWT keys and publicly derivable on-ramp intent keys; never enable in production
 - `SWEEP_STATE_DIR` (default `/data/sweep-engine`) — sweep state directory
+- `ONRAMP_PROVIDER` — required deployment-owned provider selection; shipped environments select `moonpay`
+- `TRANSAK_API_KEY`, `TRANSAK_API_SECRET` — backend-only partner credentials
+- `TRANSAK_API_BASE_URL`, `TRANSAK_GATEWAY_BASE_URL`, `TRANSAK_REFERRER_DOMAIN` — approved Transak environment/domain
+- `TRANSAK_CLIENT_IP_HEADER` — proxy-owned single client-IP header; leave unset until spoofing is prevented
+- `TRANSAK_CRYPTO_CURRENCY_CODE`, `TRANSAK_NETWORK`, `TRANSAK_CHAIN_ID`, `TRANSAK_TOKEN_ADDRESS` — the one supported Transak asset
+
+Invalid or incomplete Transak configuration disables its endpoints with `503` without blocking application startup. Do not switch `ONRAMP_PROVIDER=transak` until the asset is registered and the proxy/header, allowlist, credentials, and one-worker token-refresh topology are verified.
 
 ## Running Locally
 
 ```shell
 # All-in-one local stack (no ROFL needed):
-docker compose -f compose.local.yaml up --build
+docker compose -f compose.localnet.yaml up --build
 ```
 
-`compose.local.yaml` reads from `.env` and uses `Dockerfile.local` (uv pre-installed). When running with `SAPPHIRE_PRIVATE_KEY` set, the ROFL appd code paths are bypassed — the FDC relayer / signer is the EOA derived from that key.
+`compose.localnet.yaml` builds with `.env.localnet` and accepts secrets through the runtime environment. When running with `SAPPHIRE_PRIVATE_KEY` set, the ROFL appd code paths are bypassed — the FDC relayer / signer is the EOA derived from that key.
 
 ## Testing
 
@@ -265,3 +288,5 @@ Notable test files:
 | `test_gas_price_bootstrap.py` | Idempotent per-chain gas price sync |
 | `test_token_info_bootstrap.py` | Idempotent token registration |
 | `test_accounting_contract_service.py` | Sapphire client (ROFL vs direct-key paths) |
+| `test_transak.py` | Token lifecycle, sessions, bounded orders, strict admission, webhook verification |
+| `test_transak_routes.py` | Provider selection, auth/ownership, registry binding, recovery, rate/error mapping |
