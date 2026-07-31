@@ -4,7 +4,7 @@ import { keccak256, Wallet } from 'ethers';
 import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, mockAuthToken, waitForImplementationChange } from './utils';
+import { deployMockAccounting, getDeployer, mockAuthToken } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
@@ -1462,12 +1462,19 @@ describe('Upgradability', function () {
     const tokenInfoBefore = await accounting.tokens(TEST_TOKEN.tokenId);
     expect(balanceBefore).to.equal(initialBalance);
 
-    // Upgrade to the same implementation (simulates an upgrade)
+    // Upgrade to the same implementation (simulates an upgrade).
+    // UPUPSUpgradeable requires proposing the new implementation in one block
+    // and accepting it in a later block.
     const AccountingV2Factory = await ethers.getContractFactory('MockAccounting');
-    const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
+    const newImplAddress = await upgrades.prepareUpgrade(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
       constructorArgs: [await mockSiweAuth.getAddress()]
-    }) as unknown as MockAccounting;
+    }) as string;
+
+    await (await accounting.proposeUpgrade(newImplAddress, 0)).wait();
+    await (await accounting.upgradeToAndCall(newImplAddress, "0x")).wait();
+
+    const upgraded = (await ethers.getContractFactory('MockAccounting')).attach(proxyAddress) as unknown as MockAccounting;
 
     // Verify state is preserved after upgrade
     const balanceAfter = await upgraded.getBalance(user.address, TEST_TOKEN.tokenId);
@@ -1575,17 +1582,20 @@ describe('Upgradability', function () {
     const balanceBefore = await accounting.getBalance(user.address, TEST_TOKEN.tokenId);
     expect(balanceBefore).to.equal(initialBalance);
 
-    // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1)
-    const implementationBefore = await upgrades.erc1967.getImplementationAddress(proxyAddress);
+    // Upgrade to V2 (reinitializer doesn't chain parent inits — they ran in V1).
+    // UPUPSUpgradeable requires proposing the new implementation in one block and
+    // accepting it in a later block.
     const AccountingV2Factory = await ethers.getContractFactory('MockAccountingV2');
-    const upgraded = await upgrades.upgradeProxy(proxyAddress, AccountingV2Factory, {
+    const newImplAddress = await upgrades.prepareUpgrade(proxyAddress, AccountingV2Factory, {
       kind: 'uups',
       unsafeAllow: ['missing-initializer'],
       constructorArgs: [await mockSiweAuth.getAddress()],
-    }) as unknown as MockAccountingV2;
+    }) as string;
 
-    // sapphire-paratime#688: upgradeProxy may return before the upgrade tx lands.
-    await waitForImplementationChange(proxyAddress, implementationBefore);
+    await (await accounting.proposeUpgrade(newImplAddress, 0)).wait();
+    await (await accounting.upgradeToAndCall(newImplAddress, "0x")).wait();
+
+    const upgraded = (await ethers.getContractFactory('MockAccountingV2')).attach(proxyAddress) as unknown as MockAccountingV2;
 
     // Call reinitializer
     await (await upgraded.initializeV2(42)).wait();
