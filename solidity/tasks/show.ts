@@ -22,7 +22,7 @@ task("show")
 
     const accounting = await hre.ethers.getContractAt("Accounting", args.address);
 
-    const [implAddress, version, owner, siweAuthAddress, withdrawalCount, tokenIds] =
+    const [implAddress, version, owner, siweAuthAddress, withdrawalCount, tokenIds, proposedUpgradeImpl, proposedUpgradeImplHash, proposedUpgradeMinBlockNumber] =
       await Promise.all([
         tryCall(() => hre.upgrades.erc1967.getImplementationAddress(args.address)),
         tryCall(() => accounting.VERSION()),
@@ -30,7 +30,12 @@ task("show")
         tryCall(() => accounting.siweAuth()),
         tryCall(() => accounting.withdrawalCount()),
         tryCall(() => accounting.getRegisteredTokens()),
+        tryCall(() => accounting.proposedUpgradeImplementation()),
+        tryCall(() => accounting.proposedUpgradeImplementationHash()),
+        tryCall(() => accounting.proposedUpgradeMinBlockNumber()),
       ]);
+
+    const hasProposedUpgrade = proposedUpgradeImpl !== undefined && proposedUpgradeImpl !== hre.ethers.ZeroAddress;
 
     console.log("=== Accounting Contract Info ===");
     console.log("Proxy address:       ", args.address);
@@ -39,6 +44,12 @@ task("show")
     console.log("Owner:               ", owner);
     console.log("SiweAuth address:    ", siweAuthAddress);
     console.log("Withdrawal count:    ", withdrawalCount?.toString());
+    console.log("Proposed upgrade:    ", hasProposedUpgrade ? "yes" : "none");
+    if (hasProposedUpgrade) {
+      console.log("  New implementation:     ", proposedUpgradeImpl);
+      console.log("  New implementation hash:", proposedUpgradeImplHash);
+      console.log("  Min block number:       ", proposedUpgradeMinBlockNumber?.toString());
+    }
 
     console.log(`\n=== Registered Tokens (${tokenIds?.length ?? 0}) ===`);
     for (const tokenId of tokenIds ?? []) {
@@ -46,7 +57,7 @@ task("show")
       const typeIndex = tokenInfo !== undefined ? Number(tokenInfo.tokenType) : undefined;
       const typeName = typeIndex !== undefined ? TOKEN_TYPE_NAMES[typeIndex] ?? `Unknown(${typeIndex})` : undefined;
 
-      console.log(`\nToken ID: ${tokenId}`);
+      console.log(`\n  Token ID: ${tokenId}`);
       console.log(`  Type: ${typeName}`);
 
       if (typeIndex === 0) {
@@ -109,5 +120,8 @@ task("show")
       roflSignerAddress,
       withdrawalCount: withdrawalCount?.toString(),
       tokenIds,
+      proposedUpgradeImpl: hasProposedUpgrade ? proposedUpgradeImpl : undefined,
+      proposedUpgradeImplHash: hasProposedUpgrade ? proposedUpgradeImplHash : undefined,
+      proposedUpgradeMinBlockNumber: hasProposedUpgrade ? proposedUpgradeMinBlockNumber?.toString() : undefined,
     };
   });

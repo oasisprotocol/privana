@@ -168,8 +168,9 @@ npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540
 npx hardhat upgrade --network sapphire --address <accounting-proxy-address>
 ```
 
-*Option 2:* With `SECRET_KEY` used to deploy an implementation only; the 
-owner is Safe account that will be signed and submitted afterwards: 
+*Option 2:* With `SECRET_KEY` used to deploy an implementation only. The 
+owner is Safe account that will sign and execute upgrade transactions 
+separately:
 
 ```shell
 # Sapphire Testnet
@@ -178,6 +179,15 @@ npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540
 # Sapphire Mainnet
 npx hardhat upgrade --network sapphire --address <accounting-proxy-address> --output-safe accounting-upgrade-safe.json
 ```
+
+This will generate two Safe Transaction Builder JSON files:
+
+1. the `proposeUpgrade()` transaction with suffix -1
+2. the `upgradeToAndCall()` transaction with suffix -2
+
+Both transactions need to be separately signed and submitted in order to upgrade
+the Accounting contracts. Combining them inside a single batch is not possible 
+due to the simulation attack gated by `UPUPSUpgradeable`.
 
 ### Check status
 
