@@ -162,7 +162,7 @@ The Accounting contract uses the UUPS upgradeable proxy pattern. To upgrade:
 
 ```shell
 # Sapphire Testnet
-npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642
+npx hardhat upgrade --network sapphire-testnet --address 0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f
 
 # Sapphire Mainnet
 npx hardhat upgrade --network sapphire --address <accounting-proxy-address>
@@ -174,7 +174,7 @@ separately:
 
 ```shell
 # Sapphire Testnet
-npx hardhat upgrade --network sapphire-testnet --address 0xad3C76e4E621C0cfF7540479Ee9B0A945723A642 --output-safe accounting-upgrade-safe.json
+npx hardhat upgrade --network sapphire-testnet --address 0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f --output-safe accounting-upgrade-safe.json
 
 # Sapphire Mainnet
 npx hardhat upgrade --network sapphire --address <accounting-proxy-address> --output-safe accounting-upgrade-safe.json
@@ -274,26 +274,17 @@ Run `npx hardhat <task> --help` for parameter details.
 
 | Contract | Address |
 |----------|---------|
-| AccountingSiweAuth | `0xFc97d47F0bc8f4E50333D34c281705E0666D3fD7` |
-| Accounting (Proxy) | `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642` |
-| Accounting (Implementation) | `0x12fb6720c445aa2d38009eb64e191e26C30b4CAA` (refresh after each upgrade) |
+| Accounting (Proxy) | `0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f` |
 
 **ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
-
-**Source-chain operator addresses** (derived inside Sapphire; query via `cast call`):
-
-| Role | Address | Funding |
-|------|---------|---------|
-| `evmAddress` (sweep / withdrawal signer) | `0xF0006F3222b033De6DBE4CeB1E5AE99E54Aa398F` | None — does not pay gas directly. |
-| `gasTankAddress` (funds deposit addresses for ERC20 sweeps) | `0xDfFE6d45F1D52320d8F05CCd6623b09EcA05CF53` | **Must hold native gas on every source chain** (Base Sepolia at minimum). |
 
 ### Production (Sapphire Mainnet)
 
 | Contract | Address |
 |----------|---------|
-| AccountingSiweAuth | TBD |
 | Accounting (Proxy) | TBD |
-| Accounting (Implementation) | TBD |
+
+**ROFL App ID:** TBD
 
 ## Security Considerations
 
