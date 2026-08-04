@@ -22,6 +22,6 @@ application running in ROFL TEE.
 ### Staging (Sapphire Testnet)
 
 - **API**: https://api.testnet.privana.finance
-- **Accounting Proxy**: `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642`
+- **Accounting Proxy**: `0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f`
 
 See [solidity/README.md](solidity/README.md) for full contract addresses and deployment instructions.
