@@ -1,5 +1,5 @@
 name: privana
-version: 0.1.0
+version: 1.0.0
 tee: tdx
 kind: container
 resources:
@@ -14,7 +14,7 @@ artifacts:
   kernel: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage1.bin#e5d4d654ca1fa2c388bf64b23fc6e67815893fc7cb8b7cfee253d87963f54973
   stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.2/stage2-podman.tar.bz2#b2ea2a0ca769b6b2d64e3f0c577ee9c08f0bb81a6e33ed5b15b2a7e50ef9a09f
   container:
-    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.8.6/rofl-containers#5aa26a3c5a7e1d284e217959d89b7a620ea7b7fc5079909e25042124ffb384e8
+    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.9.0/rofl-containers#e2e074d03ab2fbacaacb01e6d63ce093fde04e4cc620dd8804e8afbb20390525
 deployments:
   testnet:
     default: true
@@ -36,8 +36,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: P266Qy8v9dgBRDi9vvpLWElgCRoVybVbKzKdDOLDDsIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 8wPTwNYPQVjRMJIdhLGwo2PvCUHz7xAVNLgjetPD1ZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: TgyKinwrhYotMsIt4l1FhCLrA38NgP6EuOwbaq4P22QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: aREdTHFYg7YsMxuArca9wK9ysWzPtbGrkmfZC8c4SyYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -51,6 +51,10 @@ deployments:
         value: pGJwa1gg+GkRdpLmNKkN8EOvJszYytR08oMKYNv3exnVE4GYJzlkbmFtZVgiK9e4G74nH1lq3YoJEynYNZ9HqTLmRVySwZNviVoOKoNSzWVub25jZU8JBU1cySl01cC6ZZU2NFZldmFsdWVYOBHsaEtTnqhQ2hlDUNnQhOzD7NKctfZqKRUrjz94H4jr1kwnQChHQUpiZHayLFOmfhqC/fN5NyVK
       - name: MOONPAY_WEBHOOK_SECRET_KEY
         value: pGJwa1ggRpWMFpgqRv4PZ6RXVjr1w4BxjhULkoEFMYpGXqMBYnpkbmFtZVgqXgdNOwR9yKKbmimw34+uenH6hZdLYuzuFkbCnWJYaX/vX2vWMOe4V3mjZW5vbmNlT5S7RBE/bX9HoUbuGiAUYmV2YWx1ZVg45wyUN6gFz40R71+kSZR+BHENNNXUwDL+HU76gjrzV46WyMPYw8YGh1zcNYLC2M2N+hJUKNKdvc8=
+      - name: TRANSAK_API_KEY
+        value: pGJwa1gg7N4XxCsCIzfNipitqBguQ4CJ67oSTsU1UYmJ0hy4Wl1kbmFtZVgfgKjVd+y3xAJf4Y9TUIEYolk1poogXOHMs722/WswQGVub25jZU/J2GW//DonhJXEWj6tGvZldmFsdWVYNAhjXj0ZaTDZli/udkBqxBYYaEV/wFyzG4SRyU0ksn5CjKG90Zc+N469ZphXqtNDRaycUeQ=
+      - name: TRANSAK_API_SECRET
+        value: pGJwa1ggSDDcn6jHs7IHIjLb2TfKFoIdTVKHdPMe75NqFriPWwxkbmFtZVgie5rbz70ju1y1WAH5GMCt+MM4WlLgTfajRKtotGY1WvYfPmVub25jZU+7VRI4Ovf0Hi4MozHnKg9ldmFsdWVYKGvklACVb1w79pEIA15xRJ0tDA7sq3JsV9uxFoSWN6PhTge0cgvt7aQ=
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
@@ -67,4 +71,4 @@ deployments:
           log.view:
             - oasis1qrrvz7pw8eysww22qzutnaufppam0avuduuxnq2f
 tooling:
-  version: 0.18.6
+  version: 0.19.1
