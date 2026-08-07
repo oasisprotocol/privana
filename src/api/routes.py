@@ -828,6 +828,7 @@ async def get_pending_onramps(
                     )
                     orders = await get_transak_service().get_orders_by_partner_order_id(
                         intent_id,
+                        issued_at=int(intent["iat"]),
                         config=transak_config,
                     )
                     exact_rows, diagnostics = pending_records_from_transak_orders(

@@ -387,7 +387,7 @@ async def test_malformed_success_json_is_mapped_to_provider_error(raw_body) -> N
         await service.get_orders_by_wallet(WALLET, config=CONFIG)
 
 
-async def test_orders_use_explicit_bounds_filters_and_pagination() -> None:
+async def test_wallet_orders_use_default_dates_filters_and_pagination() -> None:
     intent = _intent()
     requests: list[httpx.Request] = []
     full_page = [_order(intent["transaction_id"], _id=f"order-{index}") for index in range(100)]
@@ -402,15 +402,15 @@ async def test_orders_use_explicit_bounds_filters_and_pagination() -> None:
 
     service = transak.TransakService(
         transport=httpx.MockTransport(handler),
-        now=lambda: 1_784_806_400,  # 2026-07-23T00:00:00Z
+        now=lambda: 1_784_806_400,  # 2026-07-23T11:33:20Z
     )
     orders = await service.get_orders_by_wallet(WALLET, config=CONFIG)
     assert len(orders) == 101
     order_requests = [request for request in requests if request.url.path.endswith("/orders")]
     assert len(order_requests) == 2
     params = order_requests[0].url.params
-    assert params["startDate"] == "2025-07-23"
-    assert params["endDate"] == "2026-07-23"
+    assert "startDate" not in params
+    assert "endDate" not in params
     assert params["filter[productsAvailed]"] == '["BUY"]'
     assert params["filter[status]"] == "COMPLETED"
     assert params["filter[sortOrder]"] == "desc"
@@ -420,6 +420,7 @@ async def test_orders_use_explicit_bounds_filters_and_pagination() -> None:
 
 async def test_exact_order_lookup_is_one_capped_page() -> None:
     intent = _intent()
+    issued_at = 1_784_806_400  # 2026-07-23T11:33:20Z
     order_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -438,9 +439,158 @@ async def test_exact_order_lookup_is_one_capped_page() -> None:
         transport=httpx.MockTransport(handler),
         now=lambda: 1_800_000_000,
     )
-    await service.get_orders_by_partner_order_id(intent["transaction_id"], config=CONFIG)
+    await service.get_orders_by_partner_order_id(
+        intent["transaction_id"],
+        issued_at=issued_at,
+        config=CONFIG,
+    )
     assert len(order_requests) == 1
-    assert order_requests[0].url.params["filter[partnerOrderId]"] == intent["transaction_id"]
+    params = order_requests[0].url.params
+    assert params["filter[partnerOrderId]"] == intent["transaction_id"]
+    assert params["startDate"] == "2026-07-23"
+    assert params["endDate"] == "2026-08-23"
+
+
+async def test_exact_order_lookup_uses_today_for_a_fresh_intent() -> None:
+    intent = _intent()
+    order_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/refresh-token"):
+            return _token_response("token", 1_800_000_600)
+        order_requests.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    service = transak.TransakService(
+        transport=httpx.MockTransport(handler),
+        now=lambda: 1_784_806_400,  # 2026-07-23T11:33:20Z
+    )
+    await service.get_orders_by_partner_order_id(
+        intent["transaction_id"],
+        issued_at=1_784_806_400,
+        config=CONFIG,
+    )
+
+    params = order_requests[0].url.params
+    assert params["startDate"] == "2026-07-23"
+    assert params["endDate"] == "2026-07-23"
+
+
+async def test_exact_order_not_found_response_is_empty() -> None:
+    intent = _intent()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/refresh-token"):
+            return _token_response("token", 1_800_000_600)
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Invalid partnerOrderId or order not found",
+                    "name": "Bad Request",
+                }
+            },
+        )
+
+    service = transak.TransakService(
+        transport=httpx.MockTransport(handler),
+        now=lambda: 1_800_000_000,
+    )
+
+    assert (
+        await service.get_orders_by_partner_order_id(
+            intent["transaction_id"],
+            issued_at=1_784_806_400,
+            config=CONFIG,
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload", "error_type"),
+    [
+        (
+            400,
+            {
+                "error": {
+                    "message": (
+                        "Date difference between start and end date should not be greater than "
+                        "31 days"
+                    )
+                }
+            },
+            transak.TransakAPIError,
+        ),
+        (401, {"error": {"message": "Unauthorized"}}, transak.TransakAPIError),
+        (429, {"error": {"message": "Rate limited"}}, transak.TransakRateLimitError),
+        (500, {"error": {"message": "Unavailable"}}, transak.TransakAPIError),
+    ],
+)
+async def test_exact_order_lookup_preserves_other_provider_errors(
+    status_code, payload, error_type
+) -> None:
+    intent = _intent()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/refresh-token"):
+            return _token_response("token", 1_800_000_600)
+        return httpx.Response(status_code, json=payload)
+
+    service = transak.TransakService(
+        transport=httpx.MockTransport(handler),
+        now=lambda: 1_800_000_000,
+    )
+
+    with pytest.raises(error_type):
+        await service.get_orders_by_partner_order_id(
+            intent["transaction_id"],
+            issued_at=1_784_806_400,
+            config=CONFIG,
+        )
+
+
+async def test_wallet_lookup_does_not_hide_exact_not_found_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/refresh-token"):
+            return _token_response("token", 1_800_000_600)
+        return httpx.Response(
+            400,
+            json={"error": {"message": "Invalid partnerOrderId or order not found"}},
+        )
+
+    service = transak.TransakService(
+        transport=httpx.MockTransport(handler),
+        now=lambda: 1_800_000_000,
+    )
+
+    with pytest.raises(transak.TransakAPIError):
+        await service.get_orders_by_wallet(WALLET, config=CONFIG)
+
+
+async def test_wallet_order_lookup_is_capped_at_ten_pages() -> None:
+    intent = _intent()
+    order_requests: list[httpx.Request] = []
+    full_page = [_order(intent["transaction_id"], _id=f"order-{index}") for index in range(100)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/refresh-token"):
+            return _token_response("token", 1_800_000_600)
+        order_requests.append(request)
+        return httpx.Response(200, json={"meta": {"totalCount": 2_000}, "data": full_page})
+
+    service = transak.TransakService(
+        transport=httpx.MockTransport(handler),
+        now=lambda: 1_800_000_000,
+    )
+    orders = await service.get_orders_by_wallet(WALLET, config=CONFIG)
+
+    assert len(orders) == 1_000
+    assert len(order_requests) == transak.TRANSAK_ORDER_MAX_PAGES
+    assert [request.url.params["skip"] for request in order_requests] == [
+        str(page * transak.TRANSAK_ORDER_PAGE_LIMIT)
+        for page in range(transak.TRANSAK_ORDER_MAX_PAGES)
+    ]
 
 
 @pytest.mark.parametrize(

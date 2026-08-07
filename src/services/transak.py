@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 TRANSAK_ORDER_PAGE_LIMIT = 100
 TRANSAK_ORDER_MAX_PAGES = 10
-TRANSAK_RECOVERY_DAYS = 365
+TRANSAK_EXACT_ORDER_WINDOW_DAYS = 31
 TRANSAK_WIDGET_SESSION_TTL_SECONDS = 5 * 60
 TRANSAK_WEBHOOK_PREVIOUS_TOKEN_OVERLAP_SECONDS = 15 * 60
 TRANSAK_MAX_RESPONSE_BYTES = 1024 * 1024
@@ -47,6 +47,7 @@ _MAX_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z
 _HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _PROVIDER_CODE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,31}\Z")
 _TX_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}\Z")
+_EXACT_ORDER_NOT_FOUND_MESSAGE = "Invalid partnerOrderId or order not found"
 
 
 class TransakAPIError(OnRampError):
@@ -229,6 +230,7 @@ class TransakService:
         self,
         transaction_id: str,
         *,
+        issued_at: int,
         config: TransakConfig | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch a bounded exact signed-intent order result."""
@@ -236,6 +238,8 @@ class TransakService:
         return await self._get_orders(
             {"filter[partnerOrderId]": transaction_id},
             max_pages=1,
+            date_bounds=_exact_order_date_bounds(issued_at, self._now()),
+            exact_not_found_is_empty=True,
             config=config or load_transak_config(),
         )
 
@@ -245,11 +249,13 @@ class TransakService:
         *,
         config: TransakConfig | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch at most the configured 365-day, capped wallet history."""
+        """Fetch Transak's default, capped wallet history."""
 
         return await self._get_orders(
             {"filter[walletAddress]": Web3.to_checksum_address(wallet_address)},
             max_pages=TRANSAK_ORDER_MAX_PAGES,
+            date_bounds=None,
+            exact_not_found_is_empty=False,
             config=config or load_transak_config(),
         )
 
@@ -305,28 +311,30 @@ class TransakService:
         filters: Mapping[str, str],
         *,
         max_pages: int,
+        date_bounds: tuple[str, str] | None,
+        exact_not_found_is_empty: bool,
         config: TransakConfig,
     ) -> list[dict[str, Any]]:
-        start_date, end_date = _recovery_date_bounds(self._now())
         orders: list[dict[str, Any]] = []
         for page in range(max_pages):
             skip = page * TRANSAK_ORDER_PAGE_LIMIT
             params = {
                 "limit": TRANSAK_ORDER_PAGE_LIMIT,
                 "skip": skip,
-                "startDate": start_date,
-                "endDate": end_date,
                 "filter[productsAvailed]": '["BUY"]',
                 "filter[status]": "COMPLETED",
                 "filter[sortOrder]": "desc",
                 **filters,
             }
+            if date_bounds is not None:
+                params["startDate"], params["endDate"] = date_bounds
             payload = await self._authenticated_json_request(
                 "GET",
                 f"{config.api_base_url}/partners/api/v2/orders",
                 operation="order lookup",
                 config=config,
                 params=params,
+                exact_not_found_is_empty=exact_not_found_is_empty,
             )
             page_orders, total_count = _orders_page(payload)
             orders.extend(page_orders)
@@ -353,6 +361,7 @@ class TransakService:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: Mapping[str, Any] | None = None,
+        exact_not_found_is_empty: bool = False,
     ) -> Any:
         token = await self._access_token(config)
         response = await self._json_request(
@@ -379,6 +388,8 @@ class TransakService:
                 params=params,
                 json_body=json_body,
             )
+        if exact_not_found_is_empty and _is_exact_order_not_found(response):
+            return {"data": []}
         return _successful_payload(response, operation=operation)
 
     async def _access_token(self, config: TransakConfig) -> _AccessToken:
@@ -705,10 +716,23 @@ def _provider_code(value: str | None) -> str:
     return candidate
 
 
-def _recovery_date_bounds(now: float) -> tuple[str, str]:
-    end = datetime.fromtimestamp(now, tz=timezone.utc).date()
-    start = end - timedelta(days=TRANSAK_RECOVERY_DAYS)
+def _exact_order_date_bounds(issued_at: int, now: float) -> tuple[str, str]:
+    start = datetime.fromtimestamp(issued_at, tz=timezone.utc).date()
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    end = min(today, start + timedelta(days=TRANSAK_EXACT_ORDER_WINDOW_DAYS))
+    if end < start:
+        end = start
     return start.isoformat(), end.isoformat()
+
+
+def _is_exact_order_not_found(
+    response: tuple[int, Any, Mapping[str, str]],
+) -> bool:
+    status_code, payload, _headers = response
+    if status_code != 400 or not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    return isinstance(error, dict) and error.get("message") == _EXACT_ORDER_NOT_FOUND_MESSAGE
 
 
 def _orders_page(payload: Any) -> tuple[list[dict[str, Any]], int | None]:
@@ -924,11 +948,11 @@ def get_transak_service() -> TransakService:
 
 
 __all__ = [
+    "TRANSAK_EXACT_ORDER_WINDOW_DAYS",
     "TRANSAK_MAX_RESPONSE_BYTES",
     "TRANSAK_MAX_WEBHOOK_JWT_BYTES",
     "TRANSAK_ORDER_MAX_PAGES",
     "TRANSAK_ORDER_PAGE_LIMIT",
-    "TRANSAK_RECOVERY_DAYS",
     "TRANSAK_WEBHOOK_PREVIOUS_TOKEN_OVERLAP_SECONDS",
     "TRANSAK_WIDGET_SESSION_TTL_SECONDS",
     "TransakAPIError",
