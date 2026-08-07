@@ -372,6 +372,45 @@ def test_pending_deduplicates_exact_and_wallet_transak_order(monkeypatch, tmp_pa
     assert response.status_code == 200
     assert len(response.json()["pending"]) == 1
     provider_service.get_orders_by_partner_order_id.assert_awaited_once()
+    exact_call = provider_service.get_orders_by_partner_order_id.await_args
+    assert exact_call.args == (intent["transaction_id"],)
+    assert (
+        exact_call.kwargs["issued_at"]
+        == onramp_intent.decode_intent(intent["transaction_id"])["iat"]
+    )
+    provider_service.get_orders_by_wallet.assert_awaited_once()
+
+
+def test_pending_missing_exact_order_survives_wallet_failure(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    provider_service.get_orders_by_wallet.side_effect = transak.TransakAPIError(
+        "Transak order lookup failed"
+    )
+
+    response = client.get(
+        "/v1/accounting/onramp/pending",
+        params={"externalTransactionId": intent["transaction_id"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"pending": []}
+    provider_service.get_orders_by_partner_order_id.assert_awaited_once()
+    provider_service.get_orders_by_wallet.assert_awaited_once()
+
+
+def test_pending_bounds_transak_provider_requests(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    intents = [_create_intent(client) for _ in range(10)]
+
+    response = client.get(
+        "/v1/accounting/onramp/pending",
+        params=[("externalTransactionId", intent["transaction_id"]) for intent in intents],
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"pending": []}
+    assert provider_service.get_orders_by_partner_order_id.await_count == 10
     provider_service.get_orders_by_wallet.assert_awaited_once()
 
 
