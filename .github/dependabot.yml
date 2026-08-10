@@ -4,6 +4,11 @@ updates:
     directory: "/solidity"
     schedule:
       interval: "weekly"
+    groups:
+      openzeppelin-contracts:
+        patterns:
+          - "@openzeppelin/contracts"
+          - "@openzeppelin/contracts-upgradeable"
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]

@@ -52,7 +52,7 @@ jobs:
             type=raw,value=testnet,enable=${{ startsWith(github.ref, 'refs/tags/privana/v') && contains(github.ref, '-testnet') }}
 
       - name: Install Solidity dependencies
-        run: cd solidity && bun install
+        run: cd solidity && bun install --frozen-lockfile
 
       - name: Cache Hardhat compiler
         uses: actions/cache@v4
