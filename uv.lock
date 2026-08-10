@@ -1402,7 +1402,7 @@ wheels = [
 
 [[package]]
 name = "oasis-sapphire-py"
-version = "0.4.1"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
@@ -1410,7 +1410,7 @@ dependencies = [
     { name = "web3" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/56/708e3e96689187f1bd5f0ceda14cb7489748f76c54ff8a4929fdd3f93600/oasis_sapphire_py-0.4.1-py3-none-any.whl", hash = "sha256:a116f9397176b878449adb2cd9a12635d457f32ebb2bfb5ca3929e1546d66f0b", size = 17629, upload-time = "2025-10-28T21:12:07.714Z" },
+    { url = "https://files.pythonhosted.org/packages/12/be/6b2771f716c3d94d249262e85418e9175864d925537c1f0f55af3170ccef/oasis_sapphire_py-0.4.2-py3-none-any.whl", hash = "sha256:e3c957df9958fd6e8e7cf700228d4255bf1f32800974e11770f4ba41b2be65ab", size = 17628, upload-time = "2026-05-07T14:50:33.978Z" },
 ]
 
 [[package]]
@@ -1536,7 +1536,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.2" },
     { name = "oasis-rofl-client", specifier = ">=0.2.0" },
-    { name = "oasis-sapphire-py", specifier = ">=0.4.0" },
+    { name = "oasis-sapphire-py", specifier = ">=0.4.2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.0" },
     { name = "py-trie", marker = "extra == 'test'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.13.4" },
