@@ -1,5 +1,5 @@
 name: privana
-version: 1.0.0
+version: 1.0.1
 tee: tdx
 kind: container
 resources:
@@ -36,8 +36,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: TgyKinwrhYotMsIt4l1FhCLrA38NgP6EuOwbaq4P22QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: aREdTHFYg7YsMxuArca9wK9ysWzPtbGrkmfZC8c4SyYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: i2DIXDjvpu1qQLcEAH2I1sQvi3mN8p18EXNjThmVTYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: JzvFdaMrXp2RuyVTUtXHpHrlACstWkDQ1Ttq7V52kNwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
