@@ -8,6 +8,8 @@ services:
     platform: linux/amd64
     environment:
       - SWEEP_STATE_DIR=/data/sweep-engine
+      - ONRAMP_PROVIDER
+      - TRANSAK_CLIENT_IP_HEADER
       - ALCHEMY_API_KEY
       - MOONPAY_API_KEY
       - MOONPAY_SECRET_KEY
