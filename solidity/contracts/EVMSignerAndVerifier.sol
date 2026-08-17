@@ -43,7 +43,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
     address public roflSignerAddress;
 
     // Sweep gas limits: deposit address → evmAddress (always an EOA)
-    uint64 public constant gasLimitNativeSweep = 21000;
+    uint64 public constant gasLimitNativeSweep = 25000;
     uint64 public constant gasLimitERC20Sweep = 65000;
     // Withdrawal gas limits: evmAddress → user-chosen address (may be a contract)
     uint64 public constant gasLimitNativeWithdraw = 50000;
@@ -265,7 +265,7 @@ abstract contract EVMSignerAndVerifier is Initializable {
      * @notice Sign a native token sweep: depositAddress → evmAddress.
      * @dev Derives deposit keypair internally, signs via EIP155Signer.sign().
      *      ROFL broadcasts the returned signedTx on the source chain.
-     *      ROFL supplies amount (typically balance - 21000*gasPrice) from source chain query.
+     *      ROFL supplies the verified amount to sweep; gas is funded via a separate transaction.
      */
     function generateSweepNativeTransfer(
         address beneficiary,
