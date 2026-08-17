@@ -712,9 +712,7 @@ def test_pending_deposits_requires_auth(monkeypatch) -> None:
 
 
 def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch) -> None:
-    """(a) /deposits/address for 23295 advertises only HONOR erc20 minimum, no native;
-    (b) chains with both native and erc20 registered (84532) advertise both.
-    """
+    """A chain advertises a minimum only for the asset types registered on it."""
     mock_service = MagicMock()
     mock_service.get_deposit_address = AsyncMock(
         return_value="0x" + "aa" * 20,
@@ -744,24 +742,21 @@ def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch)
     assert body["chain_type"] == "evm"
     assert body["version"] == 0
 
-    # (a) 23295 advertises only HONOR erc20 minimum, no native
     min_23295 = body["min_deposit"]["23295"]
     assert "native" not in min_23295
     assert min_23295["erc20"] == str(MIN_DEPOSIT_ERC20_WEI[23295])
 
-    # (b) 84532 advertises both native and erc20 minimums
     min_84532 = body["min_deposit"]["84532"]
     assert min_84532["native"] == str(MIN_DEPOSIT_NATIVE_WEI[84532])
     assert min_84532["erc20"] == str(MIN_DEPOSIT_ERC20_WEI[84532])
 
-    # Unregistered chain has neither advertised
     min_11155111 = body["min_deposit"].get("11155111", {})
     assert "native" not in min_11155111
     assert "erc20" not in min_11155111
 
 
 def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
-    """(c) /deposits/pending accepts chain_id=23295."""
+    """/deposits/pending accepts the Sapphire source chain."""
     from src.services.deposit_discovery import DiscoveryResult
 
     result = DiscoveryResult(

@@ -5,23 +5,19 @@ import { task } from "hardhat/config";
 import { HardhatRuntimeEnvironment } from "hardhat/types";
 import { HttpNetworkConfig } from "hardhat/types/config";
 
-// sapphire-localnet. Mirrors the Sapphire-testnet same-chain deposit path
-// (accounting chain *is* the source chain) — see CHAIN_CONFIGS[23293] in
-// src/config/chain_config.py.
+// sapphire-localnet — see CHAIN_CONFIGS[23293] in src/config/chain_config.py.
 export const SAPPHIRE_LOCALNET_CHAIN_ID = 23293n;
 
-// Well-known public burner key: Hardhat/Anvil test account #0. Published in
-// every Hardhat tutorial, so it is safe to commit and must never hold value.
+// Well-known public burner key (Hardhat/Anvil test account #0): safe to commit, must
+// never hold value.
 //
-// A CREATE address is keccak256(rlp([deployer, nonce]))[12:] — a pure function
-// of the deployer and its nonce, independent of bytecode and constructor args.
-// Deploying from this key at nonce 0 therefore pins LOCALNET_TOKEN_ADDRESS
-// across every localnet reset, which is what lets .env.localnet hardcode the
-// token in ACCOUNTING_TOKEN_INFO instead of rotting after each restart.
+// A CREATE address is keccak256(rlp([deployer, nonce]))[12:] — a pure function of the
+// deployer and its nonce, independent of bytecode and constructor args. Deploying from
+// this key at nonce 0 therefore pins LOCALNET_TOKEN_ADDRESS across every localnet reset,
+// which is what lets .env.localnet hardcode the token in ACCOUNTING_TOKEN_INFO.
 export const LOCALNET_TOKEN_DEPLOYER_KEY =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 export const LOCALNET_TOKEN_DEPLOYER_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-// keccak256(rlp([0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266, 0]))[12:]
 export const LOCALNET_TOKEN_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
 // 1M LHONOR, 18 decimals. Minted to the network's first configured account —
@@ -33,9 +29,9 @@ const INITIAL_SUPPLY = 1_000_000n * 10n ** 18n;
 const DEPLOYER_FUNDING = 10n * 10n ** 18n;
 
 /**
- * First account configured for the network, on an unwrapped provider: SECRET_KEY
- * when set, otherwise index `initialIndex` of the localnet test mnemonic in
- * hardhat.config.ts. Funds the fixed token deployer and receives the supply.
+ * First account configured for the network: SECRET_KEY when set, otherwise index
+ * `initialIndex` of the localnet test mnemonic in hardhat.config.ts. Funds the fixed
+ * token deployer and receives the initial supply.
  */
 function getFunder(hre: HardhatRuntimeEnvironment, provider: JsonRpcProvider): Signer {
   const secretKey = process.env.SECRET_KEY;

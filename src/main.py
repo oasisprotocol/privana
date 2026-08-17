@@ -117,12 +117,9 @@ async def lifespan(_app: FastAPI):
     logger.info("Accounting Module API starting...")
     logger.info("Accounting contract: %s", settings.accounting_contract_address)
 
-    # Fail closed on RPC identity before anything reads a chain, writes to the
-    # contract, or registers a token: every endpoint must report the chain ID it
-    # is filed under, or it is excluded and that chain goes unserved. Runs first
-    # because every service below builds its clients lazily from the narrowed
-    # settings mapping, and because a deployment that can serve no chain should
-    # not sync keys or register tokens on the way to failing.
+    # Must run before anything else: every service below builds its chain clients
+    # lazily from the narrowed settings mapping, and a deployment that can serve no
+    # chain should not sync keys or register tokens on its way to failing.
     served_chains = await initialize_verified_chain_rpc_urls(settings)
     logger.info("Serving source chains: %s", sorted(served_chains))
 

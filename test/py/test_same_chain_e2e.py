@@ -1,15 +1,12 @@
-"""Same-chain E2E (M6.8): the accounting chain is also the deposit source chain.
+"""Same-chain E2E: the accounting chain is also the deposit source chain.
 
-One chain ID plays both roles — deposits arrive, sweeps and gas funding are
-broadcast, credits are recorded, and withdrawals are signed and broadcast, all
-against a single endpoint. Every per-chain number comes from a ``ChainConfig``
-this module builds itself and injects over the consuming modules' lookups, so
-the scenarios stay true to the shape of the config rather than to whatever
-``CHAIN_CONFIGS`` or ``.env.localnet`` happens to hold.
+One chain ID plays both roles — deposits, gas funding, sweeps, credits and
+withdrawals all run against a single endpoint. Per-chain numbers come from a
+``ChainConfig`` built here and injected over the consuming modules' lookups, so
+the scenarios do not drift with ``CHAIN_CONFIGS`` or ``.env.localnet``.
 
-Mocking level matches ``test_sweep_engine.py`` / ``test_withdrawals.py``: real
-DepositVerifier, SweepEngine, DepositProcessor and WithdrawalProcessor over a
-mocked AccountingContractService and a mocked node. No live RPC.
+Real DepositVerifier, SweepEngine, DepositProcessor and WithdrawalProcessor over
+a mocked AccountingContractService and a mocked node; no live RPC.
 """
 
 from types import SimpleNamespace
@@ -128,10 +125,9 @@ def _single_chain_node(
 ) -> AsyncMock:
     """The one node serving both roles.
 
-    Deposit reads and sweep broadcasts hit the same object because on this chain
-    they are the same endpoint: a hash the deposit path asks about could just as
-    well be a hash the sweep path broadcast. So receipts are answered by hash,
-    never by call order.
+    Deposit reads and sweep broadcasts hit the same endpoint on this chain, so a
+    hash the deposit path asks about could equally be one the sweep path
+    broadcast: receipts are answered by hash, never by call order.
     """
     receipts = {_hash_key(k): v for k, v in receipts.items()}
     transactions = {_hash_key(k): v for k, v in (transactions or {}).items()}
@@ -308,12 +304,8 @@ async def _drain_background_sweeps(processor: DepositProcessor) -> None:
 async def test_erc20_deposit_on_the_accounting_chain_is_verified_swept_and_credited(
     processor, verifier, engine, mock_accounting, injected_chain
 ):
-    """A HONOR deposit whose source chain *is* the accounting chain.
-
-    Same chain ID on the verification read, the gas funding broadcast, the sweep
-    broadcast and the credit — nothing in the path treats the accounting chain as
-    unable to be its own source.
-    """
+    """Nothing in the deposit path treats the accounting chain as unable to be its
+    own source chain."""
     node = _single_chain_node(
         receipts={
             ERC20_DEPOSIT_TX: {
@@ -348,14 +340,12 @@ async def test_erc20_deposit_on_the_accounting_chain_is_verified_swept_and_credi
 
         await _drain_background_sweeps(processor)
 
-    # Verification, token resolution and sweep all name the one chain.
     mock_accounting.get_token_id.assert_awaited_once_with(SAME_CHAIN_ID, TOKEN_ADDRESS)
     sweep_kwargs = mock_accounting.generate_sweep_erc20.await_args.kwargs
     assert sweep_kwargs["chain_id"] == SAME_CHAIN_ID
     assert sweep_kwargs["token_address"] == TOKEN_ADDRESS
     assert sweep_kwargs["amount"] == ONE_HONOR
 
-    # Credited against the token registered for this chain, for the full amount.
     credit_kwargs = mock_accounting.credit_deposit.await_args.kwargs
     assert credit_kwargs["beneficiary"] == BENEFICIARY
     assert credit_kwargs["amount"] == ONE_HONOR
@@ -409,11 +399,12 @@ async def test_erc20_sweep_funds_gas_from_the_injected_chain_price(
     gas_kwargs = mock_accounting.generate_gas_funding_tx.await_args.kwargs
     assert gas_kwargs["chain_id"] == SAME_CHAIN_ID
     assert gas_kwargs["to_deposit_address"] == DEPOSIT_ADDRESS
-    assert gas_kwargs["gas_amount"] == SWEEP_GAS_LIMIT_ERC20 * SWEEP_GAS_PRICE * GAS_FUNDING_HEADROOM
+    assert (
+        gas_kwargs["gas_amount"] == SWEEP_GAS_LIMIT_ERC20 * SWEEP_GAS_PRICE * GAS_FUNDING_HEADROOM
+    )
     assert gas_kwargs["gas_amount"] <= injected_chain.gas_funding_amount_wei
     # Gas price comes off the same node the sweep broadcasts to.
     assert gas_kwargs["gas_price"] == SWEEP_GAS_PRICE
-    # The gas tank nonce was read on this chain, for the gas tank address.
     node.eth.get_transaction_count.assert_any_await(GAS_TANK_ADDRESS, "pending")
 
 
@@ -457,14 +448,15 @@ async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
         assert result["token_address"] is None
         await _drain_background_sweeps(processor)
 
-    # Native token id for this chain, resolved through the registry.
     mock_accounting.get_token_id.assert_awaited_once_with(SAME_CHAIN_ID, None)
     sweep_kwargs = mock_accounting.generate_sweep_native.await_args.kwargs
     assert sweep_kwargs["chain_id"] == SAME_CHAIN_ID
     assert sweep_kwargs["amount"] == TWO_ROSE
-    # Native sweeps fund gas for the native sweep limit, not the ERC-20 one.
+
     gas_kwargs = mock_accounting.generate_gas_funding_tx.await_args.kwargs
-    assert gas_kwargs["gas_amount"] == SWEEP_GAS_LIMIT_NATIVE * SWEEP_GAS_PRICE * GAS_FUNDING_HEADROOM
+    assert (
+        gas_kwargs["gas_amount"] == SWEEP_GAS_LIMIT_NATIVE * SWEEP_GAS_PRICE * GAS_FUNDING_HEADROOM
+    )
 
     credit_kwargs = mock_accounting.credit_deposit.await_args.kwargs
     assert credit_kwargs["amount"] == TWO_ROSE
@@ -476,7 +468,7 @@ async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
 async def test_deposit_below_the_injected_erc20_floor_is_rejected(
     processor, verifier, engine, injected_chain
 ):
-    """The floor that applies is the injected chain's, on this chain too."""
+    """The per-chain ERC-20 minimum applies on the accounting chain like any other."""
     short = injected_chain.min_deposit_erc20_wei - 1
     node = _single_chain_node(
         receipts={
@@ -506,10 +498,9 @@ async def test_deposit_below_the_injected_erc20_floor_is_rejected(
 async def test_gas_funding_tx_cannot_be_claimed_as_a_deposit_on_the_same_chain(
     processor, verifier, engine, injected_chain
 ):
-    """Same-chain hazard: gas funding lands on the very chain deposits come from.
-
-    The engine's own funding transfer is a native transfer to the deposit
-    address, so without the exclusion it would read as a fresh deposit.
+    """Same-chain hazard: the engine's own gas funding is a native transfer to the
+    deposit address on the chain deposits come from, so without the exclusion it
+    would read as a fresh deposit.
     """
     node = _single_chain_node(
         receipts={
@@ -596,7 +587,7 @@ def _build_withdrawal_processor(
     """Construct a WithdrawalProcessor whose accounting chain is its destination.
 
     ``sapphire_rpc_url`` and the destination endpoint for SAME_CHAIN_ID are the
-    same URL — that is the whole point of the scenario.
+    same URL — the premise of these scenarios.
     """
     settings = MagicMock(
         withdrawal_poll_interval=1,
@@ -634,9 +625,9 @@ def _build_withdrawal_processor(
 async def test_withdrawal_to_the_accounting_chain_resolves_and_broadcasts(withdrawal_accounting):
     """A withdrawal signed on SAME_CHAIN_ID is broadcast back to SAME_CHAIN_ID.
 
-    Goes through ``_process_chain`` so the nonce readiness gate runs: the
-    contract's ``nonces(23293)`` is compared against the signer's pending nonce
-    on 23293 itself, which is the same-chain case of that check.
+    Runs through ``_process_chain`` so the nonce readiness gate compares the
+    contract's nonce for the chain against the signer's pending nonce on that very
+    chain.
     """
     processor = _build_withdrawal_processor(
         withdrawal_accounting, {SAME_CHAIN_ID: SAME_CHAIN_RPC_URL}
@@ -650,10 +641,8 @@ async def test_withdrawal_to_the_accounting_chain_resolves_and_broadcasts(withdr
         [{"index": 0, "chain_id": SAME_CHAIN_ID, "block_number": DEPOSIT_BLOCK}],
     )
 
-    # Nonce gate consulted the contract for this chain and the chain for itself.
     processor._contract.functions.nonces.assert_any_call(SAME_CHAIN_ID)
     node.eth.get_transaction_count.assert_any_await(EVM_SIGNER_ADDRESS, "pending")
-    # Resolved signature broadcast to the same chain it was signed for.
     withdrawal_accounting._send_raw_transaction.assert_awaited_once_with(
         SAME_CHAIN_ID, WITHDRAWAL_SIGNED_TX
     )
@@ -691,10 +680,8 @@ async def test_one_verified_endpoint_serves_deposits_sweeps_and_withdrawals(
 ):
     """The identity check leaves one client, and all three services share it.
 
-    Deposit verification, sweep broadcast and withdrawal broadcast resolving the
-    same client for SAME_CHAIN_ID is what "the accounting chain is its own source
-    chain" means at the transport layer. The unverified second chain stays
-    refused everywhere, so sharing an endpoint does not widen what is served.
+    The unverified second chain stays refused everywhere, so sharing an endpoint
+    does not widen what is served.
     """
 
     async def probe(url: str, timeout: float) -> int:

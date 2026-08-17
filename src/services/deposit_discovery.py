@@ -96,12 +96,10 @@ class DepositDiscoveryService:
         )
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get the verified client for a chain.
+        """Get the chain's startup-verified client (see `rpc_identity`).
 
-        Startup narrows the served chains to endpoints that proved their chain ID
-        (see `rpc_identity`); a chain excluded there is unserved, and scanning it
-        on an endpoint that may be a different chain is exactly the outcome the
-        check exists to prevent.
+        Scanning an endpoint that may be a different chain is what that check exists to
+        prevent, so an excluded chain raises instead of being scanned.
         """
         if chain_id not in self._web3_cache:
             w3 = verified_web3(chain_id, self._chain_rpc_urls)

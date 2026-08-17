@@ -1,4 +1,4 @@
-"""Tests for the fail-closed startup RPC identity check (M1.2).
+"""Tests for the fail-closed startup RPC identity check.
 
 The check is the only thing standing between a mis-filed endpoint and a service
 that verifies deposits on one chain while signing transactions for another, so
@@ -40,8 +40,8 @@ def _probe(reported: dict[str, object]):
 
 
 def _settings(chain_rpc_urls: dict[int, str]) -> SimpleNamespace:
-    # Never the real load_settings() singleton: initialize narrows the mapping in
-    # place, and a narrowed singleton would leak into every later test.
+    # Never the real load_settings() singleton: initialization narrows the mapping
+    # in place, and a narrowed singleton would leak into every later test.
     return SimpleNamespace(chain_rpc_urls=dict(chain_rpc_urls))
 
 
@@ -178,7 +178,6 @@ async def test_consumers_refuse_an_excluded_chain(monkeypatch):
     with pytest.raises(DiscoveryNotConfiguredError, match="No verified RPC endpoint"):
         discovery._get_web3(SAPPHIRE_CHAIN)
 
-    # The verified chain resolves, and every consumer shares that one client.
     assert verifier._get_web3(GOOD_CHAIN) is discovery._get_web3(GOOD_CHAIN)
 
 

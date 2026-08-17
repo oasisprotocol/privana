@@ -87,11 +87,9 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         gas_funding_amount_wei=20_000_000_000_000_000,  # cap: 0.02 ROSE (65k gas * 2x * ~150 gwei)
         min_sweep_gas_price_wei=100_000_000_000,  # 100 gwei, Sapphire's minimum gas price
         l2_type=L2Type.NONE,
-        # Oasis Nexus / Sapphire gateway caps eth_getLogs to 100 blocks per request
-        discovery_scan_chunk_blocks=100,
-        # Sapphire block time ~5.7s: 640 blocks ≈ 1h, 3,800 blocks ≈ 6h (bounded to prevent excessive RPC calls)
-        discovery_lookback_blocks=640,
-        discovery_max_lookback_blocks=3_800,
+        discovery_scan_chunk_blocks=100,  # Sapphire gateway caps eth_getLogs at 100 blocks
+        discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
+        discovery_max_lookback_blocks=3_800,  # ~6h at ~5.7s blocks
     ),
     23293: ChainConfig(
         chain_id=23293,  # sapphire-localnet dev-harness mirror
