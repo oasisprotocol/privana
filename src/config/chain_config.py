@@ -51,6 +51,32 @@ class ChainConfig:
 # ─── Chain definitions (single source of truth) ────────────────────────
 
 CHAIN_CONFIGS: Dict[int, ChainConfig] = {
+    23295: ChainConfig(
+        chain_id=23295,
+        finality_depth=2,  # Sapphire Testnet
+        min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
+        min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
+        # Gas funding sized as gasLimit (65k) * gasPrice (100 gwei) because the EVM debits upfront
+        gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
+        l2_type=L2Type.NONE,
+        # Oasis Nexus / Sapphire gateway caps eth_getLogs to 100 blocks per request
+        discovery_scan_chunk_blocks=100,
+        # Sapphire block time ~5.7s: 640 blocks ≈ 1h, 3,800 blocks ≈ 6h (bounded to prevent excessive RPC calls)
+        discovery_lookback_blocks=640,
+        discovery_max_lookback_blocks=3_800,
+    ),
+    23293: ChainConfig(
+        chain_id=23293,  # sapphire-localnet dev-harness mirror
+        finality_depth=2,
+        min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
+        min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
+        # Gas funding sized as gasLimit (65k) * gasPrice (100 gwei) because the EVM debits upfront
+        gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
+        l2_type=L2Type.NONE,
+        discovery_scan_chunk_blocks=100,  # match Sapphire gateway log cap
+        discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
+        discovery_max_lookback_blocks=3_800,  # ~6h at ~5.7s blocks
+    ),
     84532: ChainConfig(
         chain_id=84532,
         finality_depth=15,  # Base Sepolia (OP Stack)
@@ -71,11 +97,6 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
 }
 
 DEFAULT_FINALITY_DEPTH = 32
-
-# Gas limits for sweep transactions (chain-independent)
-SWEEP_GAS_LIMIT_NATIVE = 21_000
-SWEEP_GAS_LIMIT_ERC20 = 65_000
-GAS_FUNDING_GAS_LIMIT = 21_000
 
 # ERC20 Transfer event topic
 TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"

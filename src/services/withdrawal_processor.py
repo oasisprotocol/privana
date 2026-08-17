@@ -3,16 +3,18 @@
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from eth_abi import decode
 from hexbytes import HexBytes
 from web3 import AsyncWeb3, Web3
+from web3.exceptions import TransactionNotFound
 from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
 from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import AccountingContractService
+from src.services.rpc_identity import verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,8 @@ class WithdrawalProcessor:
         self._last_rpc_call: float = 0
         self._destination_web3: Dict[int, AsyncWeb3] = {}
         self._evm_address: Optional[str] = None
+        # Chains whose nonce divergence has already been reported (log once, loudly)
+        self._nonce_divergence_reported: Set[int] = set()
 
     async def _rate_limited_call(self, coro_factory):
         """Execute an async call with rate limiting and retries.
@@ -93,12 +97,18 @@ class WithdrawalProcessor:
                 raise
 
     def _get_destination_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get or create AsyncWeb3 instance for a destination chain."""
+        """Get the verified client for a destination chain.
+
+        Startup narrows the served chains to endpoints that proved their chain ID
+        (see `rpc_identity`). Withdrawals are signed for one chain ID and
+        broadcast here, so an endpoint filed under the wrong chain would send a
+        signed transaction somewhere it was never meant to land — refuse instead.
+        """
         if chain_id not in self._destination_web3:
-            rpc_url = self.settings.chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._destination_web3[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            w3 = verified_web3(chain_id, self.settings.chain_rpc_urls)
+            if w3 is None:
+                raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
+            self._destination_web3[chain_id] = w3
         return self._destination_web3[chain_id]
 
     async def _get_evm_address(self) -> str:
@@ -108,6 +118,99 @@ class WithdrawalProcessor:
                 lambda: self._contract.functions.evmAddress().call()
             )
         return self._evm_address
+
+    async def _chain_nonce_state(self, chain_id: int) -> Optional[tuple[int, int]]:
+        """Read ``(contract_next_nonce, chain_pending_nonce)``, or None if unsafe.
+
+        ``nonces[chainId]`` is the nonce the contract embeds in the next withdrawal
+        it signs for that chain. It defaults to 0 for a chain that has never been
+        used and ``EVMSignerAndVerifier`` only ever increments it
+        (``getEVMNonceAndIncrement``) — there is no setter, so a mismatch cannot be
+        repaired from this side.
+
+        Safe states:
+          ``contract == chain``  caught up; the next signature matches the chain
+          ``contract > chain``   signed withdrawals not broadcast yet — catch-up work
+
+        Unsafe state, ``contract < chain``: the destination chain has already spent
+        nonces the contract never issued, so every transaction it signs from now on
+        reuses a spent nonce and can never land. Returning None makes callers refuse
+        the chain outright instead of signing into that gap.
+        """
+        contract_next_nonce = await self._rate_limited_call(
+            lambda: self._contract.functions.nonces(chain_id).call()
+        )
+
+        # "pending" so queued-but-unmined transactions count as spent nonces
+        evm_address = await self._get_evm_address()
+        dest_web3 = self._get_destination_web3(chain_id)
+        chain_pending_nonce = await self._rate_limited_call(
+            lambda: dest_web3.eth.get_transaction_count(evm_address, "pending")
+        )
+
+        if contract_next_nonce >= chain_pending_nonce:
+            self._nonce_divergence_reported.discard(chain_id)
+            return contract_next_nonce, chain_pending_nonce
+
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+        message = (
+            f"{chain_name}: REFUSING WITHDRAWALS - contract nonce {contract_next_nonce} is behind "
+            f"the pending nonce {chain_pending_nonce} of {evm_address}. The chain has spent "
+            f"{chain_pending_nonce - contract_next_nonce} nonce(s) the contract never issued, so "
+            f"every transaction signed for chain {chain_id} would reuse a spent nonce and never "
+            f"pay out. nonces({chain_id}) can only advance by signing, so this needs operator "
+            f"intervention."
+        )
+        if chain_id in self._nonce_divergence_reported:
+            logger.error(message)
+        else:
+            self._nonce_divergence_reported.add(chain_id)
+            logger.critical(message)
+        return None
+
+    @staticmethod
+    def _expected_tx_hash(signed_tx: Any) -> str:
+        """Hash a signed transaction locally: keccak256 of the raw RLP bytes is the
+        hash every EVM node files it under."""
+        raw_bytes = AccountingContractService._as_raw_tx_bytes(signed_tx)
+        return HexBytes(Web3.keccak(raw_bytes)).to_0x_hex()
+
+    async def _find_broadcast_tx(self, chain_id: int, signed_tx: Any) -> Optional[str]:
+        """Return the hash of ``signed_tx`` if the destination chain already has it.
+
+        A rejected broadcast only proves the *nonce* is unusable — never that our
+        transaction is what used it. "nonce too low" (geth), "already known" and
+        "invalid nonce" (Oasis) read identically whether the withdrawal landed or an
+        unrelated transaction burned the nonce, so error text can never be evidence
+        of payment. Ask by hash instead: a receipt or a live mempool entry for the
+        exact signed bytes is the only proof. None means "not proven" — the caller
+        must leave the withdrawal unresolved.
+        """
+        expected_hash = self._expected_tx_hash(signed_tx)
+        dest_web3 = self._get_destination_web3(chain_id)
+
+        async def fetch_receipt():
+            try:
+                return await dest_web3.eth.get_transaction_receipt(expected_hash)
+            except TransactionNotFound:
+                return None
+
+        async def fetch_transaction():
+            try:
+                return await dest_web3.eth.get_transaction(expected_hash)
+            except TransactionNotFound:
+                return None
+
+        for label, fetch in (("receipt", fetch_receipt), ("pending tx", fetch_transaction)):
+            try:
+                if await self._rate_limited_call(fetch) is not None:
+                    return expected_hash
+            except Exception as exc:
+                logger.warning(
+                    f"Could not look up {label} for {expected_hash} on chain {chain_id}: {exc}"
+                )
+
+        return None
 
     async def _catch_up_missing_broadcasts(self, chain_ids: Optional[List[int]] = None):
         """Find and broadcast any resolved-but-not-broadcast withdrawals.
@@ -126,19 +229,14 @@ class WithdrawalProcessor:
             try:
                 chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
 
-                # Get contract's next nonce (what it will use next)
-                contract_next_nonce = await self._rate_limited_call(
-                    lambda: self._contract.functions.nonces(chain_id).call()
-                )
+                # Fail-closed nonce readiness gate: refuses the chain when the
+                # contract is behind, and hands back both nonces for free.
+                nonce_state = await self._chain_nonce_state(chain_id)
+                if nonce_state is None:
+                    continue
+                contract_next_nonce, chain_current_nonce = nonce_state
 
-                # Get current nonce on destination chain (what's been broadcast)
-                evm_address = await self._get_evm_address()
-                dest_web3 = self._get_destination_web3(chain_id)
-                chain_current_nonce = await self._rate_limited_call(
-                    lambda: dest_web3.eth.get_transaction_count(evm_address)
-                )
-
-                if contract_next_nonce <= chain_current_nonce:
+                if contract_next_nonce == chain_current_nonce:
                     logger.info(f"{chain_name}: no missing broadcasts")
                     continue
 
@@ -232,12 +330,17 @@ class WithdrawalProcessor:
                 logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
                 found_nonces.add(nonce)
             except Exception as exc:
-                error_str = str(exc).lower()
-                if "nonce too low" in error_str or "already known" in error_str:
-                    logger.info(f"Withdrawal #{index}: already broadcast")
+                broadcast_hash = await self._find_broadcast_tx(chain_id, signed_tx)
+                if broadcast_hash is not None:
+                    logger.info(f"Withdrawal #{index}: already broadcast, tx_hash={broadcast_hash}")
                     found_nonces.add(nonce)
                 else:
-                    logger.error(f"Withdrawal #{index}: broadcast failed - {exc}")
+                    logger.error(
+                        f"Withdrawal #{index}: broadcast failed and no transaction matching the "
+                        f"signed payload exists on {chain_name} - nonce {nonce} may have been "
+                        f"spent by a different transaction, leaving this withdrawal unpayable: "
+                        f"{exc}"
+                    )
 
             if index > 0 and index % 100 == 0:
                 logger.info(
@@ -347,10 +450,27 @@ class WithdrawalProcessor:
 
             # Step 4: Broadcast to destination chain
             logger.info(f"Withdrawal #{index}: broadcasting to {chain_name}")
-            tx_hash = await self._rate_limited_call(
-                lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
-            )
-            logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
+            try:
+                tx_hash = await self._rate_limited_call(
+                    lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
+                )
+            except Exception as exc:
+                # A rejected broadcast may only mean this exact transaction is
+                # already on the chain - prove it by hash before calling it done.
+                tx_hash = await self._find_broadcast_tx(chain_id, signed_tx)
+                if tx_hash is None:
+                    logger.error(
+                        f"Withdrawal #{index}: broadcast to {chain_name} failed and no "
+                        f"transaction matching the signed payload "
+                        f"({self._expected_tx_hash(signed_tx)}) exists there - leaving it "
+                        f"unresolved rather than marking it paid: {exc}"
+                    )
+                    return False
+                logger.info(
+                    f"Withdrawal #{index}: already broadcast to {chain_name}, tx_hash={tx_hash}"
+                )
+            else:
+                logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
 
             self._chain_high_water_mark[chain_id] = max(
                 self._chain_high_water_mark.get(chain_id, -1), index
@@ -358,21 +478,48 @@ class WithdrawalProcessor:
             return True
 
         except Exception as exc:
-            error_str = str(exc).lower()
             selector, error_name = decode_contract_error(exc)
-
-            if "nonce too low" in error_str or "already known" in error_str:
-                logger.info(f"Withdrawal #{index}: already broadcast to {chain_name}")
-                self._chain_high_water_mark[chain_id] = max(
-                    self._chain_high_water_mark.get(chain_id, -1), index
-                )
-                return True
-            elif selector:
+            if selector:
                 logger.error(f"Withdrawal #{index}: contract error - {error_name}")
-                return False
             else:
                 logger.error(f"Withdrawal #{index}: failed - {exc}")
-                return False
+            return False
+
+    async def _process_chain(self, chain_id: int, withdrawals: List[Dict]):
+        """Process one chain's pending withdrawals in index order.
+
+        The nonce readiness gate runs once per chain per poll, before anything is
+        signed: on divergence the whole chain is skipped, so no withdrawal is
+        resolved against a nonce the destination chain has already spent.
+        """
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+
+        try:
+            nonce_state = await self._chain_nonce_state(chain_id)
+        except Exception as exc:
+            logger.error(f"{chain_name}: nonce readiness check failed, skipping chain: {exc}")
+            return
+
+        if nonce_state is None:
+            logger.error(
+                f"{chain_name}: skipping {len(withdrawals)} pending withdrawal(s) - "
+                f"destination nonce check failed"
+            )
+            return
+
+        if withdrawals:
+            logger.info(f"Processing {len(withdrawals)} withdrawals for {chain_name}")
+
+        for withdrawal in withdrawals:
+            if not self._is_running:
+                return
+
+            if not await self._resolve_and_broadcast(withdrawal):
+                # Withdrawal failed - run catch-up to handle any nonce gaps,
+                # then retry on next poll cycle
+                logger.warning(f"Withdrawal failed, pausing {chain_name} processing")
+                await self._catch_up_missing_broadcasts([chain_id])
+                return
 
     async def _run_processor(self):
         """Main processing loop."""
@@ -398,22 +545,7 @@ class WithdrawalProcessor:
                     if not self._is_running:
                         break
 
-                    chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
-                    if withdrawals:
-                        logger.info(f"Processing {len(withdrawals)} withdrawals for {chain_name}")
-
-                    # Process in order for this chain
-                    for withdrawal in withdrawals:
-                        if not self._is_running:
-                            break
-
-                        success = await self._resolve_and_broadcast(withdrawal)
-                        if not success:
-                            # Withdrawal failed - run catch-up to handle any nonce gaps,
-                            # then retry on next poll cycle
-                            logger.warning(f"Withdrawal failed, pausing {chain_name} processing")
-                            await self._catch_up_missing_broadcasts([chain_id])
-                            break
+                    await self._process_chain(chain_id, withdrawals)
 
             except Exception:
                 logger.exception("Error during withdrawal processing poll")
@@ -448,6 +580,7 @@ class WithdrawalProcessor:
                 pass
 
         self._chain_high_water_mark.clear()
+        self._nonce_divergence_reported.clear()
         logger.info("Withdrawal processor stopped")
 
 

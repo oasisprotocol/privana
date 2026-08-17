@@ -409,20 +409,28 @@ async def get_deposit_address(
         address = await _service.get_deposit_address(
             payload.chain_type, payload.version, auth.token
         )
+        settings = load_settings()
+        native_supported = {
+            entry["chain_id"] for entry in settings.token_infos if not entry.get("token_address")
+        }
+        erc20_supported = {
+            entry["chain_id"] for entry in settings.token_infos if entry.get("token_address")
+        }
+        min_deposit: dict[str, dict[str, str]] = {}
+        for cid in MIN_DEPOSIT_NATIVE_WEI:
+            chain_min: dict[str, str] = {}
+            if cid in native_supported:
+                chain_min["native"] = str(MIN_DEPOSIT_NATIVE_WEI.get(cid, 0))
+            if cid in erc20_supported:
+                chain_min["erc20"] = str(MIN_DEPOSIT_ERC20_WEI.get(cid, 0))
+            min_deposit[str(cid)] = chain_min
+
         return DepositAddressResponse(
             deposit_address=address,
             chain_type=payload.chain_type,
             version=payload.version,
-            min_deposit={
-                str(cid): {
-                    "native": str(MIN_DEPOSIT_NATIVE_WEI.get(cid, 0)),
-                    "erc20": str(MIN_DEPOSIT_ERC20_WEI.get(cid, 0)),
-                }
-                for cid in MIN_DEPOSIT_NATIVE_WEI
-            },
-            finality_depth={
-                str(cid): get_finality_depth(cid) for cid in load_settings().chain_rpc_urls
-            },
+            min_deposit=min_deposit,
+            finality_depth={str(cid): get_finality_depth(cid) for cid in settings.chain_rpc_urls},
         )
     except ContractLogicError as exc:
         if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):

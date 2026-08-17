@@ -59,6 +59,10 @@ _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
 
+# Headroom over the exact gas cost the contract signs with, so a gas price update
+# between admission and broadcast does not strand the withdrawal.
+_WITHDRAWAL_GAS_BUFFER_PERCENT = 20
+
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
 # the API layer, caching could be added here for performance.
@@ -129,6 +133,7 @@ class AccountingContractService:
         self.rofl_client = RoflAppdClient()
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, AsyncWeb3] = {}
+        self._withdrawal_gas_limits: Dict[str, int] = {}
         self.default_token_symbol = "ETH"
         self.chain_names = CHAIN_NAMES
 
@@ -416,21 +421,63 @@ class AccountingContractService:
             is_native=is_native,
         )
 
+    async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
+        """Read the gas limit the contract signs withdrawals with (cached).
+
+        ``gasLimitNativeWithdraw`` and ``gasLimitERC20Withdraw`` are ``public constant``
+        on ``EVMSignerAndVerifier``; reading the auto-generated getters keeps admission
+        in step with signing instead of mirroring the numbers here, which is how the
+        original gas mismatch stayed hidden.
+        """
+        fn_name = "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
+        cached = self._withdrawal_gas_limits.get(fn_name)
+        if cached is not None:
+            return cached
+
+        contract_reader = self._get_reader_contract()
+        gas_limit = int(await getattr(contract_reader.functions, fn_name)().call())
+        self._withdrawal_gas_limits[fn_name] = gas_limit
+        return gas_limit
+
     async def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
-        """Check that evmAddress has enough native balance on the destination chain for gas."""
+        """Check that evmAddress can pay for this withdrawal on the destination chain.
+
+        Derived from the two values the contract signs with — ``gasPrices[chainId]`` and
+        the withdrawal gas limit constant — because the EVM debits ``gasLimit * gasPrice``
+        upfront. A single global floor cannot express that: at 1e13 wei the old check
+        passed ~1000x too early on a 100 gwei chain, where an ERC-20 withdrawal needs
+        100_000 * 100 gwei = 1e16 wei.
+        """
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+
+        gas_price = await self.get_gas_price(chain_id)
+        if gas_price <= 0:
+            raise ValueError(
+                f"No gas price published for {chain_name}. The contract cannot sign a "
+                f"withdrawal for chain {chain_id} until setGasPrice({chain_id}, ...) lands."
+            )
+
+        gas_limit = await self._get_withdrawal_gas_limit(is_native)
+        gas_cost = gas_price * gas_limit
+        required = gas_cost * (100 + _WITHDRAWAL_GAS_BUFFER_PERCENT) // 100
+        # MIN_WITHDRAWAL_GAS_BALANCE is kept as an additional floor for chains whose
+        # published gas price understates what the broadcaster actually needs.
+        required = max(required, self.settings.min_withdrawal_gas_balance)
+        if is_native:
+            required += amount
+
         chain_w3 = await self._get_chain_web3(chain_id)
         evm_address = await self._get_deposit_address()
         balance = await chain_w3.eth.get_balance(evm_address)
 
-        required = self.settings.min_withdrawal_gas_balance
-        if is_native:
-            required += amount
-
         if balance < required:
-            chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+            detail = f"{gas_limit} gas x {gas_price} wei +{_WITHDRAWAL_GAS_BUFFER_PERCENT}% buffer"
+            if is_native:
+                detail += f" + {amount} wei withdrawn"
             raise ValueError(
                 f"Insufficient native balance on {chain_name}. "
-                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
+                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei "
+                f"({detail})."
             )
 
     async def _get_token_symbol(self, token: HexBytes) -> Optional[str]:

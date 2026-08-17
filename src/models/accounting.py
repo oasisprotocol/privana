@@ -551,8 +551,9 @@ class DepositAddressResponse(BaseModel):
     chain_type: Literal["evm"]
     version: int
     min_deposit: dict[str, dict[str, str]] = Field(
-        default_factory=dict
-    )  # {chain_id: {native, erc20}}
+        default_factory=dict,
+        description="Minimum deposit amounts per chain for supported asset types ('native', 'erc20')",
+    )  # {chain_id: {asset_type: min_amount_wei}}
     finality_depth: dict[str, int] = Field(
         default_factory=dict,
         description="The number of blocks on the target chain before the transaction can be assumed to be final",

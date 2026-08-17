@@ -9,6 +9,87 @@ import pytest
 from uvicorn.protocols.http.httptools_impl import RequestResponseCycle
 
 import src.main as main
+import src.services.gas_price_bootstrap as gas_price_bootstrap
+import src.services.rpc_identity as rpc_identity
+
+LIFESPAN_CHAIN = 84532
+LIFESPAN_RPC_URL = "https://base-sepolia.example.invalid/key"
+MIS_FILED_CHAIN = 23295
+MIS_FILED_URL = "https://mis-filed.example.invalid"
+
+
+def _lifespan_settings() -> SimpleNamespace:
+    """Settings stand-in — never the load_settings() singleton.
+
+    The identity check narrows ``chain_rpc_urls`` in place, so a narrowed
+    singleton would leak into every later test.
+    """
+    return SimpleNamespace(
+        accounting_contract_address="0x" + "ab" * 20,
+        chain_rpc_urls={LIFESPAN_CHAIN: LIFESPAN_RPC_URL},
+        token_infos=[{"chain_id": LIFESPAN_CHAIN, "token_address": None}],
+        gas_prices_wei={LIFESPAN_CHAIN: 3_000_000_000},
+    )
+
+
+def _wire_lifespan(
+    monkeypatch,
+    settings: SimpleNamespace,
+    steps: list[str],
+    *,
+    stub_identity: bool = True,
+) -> SimpleNamespace:
+    """Patch everything the lifespan touches, appending each step to ``steps``."""
+    monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    monkeypatch.setattr(main, "settings", settings)
+
+    def step(name: str, result=None) -> AsyncMock:
+        async def recorded(*_args, **_kwargs):
+            steps.append(name)
+            return result
+
+        return AsyncMock(side_effect=recorded)
+
+    jwt_key_manager = SimpleNamespace(initialize=step("jwt_keys"))
+    auth_token_key_manager = SimpleNamespace(
+        initialize=step("auth_token_keys"),
+        sync_key_to_contract=step("sync_key_to_contract"),
+    )
+    onramp_intent_key_manager = SimpleNamespace(initialize=step("onramp_intent_keys"))
+    accounting = MagicMock()
+    withdrawal_processor = SimpleNamespace(
+        start=step("withdrawal_start"), stop=step("withdrawal_stop")
+    )
+    deposit_processor = SimpleNamespace(
+        resume_incomplete_sweeps=step("resume_sweeps"),
+        start_recovery_loop=MagicMock(side_effect=lambda: steps.append("recovery_loop")),
+        stop=step("processor_stop"),
+    )
+
+    def get_deposit_processor() -> SimpleNamespace:
+        steps.append("deposit_processor")
+        return deposit_processor
+
+    if stub_identity:
+        monkeypatch.setattr(
+            main,
+            "initialize_verified_chain_rpc_urls",
+            step("rpc_identity", {LIFESPAN_CHAIN: LIFESPAN_RPC_URL}),
+        )
+    monkeypatch.setattr(main, "get_jwt_key_manager", lambda: jwt_key_manager)
+    monkeypatch.setattr(main, "get_auth_token_key_manager", lambda: auth_token_key_manager)
+    monkeypatch.setattr(main, "get_onramp_intent_key_manager", lambda: onramp_intent_key_manager)
+    monkeypatch.setattr(main, "get_accounting_contract_service", lambda: accounting)
+    monkeypatch.setattr(main, "bootstrap_rofl_signer_address", step("rofl_signer"))
+    monkeypatch.setattr(main, "bootstrap_token_info", step("token_info"))
+    monkeypatch.setattr(main, "bootstrap_gas_prices", step("gas_prices"))
+    monkeypatch.setattr(main, "get_withdrawal_processor", lambda: withdrawal_processor)
+    monkeypatch.setattr(main, "get_deposit_processor", get_deposit_processor)
+    return SimpleNamespace(
+        accounting=accounting,
+        deposit_processor=deposit_processor,
+        withdrawal_processor=withdrawal_processor,
+    )
 
 
 def test_sensitive_access_log_middleware_is_outermost() -> None:
@@ -164,6 +245,11 @@ async def test_uvicorn_access_log_uses_redacted_scope(caplog) -> None:
 @pytest.mark.asyncio
 async def test_lifespan_aborts_when_auth_token_key_sync_fails(monkeypatch) -> None:
     monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    # The identity check now runs first and would otherwise probe the real
+    # endpoints from .env.localnet before the abort under test.
+    monkeypatch.setattr(
+        main, "initialize_verified_chain_rpc_urls", AsyncMock(return_value={LIFESPAN_CHAIN: ""})
+    )
 
     jwt_key_manager = SimpleNamespace(initialize=AsyncMock())
     auth_token_key_manager = SimpleNamespace(
@@ -194,6 +280,9 @@ async def test_lifespan_aborts_when_onramp_intent_key_derivation_fails(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
+    monkeypatch.setattr(
+        main, "initialize_verified_chain_rpc_urls", AsyncMock(return_value={LIFESPAN_CHAIN: ""})
+    )
 
     jwt_key_manager = SimpleNamespace(initialize=AsyncMock())
     auth_token_key_manager = SimpleNamespace(
@@ -217,3 +306,98 @@ async def test_lifespan_aborts_when_onramp_intent_key_derivation_fails(
             pass
 
     auth_token_key_manager.sync_key_to_contract.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypatch) -> None:
+    steps: list[str] = []
+    _wire_lifespan(monkeypatch, _lifespan_settings(), steps)
+
+    async with main.lifespan(None):
+        startup = list(steps)
+
+    # The identity check is first: nothing may read a chain, write to the
+    # contract, or register a non-removable token id on an endpoint that has not
+    # proved which chain it is. Token registration still precedes the gas-price
+    # sync, which is the half-configured window covered below.
+    assert startup == [
+        "rpc_identity",
+        "jwt_keys",
+        "auth_token_keys",
+        "onramp_intent_keys",
+        "sync_key_to_contract",
+        "rofl_signer",
+        "token_info",
+        "gas_prices",
+        "withdrawal_start",
+        "deposit_processor",
+        "resume_sweeps",
+        "recovery_loop",
+    ]
+    assert steps[len(startup) :] == ["processor_stop", "withdrawal_stop"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_leaves_a_mis_filed_chain_unserved(monkeypatch, caplog) -> None:
+    steps: list[str] = []
+    settings = _lifespan_settings()
+    settings.chain_rpc_urls[MIS_FILED_CHAIN] = MIS_FILED_URL
+    _wire_lifespan(monkeypatch, settings, steps, stub_identity=False)
+
+    async def probe(url: str, _timeout: float) -> int:
+        # The mis-filed endpoint answers with someone else's chain id.
+        return {LIFESPAN_RPC_URL: LIFESPAN_CHAIN, MIS_FILED_URL: 1}[url]
+
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", probe)
+
+    with caplog.at_level(logging.ERROR, logger="src.services.rpc_identity"):
+        async with main.lifespan(None):
+            # Excluded, not mis-served: the chain is gone from the served set
+            # before any token is registered or any client is built for it.
+            assert settings.chain_rpc_urls == {LIFESPAN_CHAIN: LIFESPAN_RPC_URL}
+            assert (
+                rpc_identity.verified_web3(MIS_FILED_CHAIN, {MIS_FILED_CHAIN: MIS_FILED_URL})
+                is None
+            )
+            assert rpc_identity.verified_web3(LIFESPAN_CHAIN, {}) is not None
+
+    # One bad endpoint does not take the deployment down; the good chain serves.
+    assert "withdrawal_start" in steps
+    assert any(str(MIS_FILED_CHAIN) in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_lifespan_completes_when_a_registered_chain_has_no_gas_price(
+    monkeypatch, caplog
+) -> None:
+    steps: list[str] = []
+    settings = _lifespan_settings()
+    handles = _wire_lifespan(monkeypatch, settings, steps)
+
+    async def failing_gas_price(_chain_id: int) -> int:
+        steps.append("gas_price_attempt")
+        raise RuntimeError("rofl-appd unreachable")
+
+    # Real gas-price bootstrap, retries un-delayed: it is best-effort by design
+    # and returns after exhausting them.
+    monkeypatch.setattr(gas_price_bootstrap, "_BASE_RETRY_DELAY", 0)
+    handles.accounting.get_gas_price = AsyncMock(side_effect=failing_gas_price)
+    monkeypatch.setattr(main, "bootstrap_gas_prices", gas_price_bootstrap.bootstrap_gas_prices)
+
+    with caplog.at_level(logging.ERROR, logger="src.services.gas_price_bootstrap"):
+        async with main.lifespan(None):
+            pass
+
+    # The half-configured state: the token is registered (permanently — there is
+    # no removal function) while the chain carries no on-chain gas price, so its
+    # withdrawals fail with GasPriceNotSet until a later start syncs it. Startup
+    # completes anyway, so this must be visible in the log rather than as a crash.
+    assert steps.count("gas_price_attempt") == gas_price_bootstrap._MAX_ATTEMPTS
+    assert steps.index("token_info") < steps.index("gas_price_attempt")
+    assert steps.index("gas_price_attempt") < steps.index("withdrawal_start")
+    assert steps[-1] == "withdrawal_stop"
+    assert settings.chain_rpc_urls == {LIFESPAN_CHAIN: LIFESPAN_RPC_URL}
+    assert any(
+        "Failed to sync gas price for chain 84532" in record.getMessage()
+        for record in caplog.records
+    )

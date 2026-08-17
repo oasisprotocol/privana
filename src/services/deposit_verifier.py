@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from web3 import AsyncWeb3
-from web3.providers import AsyncHTTPProvider
 
 from src.config.chain_config import (
     TRANSFER_EVENT_TOPIC,
     get_finality_depth,
 )
+from src.services.rpc_identity import verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +53,18 @@ class DepositVerifier:
         self._web3_cache: Dict[int, AsyncWeb3] = {}
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get or create an AsyncWeb3 instance for a chain."""
+        """Get the verified client for a chain.
+
+        Startup narrows the served chains to endpoints that proved their chain ID
+        (see `rpc_identity`), so a chain missing here is either unconfigured or
+        was excluded by that check — both fail closed rather than verifying a
+        deposit against an endpoint that may be a different chain.
+        """
         if chain_id not in self._web3_cache:
-            rpc_url = self._chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            w3 = verified_web3(chain_id, self._chain_rpc_urls)
+            if w3 is None:
+                raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
+            self._web3_cache[chain_id] = w3
         return self._web3_cache[chain_id]
 
     async def verify_deposit(

@@ -245,6 +245,7 @@
               },
               "type": "object"
             },
+            "description": "Minimum deposit amounts per chain for supported asset types ('native', 'erc20')",
             "title": "Min Deposit",
             "type": "object"
           },
