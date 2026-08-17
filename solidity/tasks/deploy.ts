@@ -10,6 +10,7 @@ import {HardhatEthersSigner} from "@nomicfoundation/hardhat-ethers/signers";
 import {HardhatRuntimeEnvironment} from "hardhat/types";
 import {HttpNetworkConfig} from "hardhat/types/config";
 import { parseRoflAppId } from "./utils/rofl";
+import { SAPPHIRE_LOCALNET_CHAIN_ID } from "./localnetToken";
 
 // Return unwrapped Sapphire client bound to SECRET_KEY with plain text
 // transactions. Used for all contract management that should be public.
@@ -110,6 +111,15 @@ task("deploy")
     console.log(`AccountingSiweAuth address: ${siweAuthAddress}`);
     console.log(`EVM signing address: ${await proxy.evmAddress()}`);
     console.log(`Owner: ${await proxy.owner()}`);
+
+    // Localnet dev harness: chain 23293 doubles as its own source chain, so the
+    // same-chain deposit path needs an ERC20 there. Deployed from a fixed key at
+    // nonce 0 so .env.localnet's hardcoded ACCOUNTING_TOKEN_INFO address holds
+    // across localnet resets.
+    const { chainId } = await hre.ethers.provider.getNetwork();
+    if (chainId === SAPPHIRE_LOCALNET_CHAIN_ID) {
+      await hre.run("deploy-localnet-token");
+    }
 
     try {
       await hre.run("verify:sourcify", { address: implAddress, contract: "Accounting" });

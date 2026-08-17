@@ -13,6 +13,7 @@ import src.auth.rate_limiter as rate_limiter
 import src.auth.token_store as token_store
 import src.config
 import src.services.onramp_intent as onramp_intent
+import src.services.rpc_identity as rpc_identity
 
 load_dotenv(".env.localnet")
 
@@ -30,6 +31,18 @@ def _run_async(coro):
     else:
         # Create new event loop for sync context
         return asyncio.new_event_loop().run_until_complete(coro)
+
+
+@pytest.fixture(autouse=True)
+def reset_rpc_identity():
+    """Drop the verified-RPC set between tests.
+
+    It is process-wide startup state: a test that runs the identity check would
+    otherwise leave every later test serving only the chains that test verified.
+    """
+    rpc_identity.reset_verified_chain_rpc_urls()
+    yield
+    rpc_identity.reset_verified_chain_rpc_urls()
 
 
 @pytest.fixture

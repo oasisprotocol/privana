@@ -9,6 +9,7 @@ from web3.exceptions import ContractCustomError
 
 import src.api.routes as routes
 import src.auth.dependencies as auth_dependencies
+from src.config.chain_config import MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import SubmissionResult
 from src.services.deposit_processor import DepositProcessor
@@ -708,3 +709,79 @@ def test_pending_deposits_requires_auth(monkeypatch) -> None:
     response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 84532})
     assert response.status_code == 401
     discovery.discover_pending_deposits.assert_not_called()
+
+
+def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch) -> None:
+    """(a) /deposits/address for 23295 advertises only HONOR erc20 minimum, no native;
+    (b) chains with both native and erc20 registered (84532) advertise both.
+    """
+    mock_service = MagicMock()
+    mock_service.get_deposit_address = AsyncMock(
+        return_value="0x" + "aa" * 20,
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    fake_settings = MagicMock()
+    fake_settings.token_infos = [
+        {"chain_id": 84532, "token_address": None},
+        {"chain_id": 84532, "token_address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"},
+        {"chain_id": 23295, "token_address": "0xF5f49fbBBD46C204b836d243995df72A61bC7ce7"},
+    ]
+    fake_settings.chain_rpc_urls = {
+        84532: "https://base-sepolia.g.alchemy.com/v2/test",
+        23295: "https://testnet.sapphire.oasis.io",
+    }
+    monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
+
+    client = _make_private_read_client(token=b"\xab" * 32)
+    response = client.post(
+        "/v1/accounting/deposits/address",
+        json={"chain_type": "evm", "version": 0},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deposit_address"] == "0x" + "aa" * 20
+    assert body["chain_type"] == "evm"
+    assert body["version"] == 0
+
+    # (a) 23295 advertises only HONOR erc20 minimum, no native
+    min_23295 = body["min_deposit"]["23295"]
+    assert "native" not in min_23295
+    assert min_23295["erc20"] == str(MIN_DEPOSIT_ERC20_WEI[23295])
+
+    # (b) 84532 advertises both native and erc20 minimums
+    min_84532 = body["min_deposit"]["84532"]
+    assert min_84532["native"] == str(MIN_DEPOSIT_NATIVE_WEI[84532])
+    assert min_84532["erc20"] == str(MIN_DEPOSIT_ERC20_WEI[84532])
+
+    # Unregistered chain has neither advertised
+    min_11155111 = body["min_deposit"].get("11155111", {})
+    assert "native" not in min_11155111
+    assert "erc20" not in min_11155111
+
+
+def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
+    """(c) /deposits/pending accepts chain_id=23295."""
+    from src.services.deposit_discovery import DiscoveryResult
+
+    result = DiscoveryResult(
+        pending=[],
+        scanned_from_block=10_000,
+        scanned_to_block=10_100,
+    )
+    client, mock_service, discovery, rate_limit = _make_discovery_client(monkeypatch, result)
+
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 23295})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["scanned_from_block"] == 10_000
+    assert body["scanned_to_block"] == 10_100
+    assert body["pending"] == []
+
+    rate_limit.assert_called_once()
+    mock_service.get_deposit_address.assert_awaited_once()
+    kwargs = discovery.discover_pending_deposits.call_args.kwargs
+    assert kwargs["chain_id"] == 23295
+    assert kwargs["deposit_address"] == "0x" + "aa" * 20
+    assert kwargs["beneficiary"] == BENEFICIARY

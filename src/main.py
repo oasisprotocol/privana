@@ -23,6 +23,7 @@ from src.services.deposit_processor import get_deposit_processor
 from src.services.gas_price_bootstrap import bootstrap_gas_prices
 from src.services.onramp_intent import get_onramp_intent_key_manager
 from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
+from src.services.rpc_identity import initialize_verified_chain_rpc_urls
 from src.services.token_info_bootstrap import bootstrap_token_info
 from src.services.withdrawal_processor import get_withdrawal_processor
 
@@ -115,6 +116,15 @@ async def lifespan(_app: FastAPI):
     """
     logger.info("Accounting Module API starting...")
     logger.info("Accounting contract: %s", settings.accounting_contract_address)
+
+    # Fail closed on RPC identity before anything reads a chain, writes to the
+    # contract, or registers a token: every endpoint must report the chain ID it
+    # is filed under, or it is excluded and that chain goes unserved. Runs first
+    # because every service below builds its clients lazily from the narrowed
+    # settings mapping, and because a deployment that can serve no chain should
+    # not sync keys or register tokens on the way to failing.
+    served_chains = await initialize_verified_chain_rpc_urls(settings)
+    logger.info("Serving source chains: %s", sorted(served_chains))
 
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()

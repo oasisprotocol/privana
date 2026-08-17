@@ -32,7 +32,6 @@ from web3 import AsyncWeb3
 from web3.exceptions import TransactionNotFound
 
 from src.clients.rofl import TransactionRevertedError
-from src.clients.web3_provider import make_async_web3
 from src.config.chain_config import (
     GAS_FUNDING_AMOUNT_WEI,
     GAS_FUNDING_HEADROOM,
@@ -41,6 +40,7 @@ from src.config.chain_config import (
     SWEEP_GAS_LIMIT_NATIVE,
 )
 from src.services.l2_fee_estimator import estimate_l1_data_fee
+from src.services.rpc_identity import verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -226,11 +226,18 @@ class SweepEngine:
         return self._gas_funding_tx_hashes
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
+        """Get the verified client for a chain.
+
+        Startup narrows the served chains to endpoints that proved their chain ID
+        (see `rpc_identity`). Sweeps broadcast signed transactions, so serving an
+        excluded chain would move funds on a chain the signature was not meant
+        for; refusing outright is the safe half of that trade.
+        """
         if chain_id not in self._web3_cache:
-            rpc_url = self._chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = make_async_web3(rpc_url)
+            w3 = verified_web3(chain_id, self._chain_rpc_urls)
+            if w3 is None:
+                raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
+            self._web3_cache[chain_id] = w3
         return self._web3_cache[chain_id]
 
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:
