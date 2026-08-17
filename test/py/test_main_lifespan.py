@@ -245,8 +245,8 @@ async def test_uvicorn_access_log_uses_redacted_scope(caplog) -> None:
 @pytest.mark.asyncio
 async def test_lifespan_aborts_when_auth_token_key_sync_fails(monkeypatch) -> None:
     monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
-    # The identity check now runs first and would otherwise probe the real
-    # endpoints from .env.localnet before the abort under test.
+    # The identity check runs first; unstubbed it would probe the real
+    # .env.localnet endpoints before reaching the abort under test.
     monkeypatch.setattr(
         main, "initialize_verified_chain_rpc_urls", AsyncMock(return_value={LIFESPAN_CHAIN: ""})
     )
@@ -316,10 +316,9 @@ async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypa
     async with main.lifespan(None):
         startup = list(steps)
 
-    # The identity check is first: nothing may read a chain, write to the
-    # contract, or register a non-removable token id on an endpoint that has not
-    # proved which chain it is. Token registration still precedes the gas-price
-    # sync, which is the half-configured window covered below.
+    # The identity check is first: nothing may read a chain, write to the contract,
+    # or register a non-removable token id on an endpoint that has not proved which
+    # chain it is. Token registration still precedes the gas-price sync.
     assert startup == [
         "rpc_identity",
         "jwt_keys",
@@ -388,10 +387,10 @@ async def test_lifespan_completes_when_a_registered_chain_has_no_gas_price(
         async with main.lifespan(None):
             pass
 
-    # The half-configured state: the token is registered (permanently — there is
-    # no removal function) while the chain carries no on-chain gas price, so its
+    # Half-configured: the token is registered (permanently — the contract has no
+    # removal function) while the chain carries no on-chain gas price, so its
     # withdrawals fail with GasPriceNotSet until a later start syncs it. Startup
-    # completes anyway, so this must be visible in the log rather than as a crash.
+    # completes regardless, so the log is the only signal.
     assert steps.count("gas_price_attempt") == gas_price_bootstrap._MAX_ATTEMPTS
     assert steps.index("token_info") < steps.index("gas_price_attempt")
     assert steps.index("gas_price_attempt") < steps.index("withdrawal_start")

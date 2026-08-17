@@ -56,21 +56,18 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         finality_depth=2,  # Sapphire Testnet
         min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
         min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
-        # Gas funding sized as gasLimit (65k) * gasPrice (100 gwei) because the EVM debits upfront
-        gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
+        # The EVM debits gasLimit x gasPrice upfront, so fund the full 65k x 100 gwei
+        gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE
         l2_type=L2Type.NONE,
-        # Oasis Nexus / Sapphire gateway caps eth_getLogs to 100 blocks per request
-        discovery_scan_chunk_blocks=100,
-        # Sapphire block time ~5.7s: 640 blocks ≈ 1h, 3,800 blocks ≈ 6h (bounded to prevent excessive RPC calls)
-        discovery_lookback_blocks=640,
-        discovery_max_lookback_blocks=3_800,
+        discovery_scan_chunk_blocks=100,  # Sapphire gateway caps eth_getLogs at 100 blocks
+        discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
+        discovery_max_lookback_blocks=3_800,  # ~6h at ~5.7s blocks
     ),
     23293: ChainConfig(
         chain_id=23293,  # sapphire-localnet dev-harness mirror
         finality_depth=2,
         min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
         min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
-        # Gas funding sized as gasLimit (65k) * gasPrice (100 gwei) because the EVM debits upfront
         gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
         l2_type=L2Type.NONE,
         discovery_scan_chunk_blocks=100,  # match Sapphire gateway log cap

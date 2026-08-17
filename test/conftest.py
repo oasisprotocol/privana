@@ -35,10 +35,10 @@ def _run_async(coro):
 
 @pytest.fixture(autouse=True)
 def reset_rpc_identity():
-    """Drop the verified-RPC set between tests.
+    """Drop the process-wide verified-RPC set between tests.
 
-    It is process-wide startup state: a test that runs the identity check would
-    otherwise leave every later test serving only the chains that test verified.
+    A test that runs the identity check would otherwise leave every later test
+    serving only the chains that test verified.
     """
     rpc_identity.reset_verified_chain_rpc_urls()
     yield

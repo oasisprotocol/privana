@@ -424,10 +424,9 @@ class AccountingContractService:
     async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
         """Read the gas limit the contract signs withdrawals with (cached).
 
-        ``gasLimitNativeWithdraw`` and ``gasLimitERC20Withdraw`` are ``public constant``
-        on ``EVMSignerAndVerifier``; reading the auto-generated getters keeps admission
-        in step with signing instead of mirroring the numbers here, which is how the
-        original gas mismatch stayed hidden.
+        ``gasLimitNativeWithdraw``/``gasLimitERC20Withdraw`` are ``public constant`` on
+        ``EVMSignerAndVerifier``; reading the getters keeps admission in step with signing
+        instead of mirroring numbers that can silently drift apart.
         """
         fn_name = "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
         cached = self._withdrawal_gas_limits.get(fn_name)
@@ -443,9 +442,9 @@ class AccountingContractService:
         """Check that evmAddress can pay for this withdrawal on the destination chain.
 
         Derived from the two values the contract signs with — ``gasPrices[chainId]`` and
-        the withdrawal gas limit constant — because the EVM debits ``gasLimit * gasPrice``
-        upfront. A single global floor cannot express that: at 1e13 wei the old check
-        passed ~1000x too early on a 100 gwei chain, where an ERC-20 withdrawal needs
+        the withdrawal gas limit — because the EVM debits ``gasLimit * gasPrice`` upfront.
+        A single global floor cannot express that: at 1e13 wei it admitted ~1000x too
+        early on a 100 gwei chain, where an ERC-20 withdrawal needs
         100_000 * 100 gwei = 1e16 wei.
         """
         chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")

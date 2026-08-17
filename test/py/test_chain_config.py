@@ -211,7 +211,7 @@ def test_sapphire_localnet_chain_config():
 
 
 def test_gas_funding_covers_native_sweep_limit_m3_4():
-    """Assert gas_funding_amount_wei covers at least 25,000 * gas_price for all chains."""
+    """Every chain funds gas for a native sweep (25,000 gas) at its real gas price."""
     expected_reasonable_gas_prices = {
         23295: 100_000_000_000,  # 100 gwei
         23293: 100_000_000_000,  # 100 gwei

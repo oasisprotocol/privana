@@ -65,7 +65,8 @@ class WithdrawalProcessor:
         self._last_rpc_call: float = 0
         self._destination_web3: Dict[int, AsyncWeb3] = {}
         self._evm_address: Optional[str] = None
-        # Chains whose nonce divergence has already been reported (log once, loudly)
+        # Divergence is logged critical the first time and error after, to stay loud
+        # without flooding every poll cycle
         self._nonce_divergence_reported: Set[int] = set()
 
     async def _rate_limited_call(self, coro_factory):
@@ -97,12 +98,10 @@ class WithdrawalProcessor:
                 raise
 
     def _get_destination_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get the verified client for a destination chain.
+        """Get the destination chain's startup-verified client (see `rpc_identity`).
 
-        Startup narrows the served chains to endpoints that proved their chain ID
-        (see `rpc_identity`). Withdrawals are signed for one chain ID and
-        broadcast here, so an endpoint filed under the wrong chain would send a
-        signed transaction somewhere it was never meant to land — refuse instead.
+        Withdrawals are signed for one chain ID and broadcast here, so an endpoint filed
+        under the wrong chain would send a signed transaction somewhere it never belonged.
         """
         if chain_id not in self._destination_web3:
             w3 = verified_web3(chain_id, self.settings.chain_rpc_urls)
@@ -122,20 +121,16 @@ class WithdrawalProcessor:
     async def _chain_nonce_state(self, chain_id: int) -> Optional[tuple[int, int]]:
         """Read ``(contract_next_nonce, chain_pending_nonce)``, or None if unsafe.
 
-        ``nonces[chainId]`` is the nonce the contract embeds in the next withdrawal
-        it signs for that chain. It defaults to 0 for a chain that has never been
-        used and ``EVMSignerAndVerifier`` only ever increments it
-        (``getEVMNonceAndIncrement``) — there is no setter, so a mismatch cannot be
-        repaired from this side.
+        ``nonces[chainId]`` is the nonce the contract embeds in the next withdrawal it
+        signs for that chain. It starts at 0 and ``EVMSignerAndVerifier`` only ever
+        increments it (``getEVMNonceAndIncrement``) — there is no setter, so divergence
+        cannot be repaired from this side.
 
-        Safe states:
-          ``contract == chain``  caught up; the next signature matches the chain
-          ``contract > chain``   signed withdrawals not broadcast yet — catch-up work
-
-        Unsafe state, ``contract < chain``: the destination chain has already spent
-        nonces the contract never issued, so every transaction it signs from now on
-        reuses a spent nonce and can never land. Returning None makes callers refuse
-        the chain outright instead of signing into that gap.
+        ``contract >= chain`` is safe: equal means caught up, greater means signed
+        withdrawals still awaiting broadcast. ``contract < chain`` is not — the chain has
+        already spent nonces the contract never issued, so everything signed from now on
+        reuses a spent nonce and can never land. None makes callers refuse the chain
+        outright rather than sign into that gap.
         """
         contract_next_nonce = await self._rate_limited_call(
             lambda: self._contract.functions.nonces(chain_id).call()
@@ -170,21 +165,19 @@ class WithdrawalProcessor:
 
     @staticmethod
     def _expected_tx_hash(signed_tx: Any) -> str:
-        """Hash a signed transaction locally: keccak256 of the raw RLP bytes is the
-        hash every EVM node files it under."""
+        """Compute the hash a node files ``signed_tx`` under: keccak256 of its raw bytes."""
         raw_bytes = AccountingContractService._as_raw_tx_bytes(signed_tx)
         return HexBytes(Web3.keccak(raw_bytes)).to_0x_hex()
 
     async def _find_broadcast_tx(self, chain_id: int, signed_tx: Any) -> Optional[str]:
         """Return the hash of ``signed_tx`` if the destination chain already has it.
 
-        A rejected broadcast only proves the *nonce* is unusable — never that our
-        transaction is what used it. "nonce too low" (geth), "already known" and
-        "invalid nonce" (Oasis) read identically whether the withdrawal landed or an
-        unrelated transaction burned the nonce, so error text can never be evidence
-        of payment. Ask by hash instead: a receipt or a live mempool entry for the
-        exact signed bytes is the only proof. None means "not proven" — the caller
-        must leave the withdrawal unresolved.
+        A rejected broadcast only proves the *nonce* is unusable, never that our
+        transaction is what used it: "nonce too low" (geth), "already known" and "invalid
+        nonce" (Oasis) read identically whether the withdrawal landed or an unrelated
+        transaction burned the nonce. Only a receipt or live mempool entry for the exact
+        signed bytes proves payment; None means "not proven", and the caller must leave
+        the withdrawal unresolved.
         """
         expected_hash = self._expected_tx_hash(signed_tx)
         dest_web3 = self._get_destination_web3(chain_id)
@@ -229,8 +222,6 @@ class WithdrawalProcessor:
             try:
                 chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
 
-                # Fail-closed nonce readiness gate: refuses the chain when the
-                # contract is behind, and hands back both nonces for free.
                 nonce_state = await self._chain_nonce_state(chain_id)
                 if nonce_state is None:
                     continue
@@ -455,8 +446,6 @@ class WithdrawalProcessor:
                     lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
                 )
             except Exception as exc:
-                # A rejected broadcast may only mean this exact transaction is
-                # already on the chain - prove it by hash before calling it done.
                 tx_hash = await self._find_broadcast_tx(chain_id, signed_tx)
                 if tx_hash is None:
                     logger.error(
@@ -488,9 +477,9 @@ class WithdrawalProcessor:
     async def _process_chain(self, chain_id: int, withdrawals: List[Dict]):
         """Process one chain's pending withdrawals in index order.
 
-        The nonce readiness gate runs once per chain per poll, before anything is
-        signed: on divergence the whole chain is skipped, so no withdrawal is
-        resolved against a nonce the destination chain has already spent.
+        The nonce gate runs once per chain, before anything is signed: on divergence the
+        whole chain is skipped, so no withdrawal is resolved against a nonce the
+        destination chain has already spent.
         """
         chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
 

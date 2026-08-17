@@ -53,12 +53,10 @@ class DepositVerifier:
         self._web3_cache: Dict[int, AsyncWeb3] = {}
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get the verified client for a chain.
+        """Get the chain's startup-verified client (see `rpc_identity`).
 
-        Startup narrows the served chains to endpoints that proved their chain ID
-        (see `rpc_identity`), so a chain missing here is either unconfigured or
-        was excluded by that check — both fail closed rather than verifying a
-        deposit against an endpoint that may be a different chain.
+        A chain missing here is unconfigured or was excluded by that check; both fail
+        closed rather than verify a deposit against a possibly different chain.
         """
         if chain_id not in self._web3_cache:
             w3 = verified_web3(chain_id, self._chain_rpc_urls)

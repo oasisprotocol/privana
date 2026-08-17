@@ -220,12 +220,10 @@ class SweepEngine:
         return self._gas_funding_tx_hashes
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get the verified client for a chain.
+        """Get the chain's startup-verified client (see `rpc_identity`).
 
-        Startup narrows the served chains to endpoints that proved their chain ID
-        (see `rpc_identity`). Sweeps broadcast signed transactions, so serving an
-        excluded chain would move funds on a chain the signature was not meant
-        for; refusing outright is the safe half of that trade.
+        Sweeps broadcast signed transactions, so serving an excluded chain would move
+        funds on a chain the signature was never meant for.
         """
         if chain_id not in self._web3_cache:
             w3 = verified_web3(chain_id, self._chain_rpc_urls)

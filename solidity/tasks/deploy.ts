@@ -112,10 +112,8 @@ task("deploy")
     console.log(`EVM signing address: ${await proxy.evmAddress()}`);
     console.log(`Owner: ${await proxy.owner()}`);
 
-    // Localnet dev harness: chain 23293 doubles as its own source chain, so the
-    // same-chain deposit path needs an ERC20 there. Deployed from a fixed key at
-    // nonce 0 so .env.localnet's hardcoded ACCOUNTING_TOKEN_INFO address holds
-    // across localnet resets.
+    // Localnet doubles as its own source chain, so the same-chain deposit path needs an
+    // ERC20 there (deployed at a fixed address — see tasks/localnetToken.ts).
     const { chainId } = await hre.ethers.provider.getNetwork();
     if (chainId === SAPPHIRE_LOCALNET_CHAIN_ID) {
       await hre.run("deploy-localnet-token");

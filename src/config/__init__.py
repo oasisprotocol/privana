@@ -105,10 +105,10 @@ def _build_chain_rpc_urls(
     sapphire_chain_id: Optional[int] = None,
     sapphire_rpc_url: Optional[str] = None,
 ) -> Dict[int, str]:
-    """Build the mapping of chain ID to RPC URL.
+    """Map chain ID to RPC URL.
 
-    Sapphire RPC is always seeded when available, regardless of whether Alchemy is
-    configured. Alchemy chains are layered on top when ALCHEMY_API_KEY is present.
+    Sapphire is seeded from its own env vars before the Alchemy key is checked, so a
+    deployment without Alchemy still serves Sapphire.
     """
     rpc_urls: Dict[int, str] = {}
 

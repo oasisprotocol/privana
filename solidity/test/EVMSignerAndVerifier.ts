@@ -15,7 +15,6 @@ describe('EVMSignerAndVerifier', function () {
     await mockEVMSignerAndVerifier.waitForDeployment();
     await (await mockEVMSignerAndVerifier.initialize(MOCK_ROFL_APP_ID)).wait();
 
-
     // Re-attach via the default (wrapped) signer/provider: getDeployer()'s unwrapped
     // provider is only needed for deployment. On Sapphire networks, hardhat-chai-matchers'
     // .to.emit()/.to.be.reverted fetch the receipt via contract.runner.provider right after
@@ -73,6 +72,9 @@ describe('EVMSignerAndVerifier', function () {
       const contractAddress = await mockEVMSignerAndVerifier.getAddress();
       const mnemonic = 'chimney theory present latin find behave ankle clock shadow earn suit reflect';
 
+      // generateSweepNativeTransfer is onlyROFLQuery: msg.sender must be the registered ROFL
+      // signer, which only a Sapphire signed query supplies. Driven through sapphirepy, the
+      // client the ROFL service signs its queries with in production.
       const script = `
 import asyncio
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3

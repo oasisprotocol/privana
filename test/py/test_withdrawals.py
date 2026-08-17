@@ -286,8 +286,8 @@ class TestWithdrawalProcessor:
 
     @pytest.mark.asyncio
     async def test_duplicate_broadcast_confirmed_by_receipt_succeeds(self, processor):
-        """A rejected re-broadcast is success only when a receipt exists for the hash
-        of the exact signed transaction."""
+        """A rejected re-broadcast counts as success only when a receipt exists for
+        the exact signed transaction's hash."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             _resolved_withdrawal()
@@ -333,8 +333,8 @@ class TestWithdrawalProcessor:
 
     @pytest.mark.asyncio
     async def test_nonce_spent_by_foreign_tx_is_not_resolved(self, processor):
-        """A nonce burned by a *different* transaction must never read as a paid
-        withdrawal: no receipt for our hash means no success, no high-water mark."""
+        """A nonce burned by a different transaction must never read as a paid
+        withdrawal."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             _resolved_withdrawal()
@@ -342,7 +342,6 @@ class TestWithdrawalProcessor:
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
         processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
 
-        # The nonce was spent by an unrelated transaction, which is mined and known
         foreign_hash = WithdrawalProcessor._expected_tx_hash(TEST_OTHER_SIGNED_TX)
         mock_dest_web3 = MagicMock()
         mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({foreign_hash: {"status": 1}})
@@ -470,8 +469,8 @@ class TestWithdrawalProcessor:
 
     @pytest.mark.asyncio
     async def test_catch_up_does_not_trust_error_text_for_foreign_nonce(self, processor):
-        """A duplicate-broadcast error whose nonce was spent elsewhere is verified by
-        hash, found missing, and reported instead of being counted as broadcast."""
+        """A duplicate-broadcast error is verified by hash, so a nonce spent elsewhere
+        is never counted as broadcast."""
         processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
 
         processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=2)
@@ -500,14 +499,13 @@ class TestWithdrawalProcessor:
         with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
             await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
 
-        # Both lookups were tried for our hash, and neither answered
         mock_dest_web3.eth.get_transaction_receipt.assert_any_await(expected_hash)
         mock_dest_web3.eth.get_transaction.assert_any_await(expected_hash)
 
     @pytest.mark.asyncio
     async def test_process_chain_refuses_when_contract_nonce_behind_chain(self, processor):
-        """B3: a fresh chain whose evmAddress has already transacted must not be
-        processed - the contract would sign spent nonces."""
+        """A fresh chain whose evmAddress has already transacted must not be processed:
+        the contract would sign nonces the chain has already spent."""
         processor._is_running = True
         processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=0)
         processor._evm_address = TEST_USER_ADDRESS
@@ -520,7 +518,6 @@ class TestWithdrawalProcessor:
 
         await processor._process_chain(TEST_CHAIN_ID, [{"index": 0, "chain_id": TEST_CHAIN_ID}])
 
-        # Nothing signed, nothing resolved, no state advanced
         contract_reader.functions.withdrawals.assert_not_called()
         processor.accounting_service.resolve_withdrawal.assert_not_called()
         processor.accounting_service._send_raw_transaction.assert_not_called()
@@ -604,7 +601,7 @@ class TestWithdrawalAdmission:
     SAPPHIRE_CHAIN_ID = 23295
     ERC20_GAS_LIMIT = 100_000  # gasLimitERC20Withdraw
     NATIVE_GAS_LIMIT = 50_000  # gasLimitNativeWithdraw
-    GLOBAL_FLOOR = 10_000_000_000_000  # MIN_WITHDRAWAL_GAS_BALANCE, now only a floor
+    GLOBAL_FLOOR = 10_000_000_000_000  # MIN_WITHDRAWAL_GAS_BALANCE, only a floor
 
     @staticmethod
     def _make_service(gas_price: int, balance: int, floor: int = 0) -> AccountingContractService:
@@ -630,8 +627,8 @@ class TestWithdrawalAdmission:
 
     @pytest.mark.asyncio
     async def test_rejects_balance_that_only_clears_the_global_floor(self):
-        """1e13 wei cleared the old global check but covers 0.1% of a 100 gwei ERC-20
-        withdrawal: 100_000 gas x 100 gwei = 1e16 wei, 1.2e16 with the buffer."""
+        """1e13 wei clears the flat gas-balance floor but covers 0.1% of a 100 gwei
+        ERC-20 withdrawal: 100_000 gas x 100 gwei = 1e16 wei, 1.2e16 with the buffer."""
         service = self._make_service(
             self.SAPPHIRE_GAS_PRICE, balance=self.GLOBAL_FLOOR, floor=self.GLOBAL_FLOOR
         )

@@ -1510,10 +1510,8 @@ describe('Upgradability', function () {
     const freshProxy = await deployMockAccounting(await mockSiweAuth.getAddress());
     const freshProxyAddress = await freshProxy.getAddress();
 
-    // Verify initial VERSION is 2
     expect(await freshProxy.VERSION()).to.equal(2n);
 
-    // Set up state: register token, set balance, set gas price
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
       ethers.zeroPadValue(TEST_TOKEN.address, 20)
@@ -1535,7 +1533,6 @@ describe('Upgradability', function () {
     const gasPriceBefore = await freshProxy.gasPrices(testChainId);
     const tokenInfoBefore = await freshProxy.tokens(TEST_TOKEN.tokenId);
 
-    // Upgrade proxy to a newly prepared implementation
     const MockAccountingFactory = await ethers.getContractFactory('MockAccounting');
     const newImplAddress = await upgrades.prepareUpgrade(freshProxyAddress, MockAccountingFactory, {
       kind: 'uups',
@@ -1548,7 +1545,6 @@ describe('Upgradability', function () {
 
     const upgraded = (await ethers.getContractFactory('MockAccounting')).attach(freshProxyAddress) as unknown as MockAccounting;
 
-    // Assert VERSION is 2 and all state is preserved
     expect(await upgraded.VERSION()).to.equal(2n, "VERSION must report 2");
     expect(await upgraded.getBalance(user.address, TEST_TOKEN.tokenId)).to.equal(balanceBefore, "User balance must be preserved");
     expect(await upgraded.owner()).to.equal(ownerBefore, "Contract owner must be preserved");
