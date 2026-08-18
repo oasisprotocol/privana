@@ -1506,7 +1506,7 @@ describe('Upgradability', function () {
   });
 
   it("Should upgrade implementation, report VERSION == 2, and preserve prior state", async function () {
-    const user = (await ethers.getSigners())[2];
+    const user = getDeployer(2);
     const freshProxy = await deployMockAccounting(await mockSiweAuth.getAddress());
     const freshProxyAddress = await freshProxy.getAddress();
 

@@ -9,7 +9,11 @@ from web3.exceptions import ContractCustomError
 
 import src.api.routes as routes
 import src.auth.dependencies as auth_dependencies
-from src.config.chain_config import MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
+from src.config.chain_config import (
+    MIN_DEPOSIT_ERC20_WEI,
+    MIN_DEPOSIT_NATIVE_WEI,
+    get_finality_depth,
+)
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import SubmissionResult
 from src.services.deposit_processor import DepositProcessor
@@ -711,24 +715,15 @@ def test_pending_deposits_requires_auth(monkeypatch) -> None:
     discovery.discover_pending_deposits.assert_not_called()
 
 
-def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch) -> None:
-    """A chain advertises a minimum only for the asset types registered on it."""
+def _deposit_address_body(monkeypatch, token_infos, chain_rpc_urls) -> dict:
+    """POST /deposits/address with the given registered assets and verified chains."""
     mock_service = MagicMock()
-    mock_service.get_deposit_address = AsyncMock(
-        return_value="0x" + "aa" * 20,
-    )
+    mock_service.get_deposit_address = AsyncMock(return_value="0x" + "aa" * 20)
     monkeypatch.setattr(routes, "_service", mock_service)
 
     fake_settings = MagicMock()
-    fake_settings.token_infos = [
-        {"chain_id": 84532, "token_address": None},
-        {"chain_id": 84532, "token_address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"},
-        {"chain_id": 23295, "token_address": "0xF5f49fbBBD46C204b836d243995df72A61bC7ce7"},
-    ]
-    fake_settings.chain_rpc_urls = {
-        84532: "https://base-sepolia.g.alchemy.com/v2/test",
-        23295: "https://testnet.sapphire.oasis.io",
-    }
+    fake_settings.token_infos = token_infos
+    fake_settings.chain_rpc_urls = chain_rpc_urls
     monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
 
     client = _make_private_read_client(token=b"\xab" * 32)
@@ -737,10 +732,28 @@ def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch)
         json={"chain_type": "evm", "version": 0},
     )
     assert response.status_code == 200, response.text
-    body = response.json()
+    return response.json()
+
+
+def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch) -> None:
+    """A chain advertises a minimum only for the asset types registered on it."""
+    body = _deposit_address_body(
+        monkeypatch,
+        token_infos=[
+            {"chain_id": 84532, "token_address": None},
+            {"chain_id": 84532, "token_address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"},
+            {"chain_id": 23295, "token_address": "0xF5f49fbBBD46C204b836d243995df72A61bC7ce7"},
+        ],
+        chain_rpc_urls={
+            84532: "https://base-sepolia.g.alchemy.com/v2/test",
+            23295: "https://testnet.sapphire.oasis.io",
+        },
+    )
     assert body["deposit_address"] == "0x" + "aa" * 20
     assert body["chain_type"] == "evm"
     assert body["version"] == 0
+
+    assert set(body["min_deposit"]) == {"84532", "23295"}
 
     min_23295 = body["min_deposit"]["23295"]
     assert "native" not in min_23295
@@ -750,9 +763,37 @@ def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch)
     assert min_84532["native"] == str(MIN_DEPOSIT_NATIVE_WEI[84532])
     assert min_84532["erc20"] == str(MIN_DEPOSIT_ERC20_WEI[84532])
 
-    min_11155111 = body["min_deposit"].get("11155111", {})
-    assert "native" not in min_11155111
-    assert "erc20" not in min_11155111
+
+def test_get_deposit_address_omits_chain_without_verified_rpc(monkeypatch) -> None:
+    """A chain with registered assets but no verified RPC is not advertised."""
+    body = _deposit_address_body(
+        monkeypatch,
+        token_infos=[
+            {"chain_id": 84532, "token_address": None},
+            {"chain_id": 11155111, "token_address": None},
+        ],
+        chain_rpc_urls={84532: "https://base-sepolia.g.alchemy.com/v2/test"},
+    )
+    assert "11155111" not in body["min_deposit"]
+    assert "11155111" not in body["finality_depth"]
+    assert body["min_deposit"]["84532"]["native"] == str(MIN_DEPOSIT_NATIVE_WEI[84532])
+
+
+def test_get_deposit_address_omits_verified_chain_without_registered_assets(monkeypatch) -> None:
+    """A verified chain with no registered asset yields no entry, not an empty dict."""
+    body = _deposit_address_body(
+        monkeypatch,
+        token_infos=[
+            {"chain_id": 23295, "token_address": "0xF5f49fbBBD46C204b836d243995df72A61bC7ce7"},
+        ],
+        chain_rpc_urls={
+            23295: "https://testnet.sapphire.oasis.io",
+            23293: "http://localhost:8545",
+        },
+    )
+    assert set(body["min_deposit"]) == {"23295"}
+    # Served for confirmation depth, just not depositable.
+    assert body["finality_depth"]["23293"] == get_finality_depth(23293)
 
 
 def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:

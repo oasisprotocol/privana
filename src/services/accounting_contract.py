@@ -34,6 +34,7 @@ from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_ch
 from src.models.private_read import PrivateReadAuth
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
+from src.services.rpc_identity import verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ _TOKEN_SYMBOL_CACHE_TTL = 3600  # 1 hour - symbols rarely change
 _TOKEN_NAME_CACHE_TTL = 3600  # 1 hour - names rarely change
 _TOKEN_DECIMALS_CACHE_TTL = 3600  # 1 hour - decimals never change
 _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
+# Contract constants are not immutable across upgrades (gasLimitNativeSweep changed
+# in this branch), so the withdrawal gas limits expire like any other cached read.
+_WITHDRAWAL_GAS_LIMIT_CACHE_TTL = 300  # 5 minutes
 
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
@@ -131,9 +135,7 @@ class AccountingContractService:
         self._eip712_domain: Optional[Dict[str, Any]] = None
 
         self.rofl_client = RoflAppdClient()
-        self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, AsyncWeb3] = {}
-        self._withdrawal_gas_limits: Dict[str, int] = {}
         self.default_token_symbol = "ETH"
         self.chain_names = CHAIN_NAMES
 
@@ -152,6 +154,9 @@ class AccountingContractService:
         )
         self._token_list_cache: AsyncTTLCache[str, list[Dict[str, Any]]] = AsyncTTLCache(
             maxsize=1, ttl=_TOKEN_LIST_CACHE_TTL
+        )
+        self._withdrawal_gas_limits: AsyncTTLCache[str, int] = AsyncTTLCache(
+            maxsize=2, ttl=_WITHDRAWAL_GAS_LIMIT_CACHE_TTL
         )
 
     # ------------------------------------------------------------------
@@ -359,14 +364,12 @@ class AccountingContractService:
         if chain_id in self._chain_web3:
             return self._chain_web3[chain_id]
 
-        rpc_url = self.chain_rpc_urls.get(chain_id)
-        if not rpc_url:
-            raise ValueError(f"No RPC endpoint configured for chain ID {chain_id}")
-
-        web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
-        connected = await web3.is_connected()
-        if not connected:
-            raise ValueError(f"Failed to connect to RPC endpoint for chain ID {chain_id}")
+        # Read `settings.chain_rpc_urls` live: this service is constructed at import,
+        # before the startup identity check narrows it, and only `verified_web3` knows
+        # which chains proved their ID.
+        web3 = verified_web3(chain_id, self.settings.chain_rpc_urls)
+        if web3 is None:
+            raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
 
         self._chain_web3[chain_id] = web3
         return web3
@@ -422,21 +425,26 @@ class AccountingContractService:
         )
 
     async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
-        """Read the gas limit the contract signs withdrawals with (cached).
+        """Read the gas limit the contract signs withdrawals with (TTL-cached).
 
         ``gasLimitNativeWithdraw``/``gasLimitERC20Withdraw`` are ``public constant`` on
         ``EVMSignerAndVerifier``; reading the getters keeps admission in step with signing
-        instead of mirroring numbers that can silently drift apart.
+        instead of mirroring numbers that can silently drift apart. They move with an
+        implementation upgrade, so the value expires instead of being pinned for the
+        process lifetime.
         """
         fn_name = "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
-        cached = self._withdrawal_gas_limits.get(fn_name)
-        if cached is not None:
-            return cached
 
+        async def fetch() -> int:
+            contract_reader = self._get_reader_contract()
+            return int(await getattr(contract_reader.functions, fn_name)().call())
+
+        return await self._withdrawal_gas_limits.get_or_set_async(fn_name, fetch)
+
+    async def get_accounting_version(self) -> int:
+        """Read the deployed implementation's VERSION (startup gate input)."""
         contract_reader = self._get_reader_contract()
-        gas_limit = int(await getattr(contract_reader.functions, fn_name)().call())
-        self._withdrawal_gas_limits[fn_name] = gas_limit
-        return gas_limit
+        return int(await contract_reader.functions.VERSION().call())
 
     async def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
         """Check that evmAddress can pay for this withdrawal on the destination chain.

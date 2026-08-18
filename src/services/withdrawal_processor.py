@@ -169,15 +169,16 @@ class WithdrawalProcessor:
         raw_bytes = AccountingContractService._as_raw_tx_bytes(signed_tx)
         return HexBytes(Web3.keccak(raw_bytes)).to_0x_hex()
 
-    async def _find_broadcast_tx(self, chain_id: int, signed_tx: Any) -> Optional[str]:
-        """Return the hash of ``signed_tx`` if the destination chain already has it.
+    async def _find_broadcast_tx(self, chain_id: int, index: int, signed_tx: Any) -> Optional[str]:
+        """Return the hash of ``signed_tx`` if the destination chain already paid it.
 
         A rejected broadcast only proves the *nonce* is unusable, never that our
         transaction is what used it: "nonce too low" (geth), "already known" and "invalid
         nonce" (Oasis) read identically whether the withdrawal landed or an unrelated
-        transaction burned the nonce. Only a receipt or live mempool entry for the exact
-        signed bytes proves payment; None means "not proven", and the caller must leave
-        the withdrawal unresolved.
+        transaction burned the nonce. Only a status-1 receipt for the exact signed bytes
+        proves payment: a status-0 receipt means the payout reverted and a mempool entry
+        is merely in flight, so both answer None. None means "not proven", and the caller
+        must leave the withdrawal unresolved.
         """
         expected_hash = self._expected_tx_hash(signed_tx)
         dest_web3 = self._get_destination_web3(chain_id)
@@ -194,14 +195,37 @@ class WithdrawalProcessor:
             except TransactionNotFound:
                 return None
 
-        for label, fetch in (("receipt", fetch_receipt), ("pending tx", fetch_transaction)):
-            try:
-                if await self._rate_limited_call(fetch) is not None:
-                    return expected_hash
-            except Exception as exc:
-                logger.warning(
-                    f"Could not look up {label} for {expected_hash} on chain {chain_id}: {exc}"
-                )
+        try:
+            receipt = await self._rate_limited_call(fetch_receipt)
+        except Exception as exc:
+            logger.warning(
+                f"Could not look up receipt for {expected_hash} on chain {chain_id}: {exc}"
+            )
+            receipt = None
+
+        if receipt is not None:
+            if receipt["status"] == 1:
+                return expected_hash
+            logger.error(
+                f"Withdrawal #{index}: tx {expected_hash} mined on chain {chain_id} with status "
+                f"{receipt['status']} - the payout reverted, so this withdrawal is NOT paid and "
+                f"stays unresolved; manual investigation required"
+            )
+            return None
+
+        try:
+            pending_tx = await self._rate_limited_call(fetch_transaction)
+        except Exception as exc:
+            logger.warning(
+                f"Could not look up pending tx for {expected_hash} on chain {chain_id}: {exc}"
+            )
+            return None
+
+        if pending_tx is not None:
+            logger.info(
+                f"Withdrawal #{index}: tx {expected_hash} in flight on chain {chain_id} with no "
+                f"receipt yet - retrying next cycle"
+            )
 
         return None
 
@@ -321,15 +345,16 @@ class WithdrawalProcessor:
                 logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
                 found_nonces.add(nonce)
             except Exception as exc:
-                broadcast_hash = await self._find_broadcast_tx(chain_id, signed_tx)
+                broadcast_hash = await self._find_broadcast_tx(chain_id, index, signed_tx)
                 if broadcast_hash is not None:
-                    logger.info(f"Withdrawal #{index}: already broadcast, tx_hash={broadcast_hash}")
+                    logger.info(f"Withdrawal #{index}: already mined, tx_hash={broadcast_hash}")
                     found_nonces.add(nonce)
                 else:
                     logger.error(
-                        f"Withdrawal #{index}: broadcast failed and no transaction matching the "
-                        f"signed payload exists on {chain_name} - nonce {nonce} may have been "
-                        f"spent by a different transaction, leaving this withdrawal unpayable: "
+                        f"Withdrawal #{index}: broadcast failed and no successful transaction "
+                        f"matching the signed payload exists on {chain_name} - nonce {nonce} may "
+                        f"have been spent by a different transaction, leaving this withdrawal "
+                        f"unpayable: "
                         f"{exc}"
                     )
 
@@ -446,17 +471,17 @@ class WithdrawalProcessor:
                     lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
                 )
             except Exception as exc:
-                tx_hash = await self._find_broadcast_tx(chain_id, signed_tx)
+                tx_hash = await self._find_broadcast_tx(chain_id, index, signed_tx)
                 if tx_hash is None:
                     logger.error(
                         f"Withdrawal #{index}: broadcast to {chain_name} failed and no "
-                        f"transaction matching the signed payload "
+                        f"successful transaction matching the signed payload "
                         f"({self._expected_tx_hash(signed_tx)}) exists there - leaving it "
                         f"unresolved rather than marking it paid: {exc}"
                     )
                     return False
                 logger.info(
-                    f"Withdrawal #{index}: already broadcast to {chain_name}, tx_hash={tx_hash}"
+                    f"Withdrawal #{index}: already mined on {chain_name}, tx_hash={tx_hash}"
                 )
             else:
                 logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")

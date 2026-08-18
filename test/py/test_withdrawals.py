@@ -7,6 +7,7 @@ from eth_abi import encode
 from web3.exceptions import TransactionNotFound
 
 from src.services.accounting_contract import AccountingContractService
+from src.services.cache import AsyncTTLCache
 from src.services.withdrawal_processor import WithdrawalProcessor
 
 TEST_USER_ADDRESS = "0x1234567890123456789012345678901234567890"
@@ -286,8 +287,8 @@ class TestWithdrawalProcessor:
 
     @pytest.mark.asyncio
     async def test_duplicate_broadcast_confirmed_by_receipt_succeeds(self, processor):
-        """A rejected re-broadcast counts as success only when a receipt exists for
-        the exact signed transaction's hash."""
+        """A rejected re-broadcast counts as success only when a status-1 receipt exists
+        for the exact signed transaction's hash."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             _resolved_withdrawal()
@@ -310,8 +311,34 @@ class TestWithdrawalProcessor:
         mock_dest_web3.eth.get_transaction_receipt.assert_any_await(expected_hash)
 
     @pytest.mark.asyncio
-    async def test_duplicate_broadcast_confirmed_by_pending_tx_succeeds(self, processor):
-        """A mempool entry for the expected hash is also proof of a prior broadcast."""
+    async def test_reverted_receipt_is_not_treated_as_paid(self, processor):
+        """A status-0 receipt for the expected hash is a failed payout, never proof of
+        payment: the withdrawal must stay unresolved so it can be recovered."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("already known")
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({expected_hash: {"status": 0}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({expected_hash: {"hash": expected_hash}})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+        # A reverted receipt settles it - the mempool must not be consulted as a fallback
+        mock_dest_web3.eth.get_transaction.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pending_tx_alone_is_not_treated_as_paid(self, processor):
+        """A mempool entry for the expected hash is in flight, not paid: retry next cycle
+        instead of marking the withdrawal done."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
             _resolved_withdrawal()
@@ -328,8 +355,9 @@ class TestWithdrawalProcessor:
         with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
             result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
 
-        assert result is True
-        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 0
+        assert result is False
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+        mock_dest_web3.eth.get_transaction.assert_any_await(expected_hash)
 
     @pytest.mark.asyncio
     async def test_nonce_spent_by_foreign_tx_is_not_resolved(self, processor):
@@ -616,7 +644,7 @@ class TestWithdrawalAdmission:
             return_value=TestWithdrawalAdmission.NATIVE_GAS_LIMIT
         )
         service.contract_reader = reader
-        service._withdrawal_gas_limits = {}
+        service._withdrawal_gas_limits = AsyncTTLCache(maxsize=2, ttl=300)
         service.settings = MagicMock(min_withdrawal_gas_balance=floor)
 
         chain_w3 = MagicMock()
@@ -694,4 +722,4 @@ class TestWithdrawalAdmission:
             )
 
         reader.functions.gasLimitERC20Withdraw.return_value.call.assert_awaited_once()
-        assert service._withdrawal_gas_limits == {"gasLimitERC20Withdraw": self.ERC20_GAS_LIMIT}
+        assert service._withdrawal_gas_limits.get("gasLimitERC20Withdraw") == self.ERC20_GAS_LIMIT

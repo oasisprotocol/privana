@@ -416,14 +416,17 @@ async def get_deposit_address(
         erc20_supported = {
             entry["chain_id"] for entry in settings.token_infos if entry.get("token_address")
         }
+        # Advertise only chains that survived RPC identity verification and have
+        # at least one registered asset type.
         min_deposit: dict[str, dict[str, str]] = {}
-        for cid in MIN_DEPOSIT_NATIVE_WEI:
+        for cid in settings.chain_rpc_urls:
             chain_min: dict[str, str] = {}
             if cid in native_supported:
                 chain_min["native"] = str(MIN_DEPOSIT_NATIVE_WEI.get(cid, 0))
             if cid in erc20_supported:
                 chain_min["erc20"] = str(MIN_DEPOSIT_ERC20_WEI.get(cid, 0))
-            min_deposit[str(cid)] = chain_min
+            if chain_min:
+                min_deposit[str(cid)] = chain_min
 
         return DepositAddressResponse(
             deposit_address=address,
