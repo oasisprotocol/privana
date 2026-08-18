@@ -103,8 +103,8 @@ async def test_unreachable_endpoint_is_excluded_like_a_mismatch(monkeypatch, cap
         served = await initialize_verified_chain_rpc_urls(settings)
 
     # An endpoint that could not be reached cannot be told apart from one filed
-    # under the wrong chain, so it is dropped rather than trusted. The reachable
-    # chain keeps serving — one dead endpoint does not take the deployment down.
+    # under the wrong chain, so it is dropped rather than trusted. Reachable
+    # chains keep serving; one dead endpoint does not take down the deployment.
     assert served == {GOOD_CHAIN: GOOD_URL}
     assert verified_web3(SAPPHIRE_CHAIN, settings.chain_rpc_urls) is None
     assert verified_web3(GOOD_CHAIN, settings.chain_rpc_urls) is not None
@@ -163,8 +163,8 @@ async def test_consumers_refuse_an_excluded_chain(monkeypatch):
     settings = _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
     await initialize_verified_chain_rpc_urls(settings)
 
-    # Services built with the pre-check mapping still fail closed, because the
-    # verified set — not the caller's dict key — decides what is served.
+    # Services built with the pre-check mapping still fail closed: the
+    # verified set, not the caller's dict key, decides what is served.
     stale = {GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL}
     verifier = DepositVerifier(dict(stale))
     discovery = DepositDiscoveryService(

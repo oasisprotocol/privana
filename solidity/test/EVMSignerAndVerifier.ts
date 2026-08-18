@@ -72,9 +72,8 @@ describe('EVMSignerAndVerifier', function () {
       const contractAddress = await mockEVMSignerAndVerifier.getAddress();
       const mnemonic = 'chimney theory present latin find behave ankle clock shadow earn suit reflect';
 
-      // generateSweepNativeTransfer is onlyROFLQuery: msg.sender must be the registered ROFL
-      // signer, which only a Sapphire signed query supplies. Driven through sapphirepy, the
-      // client the ROFL service signs its queries with in production.
+      // generateSweepNativeTransfer requires onlyROFLQuery: plain eth_call cannot authenticate
+      // msg.sender, so this requires a Sapphire signed query (via sapphirepy).
       const script = `
 import asyncio
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
