@@ -1,0 +1,27 @@
+services:
+  privana:
+    build:
+      context: .
+      args:
+        - ENV_FILE=.env.rubetest
+    image: "ghcr.io/rube-de/privana-shadow@sha256:9993ae265bce35e794739383ce493841e2f01d8a3b26e706a166a96633a48536"
+    platform: linux/amd64
+    environment:
+      - SWEEP_STATE_DIR=/data/sweep-engine
+      - ONRAMP_PROVIDER
+      - TRANSAK_CLIENT_IP_HEADER
+      - ALCHEMY_API_KEY
+      - MOONPAY_API_KEY
+      - MOONPAY_SECRET_KEY
+      - MOONPAY_WEBHOOK_SECRET_KEY
+      - TRANSAK_API_KEY
+      - TRANSAK_API_SECRET
+    volumes:
+      - /run/rofl-appd.sock:/run/rofl-appd.sock
+      - sweep-engine-data:/data/sweep-engine
+    ports:
+      - "8000:8000"
+    restart: on-failure
+
+volumes:
+  sweep-engine-data:
