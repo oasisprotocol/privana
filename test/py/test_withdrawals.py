@@ -18,7 +18,7 @@ TEST_OTHER_SIGNED_TX = b"\xff" * 64
 
 
 def _hash_lookup(known: dict) -> AsyncMock:
-    """Async mock shaped like an EVM node: answers only for the hashes it knows."""
+    """Mock node lookup answering only for known hashes."""
 
     def _lookup(tx_hash):
         if tx_hash not in known:
@@ -522,7 +522,7 @@ class TestWithdrawalProcessor:
         processor.accounting_service.resolve_withdrawal.assert_not_called()
         processor.accounting_service._send_raw_transaction.assert_not_called()
         assert processor._chain_high_water_mark == {}
-        # The pending count is what matters: a queued tx has already spent its nonce
+        # Pending count includes queued transactions that spent nonces
         mock_dest_web3.eth.get_transaction_count.assert_any_await(TEST_USER_ADDRESS, "pending")
 
     @pytest.mark.asyncio
@@ -660,7 +660,7 @@ class TestWithdrawalAdmission:
                 self.SAPPHIRE_CHAIN_ID, is_native=True, amount=amount
             )
 
-        # The native path must read the native limit, never the ERC-20 one
+        # Native withdrawals require the native gas limit, not ERC-20
         reader.functions.gasLimitNativeWithdraw.return_value.call.assert_awaited_once()
         reader.functions.gasLimitERC20Withdraw.return_value.call.assert_not_awaited()
 

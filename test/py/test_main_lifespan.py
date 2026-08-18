@@ -22,7 +22,7 @@ def _lifespan_settings() -> SimpleNamespace:
     """Settings stand-in — never the load_settings() singleton.
 
     The identity check narrows ``chain_rpc_urls`` in place, so a narrowed
-    singleton would leak into every later test.
+    singleton would leak into later tests.
     """
     return SimpleNamespace(
         accounting_contract_address="0x" + "ab" * 20,
@@ -246,7 +246,7 @@ async def test_uvicorn_access_log_uses_redacted_scope(caplog) -> None:
 async def test_lifespan_aborts_when_auth_token_key_sync_fails(monkeypatch) -> None:
     monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
     # The identity check runs first; unstubbed it would probe the real
-    # .env.localnet endpoints before reaching the abort under test.
+    # endpoints before reaching the abort under test.
     monkeypatch.setattr(
         main, "initialize_verified_chain_rpc_urls", AsyncMock(return_value={LIFESPAN_CHAIN: ""})
     )
@@ -316,9 +316,8 @@ async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypa
     async with main.lifespan(None):
         startup = list(steps)
 
-    # The identity check is first: nothing may read a chain, write to the contract,
-    # or register a non-removable token id on an endpoint that has not proved which
-    # chain it is. Token registration still precedes the gas-price sync.
+    # Identity check is first: nothing may read a chain, write to the contract,
+    # or register a token on an unverified endpoint. Token registration precedes gas-price sync.
     assert startup == [
         "rpc_identity",
         "jwt_keys",
@@ -344,15 +343,14 @@ async def test_lifespan_leaves_a_mis_filed_chain_unserved(monkeypatch, caplog) -
     _wire_lifespan(monkeypatch, settings, steps, stub_identity=False)
 
     async def probe(url: str, _timeout: float) -> int:
-        # The mis-filed endpoint answers with someone else's chain id.
         return {LIFESPAN_RPC_URL: LIFESPAN_CHAIN, MIS_FILED_URL: 1}[url]
 
     monkeypatch.setattr(rpc_identity, "_probe_chain_id", probe)
 
     with caplog.at_level(logging.ERROR, logger="src.services.rpc_identity"):
         async with main.lifespan(None):
-            # Excluded, not mis-served: the chain is gone from the served set
-            # before any token is registered or any client is built for it.
+            # Excluded, not mis-served: the chain is dropped from the served set
+            # before token registration or client construction.
             assert settings.chain_rpc_urls == {LIFESPAN_CHAIN: LIFESPAN_RPC_URL}
             assert (
                 rpc_identity.verified_web3(MIS_FILED_CHAIN, {MIS_FILED_CHAIN: MIS_FILED_URL})
@@ -360,7 +358,7 @@ async def test_lifespan_leaves_a_mis_filed_chain_unserved(monkeypatch, caplog) -
             )
             assert rpc_identity.verified_web3(LIFESPAN_CHAIN, {}) is not None
 
-    # One bad endpoint does not take the deployment down; the good chain serves.
+    # One bad endpoint does not abort startup; valid chains continue serving.
     assert "withdrawal_start" in steps
     assert any(str(MIS_FILED_CHAIN) in record.getMessage() for record in caplog.records)
 
@@ -377,8 +375,7 @@ async def test_lifespan_completes_when_a_registered_chain_has_no_gas_price(
         steps.append("gas_price_attempt")
         raise RuntimeError("rofl-appd unreachable")
 
-    # Real gas-price bootstrap, retries un-delayed: it is best-effort by design
-    # and returns after exhausting them.
+    # Gas-price bootstrap is best-effort and returns after retries are exhausted.
     monkeypatch.setattr(gas_price_bootstrap, "_BASE_RETRY_DELAY", 0)
     handles.accounting.get_gas_price = AsyncMock(side_effect=failing_gas_price)
     monkeypatch.setattr(main, "bootstrap_gas_prices", gas_price_bootstrap.bootstrap_gas_prices)
@@ -387,10 +384,8 @@ async def test_lifespan_completes_when_a_registered_chain_has_no_gas_price(
         async with main.lifespan(None):
             pass
 
-    # Half-configured: the token is registered (permanently — the contract has no
-    # removal function) while the chain carries no on-chain gas price, so its
-    # withdrawals fail with GasPriceNotSet until a later start syncs it. Startup
-    # completes regardless, so the log is the only signal.
+    # Token registration is permanent on the contract, while the chain carries no
+    # gas price until synced. Startup completes regardless.
     assert steps.count("gas_price_attempt") == gas_price_bootstrap._MAX_ATTEMPTS
     assert steps.index("token_info") < steps.index("gas_price_attempt")
     assert steps.index("gas_price_attempt") < steps.index("withdrawal_start")

@@ -756,7 +756,6 @@ def test_get_deposit_address_advertises_only_configured_asset_types(monkeypatch)
 
 
 def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
-    """/deposits/pending accepts the Sapphire source chain."""
     from src.services.deposit_discovery import DiscoveryResult
 
     result = DiscoveryResult(
