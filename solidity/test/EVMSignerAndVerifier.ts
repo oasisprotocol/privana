@@ -63,7 +63,7 @@ describe('EVMSignerAndVerifier', function () {
       const signer = (await ethers.getSigners())[0];
       await (await mockEVMSignerAndVerifier.setRoflSignerAddress(signer.address)).wait();
 
-      const beneficiary = (await ethers.getSigners())[1].address;
+      const beneficiary = getDeployer(1).address;
       const chainId = 23295n;
       const amount = ethers.parseEther("1.0");
       const gasPrice = 100000000000n; // 100 gwei
@@ -139,7 +139,7 @@ asyncio.run(run())
       const signer = (await ethers.getSigners())[0];
       await (await mockEVMSignerAndVerifier.setRoflSignerAddress(signer.address)).wait();
 
-      const toDepositAddress = (await ethers.getSigners())[1].address;
+      const toDepositAddress = getDeployer(1).address;
       const chainId = 23295n;
       const gasAmount = 6500000000000000n; // 65000 * 100 gwei
       const gasTankNonce = 0n;

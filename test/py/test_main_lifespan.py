@@ -57,6 +57,7 @@ def _wire_lifespan(
     )
     onramp_intent_key_manager = SimpleNamespace(initialize=step("onramp_intent_keys"))
     accounting = MagicMock()
+    accounting.get_accounting_version = step("version_check", 2)
     withdrawal_processor = SimpleNamespace(
         start=step("withdrawal_start"), stop=step("withdrawal_stop")
     )
@@ -258,6 +259,9 @@ async def test_lifespan_aborts_when_auth_token_key_sync_fails(monkeypatch) -> No
     )
     onramp_intent_key_manager = SimpleNamespace(initialize=AsyncMock())
     bootstrap_rofl_signer_address = AsyncMock()
+    accounting = MagicMock()
+    accounting.get_accounting_version = AsyncMock(return_value=2)
+    monkeypatch.setattr(main, "get_accounting_contract_service", lambda: accounting)
 
     monkeypatch.setattr(main, "get_jwt_key_manager", lambda: jwt_key_manager)
     monkeypatch.setattr(main, "get_auth_token_key_manager", lambda: auth_token_key_manager)
@@ -323,6 +327,7 @@ async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypa
         "jwt_keys",
         "auth_token_keys",
         "onramp_intent_keys",
+        "version_check",
         "sync_key_to_contract",
         "rofl_signer",
         "token_info",
@@ -395,3 +400,34 @@ async def test_lifespan_completes_when_a_registered_chain_has_no_gas_price(
         "Failed to sync gas price for chain 84532" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_aborts_when_contract_version_below_required(monkeypatch) -> None:
+    steps: list[str] = []
+    handles = _wire_lifespan(monkeypatch, _lifespan_settings(), steps)
+    version_read = AsyncMock(return_value=1)
+    handles.accounting.get_accounting_version = version_read
+
+    with pytest.raises(RuntimeError, match="upgrade the proxy before restarting"):
+        async with main.lifespan(None):
+            pass
+
+    # The gate read the version and nothing touched the contract afterwards.
+    version_read.assert_awaited_once()
+    assert "sync_key_to_contract" not in steps
+    assert "token_info" not in steps
+    assert "withdrawal_start" not in steps
+
+
+@pytest.mark.asyncio
+async def test_lifespan_proceeds_at_required_version(monkeypatch) -> None:
+    steps: list[str] = []
+    _wire_lifespan(monkeypatch, _lifespan_settings(), steps)
+
+    async with main.lifespan(None):
+        pass
+
+    assert steps.index("version_check") < steps.index("sync_key_to_contract")
+    assert steps.index("token_info") < steps.index("gas_prices")
+    assert steps[-1] == "withdrawal_stop"

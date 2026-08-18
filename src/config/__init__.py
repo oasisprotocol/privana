@@ -37,6 +37,7 @@ CHAIN_NAMES: Dict[int, str] = {
     999: "HyperEVM",
     8453: "Base",
     23295: "Sapphire Testnet",
+    23293: "Sapphire Localnet",
     84532: "Base Sepolia",
     11155111: "Ethereum Sepolia",
 }
@@ -47,6 +48,7 @@ NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     999: "HYPE",
     8453: "ETH",
     23295: "ROSE",
+    23293: "ROSE",
     84532: "ETH",
     11155111: "ETH",
 }
@@ -57,6 +59,7 @@ NATIVE_TOKEN_NAMES: Dict[int, str] = {
     999: "Hyperliquid",
     8453: "Ether",
     23295: "Rose",
+    23293: "Rose",
     84532: "Ether",
     11155111: "Ether",
 }
@@ -67,6 +70,7 @@ NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
     999: 18,
     8453: 18,
     23295: 18,
+    23293: 18,
     84532: 18,
     11155111: 18,
 }

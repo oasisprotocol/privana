@@ -14,3 +14,6 @@ solidity/tasks/localnetToken.ts:generic-api-key:25
 .env.rubetest:generic-api-key:21
 .env.rubetest:generic-api-key:92
 test/py/test_accounting_routes.py:generic-api-key:728
+test/py/test_accounting_routes.py:generic-api-key:744
+test/py/test_accounting_routes.py:generic-api-key:745
+test/py/test_accounting_routes.py:generic-api-key:787

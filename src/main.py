@@ -34,6 +34,10 @@ _LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read
     encoding="utf-8"
 )
 
+# Sapphire sweeps need the 25,000 gasLimitNativeSweep; a pre-upgrade proxy signs
+# them at 21,000 and strands every deposit. The lifespan refuses to start below this.
+REQUIRED_ACCOUNTING_VERSION = 2
+
 settings = load_settings()
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -140,6 +144,19 @@ async def lifespan(_app: FastAPI):
     # Sync the encryption key to the contract (skipped when DISABLE_ROFL_KEYS is set).
     # TODO: Remove DISABLE_ROFL_KEYS check when Sapphire localnet e2e tests are available.
     if not os.getenv("DISABLE_ROFL_KEYS"):
+        deployed_version = await get_accounting_contract_service().get_accounting_version()
+        if deployed_version < REQUIRED_ACCOUNTING_VERSION:
+            logger.critical(
+                "Accounting implementation VERSION %d is below the required %d; refusing to "
+                "start so no token registration or 21,000-gas Sapphire sweep happens before "
+                "the proxy upgrade lands",
+                deployed_version,
+                REQUIRED_ACCOUNTING_VERSION,
+            )
+            raise RuntimeError(
+                f"Accounting VERSION {deployed_version} < required {REQUIRED_ACCOUNTING_VERSION}; "
+                "upgrade the proxy before restarting the service"
+            )
         try:
             await auth_token_key_manager.sync_key_to_contract()
         except Exception:
