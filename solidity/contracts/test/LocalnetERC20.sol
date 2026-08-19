@@ -13,15 +13,20 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
  *      (tasks/localnetToken.ts).
  */
 contract LocalnetERC20 is ERC20 {
+    /// @notice Deployer: the fixed localnet key from tasks/localnetToken.ts, and the only faucet.
+    address public immutable owner;
+
     constructor(address initialHolder, uint256 initialSupply) ERC20("Localnet Honor", "LHONOR") {
+        owner = msg.sender;
         _mint(initialHolder, initialSupply);
     }
 
     /**
-     * @notice Unpermissioned faucet mint: funds deposit addresses while exercising the
+     * @notice Faucet mint, deployer-only: funds deposit addresses while exercising the
      *         deposit → sweep → credit → withdraw flow. Localnet only.
      */
     function mint(address to, uint256 amount) external {
+        require(msg.sender == owner, "LocalnetERC20: faucet only");
         _mint(to, amount);
     }
 }

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.clients.rofl import TransactionRevertedError
-from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI
+from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI, SWEEP_GAS_LIMIT_NATIVE
 from src.services.sweep_engine import (
     SweepEngine,
     SweepRecord,
@@ -412,9 +412,9 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=False)
     # gas_price = max(1.25 * 1 gwei base fee, 1 gwei rpc, floor) = 1.25 gwei;
-    # gas_amount = 21k gas * 1.25 gwei * 2 + l1_fee, under the 84532 cap
+    # gas_amount = native sweep gas * 1.25 gwei * 2 + l1_fee, under the 84532 cap
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
-    assert call_kwargs.kwargs["gas_amount"] == 21_000 * 1_250_000_000 * 2 + l1_fee
+    assert call_kwargs.kwargs["gas_amount"] == SWEEP_GAS_LIMIT_NATIVE * 1_250_000_000 * 2 + l1_fee
 
 
 @pytest.mark.asyncio

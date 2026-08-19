@@ -86,6 +86,13 @@ def _wire_lifespan(
     monkeypatch.setattr(main, "bootstrap_gas_prices", step("gas_prices"))
     monkeypatch.setattr(main, "get_withdrawal_processor", lambda: withdrawal_processor)
     monkeypatch.setattr(main, "get_deposit_processor", get_deposit_processor)
+    # The real loop would spawn a background prober against the stubbed endpoints.
+    monkeypatch.setattr(
+        main,
+        "start_reverification_loop",
+        MagicMock(side_effect=lambda _settings: steps.append("reverify_start")),
+    )
+    monkeypatch.setattr(main, "stop_reverification_loop", step("reverify_stop"))
     return SimpleNamespace(
         accounting=accounting,
         deposit_processor=deposit_processor,
@@ -247,10 +254,12 @@ async def test_uvicorn_access_log_uses_redacted_scope(caplog) -> None:
 async def test_lifespan_aborts_when_auth_token_key_sync_fails(monkeypatch) -> None:
     monkeypatch.delenv("DISABLE_ROFL_KEYS", raising=False)
     # The identity check runs first; unstubbed it would probe the real
-    # endpoints before reaching the abort under test.
+    # endpoints before reaching the abort under test, and its loop would keep
+    # probing after it.
     monkeypatch.setattr(
         main, "initialize_verified_chain_rpc_urls", AsyncMock(return_value={LIFESPAN_CHAIN: ""})
     )
+    monkeypatch.setattr(main, "start_reverification_loop", MagicMock())
 
     jwt_key_manager = SimpleNamespace(initialize=AsyncMock())
     auth_token_key_manager = SimpleNamespace(
@@ -287,6 +296,7 @@ async def test_lifespan_aborts_when_onramp_intent_key_derivation_fails(
     monkeypatch.setattr(
         main, "initialize_verified_chain_rpc_urls", AsyncMock(return_value={LIFESPAN_CHAIN: ""})
     )
+    monkeypatch.setattr(main, "start_reverification_loop", MagicMock())
 
     jwt_key_manager = SimpleNamespace(initialize=AsyncMock())
     auth_token_key_manager = SimpleNamespace(
@@ -320,10 +330,12 @@ async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypa
     async with main.lifespan(None):
         startup = list(steps)
 
-    # Identity check is first: nothing may read a chain, write to the contract,
-    # or register a token on an unverified endpoint. Token registration precedes gas-price sync.
+    # Identity check is first, with its re-verification loop started on its heels:
+    # nothing may read a chain, write to the contract, or register a token on an
+    # unverified endpoint. Token registration precedes gas-price sync.
     assert startup == [
         "rpc_identity",
+        "reverify_start",
         "jwt_keys",
         "auth_token_keys",
         "onramp_intent_keys",
@@ -337,7 +349,8 @@ async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypa
         "resume_sweeps",
         "recovery_loop",
     ]
-    assert steps[len(startup) :] == ["processor_stop", "withdrawal_stop"]
+    # Shutdown stops the prober before the processors it feeds.
+    assert steps[len(startup) :] == ["reverify_stop", "processor_stop", "withdrawal_stop"]
 
 
 @pytest.mark.asyncio

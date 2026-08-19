@@ -3,9 +3,12 @@
 The check is the only thing standing between a mis-filed endpoint and a service
 that verifies deposits on one chain while signing transactions for another, so
 every test here asserts the *exclusion*, not just the log line. The verified set
-is process-wide state; `test/conftest.py` resets it between tests.
+is process-wide state; `test/conftest.py` resets it between tests and opts into
+the pre-check fallback, so the tests below that assert the fail-closed default
+reset it again themselves.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,7 +19,12 @@ from src.services.deposit_discovery import DepositDiscoveryService, DiscoveryNot
 from src.services.deposit_verifier import DepositVerifier
 from src.services.rpc_identity import (
     NoVerifiedChainsError,
+    allow_unverified_urls,
     initialize_verified_chain_rpc_urls,
+    reset_verified_chain_rpc_urls,
+    reverify_chain_rpc_urls,
+    start_reverification_loop,
+    stop_reverification_loop,
     verified_web3,
     verify_chain_rpc_urls,
 )
@@ -37,6 +45,16 @@ def _probe(reported: dict[str, object]):
         return answer
 
     return probe
+
+
+async def _wait_until(predicate, timeout: float = 1.0) -> None:
+    """Yield to the loop until ``predicate`` holds; time out rather than hang."""
+
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout)
 
 
 def _settings(chain_rpc_urls: dict[int, str]) -> SimpleNamespace:
@@ -182,10 +200,103 @@ async def test_consumers_refuse_an_excluded_chain(monkeypatch):
 
 
 async def test_consumers_fall_back_to_configured_urls_when_check_never_ran():
-    # Unit tests and one-off scripts never run the startup check; there is no
-    # verified set to gate on, so the injected mapping is used as-is.
+    # Unit tests and one-off scripts never run the startup check; with the
+    # `allow_unverified_urls` opt-out set (see `test/conftest.py`) and no verified
+    # set to gate on, the injected mapping is used as-is.
     verifier = DepositVerifier({GOOD_CHAIN: GOOD_URL})
 
     assert verifier._get_web3(GOOD_CHAIN) is not None
     with pytest.raises(ValueError, match="No verified RPC endpoint"):
         verifier._get_web3(SAPPHIRE_CHAIN)
+
+
+async def test_nothing_is_served_before_the_check_runs():
+    # The default is fail-closed: a process that skipped the startup check has
+    # proved nothing, so it resolves nothing rather than trusting its config.
+    reset_verified_chain_rpc_urls()
+
+    assert verified_web3(GOOD_CHAIN, {GOOD_CHAIN: GOOD_URL}) is None
+    with pytest.raises(ValueError, match="No verified RPC endpoint"):
+        DepositVerifier({GOOD_CHAIN: GOOD_URL})._get_web3(GOOD_CHAIN)
+
+
+async def test_opt_out_lapses_once_the_check_commits(monkeypatch):
+    reset_verified_chain_rpc_urls()
+    # Unit tests and one-off scripts opt out explicitly; nothing else does.
+    allow_unverified_urls()
+    assert verified_web3(SAPPHIRE_CHAIN, {SAPPHIRE_CHAIN: SAPPHIRE_URL}) is not None
+
+    monkeypatch.setattr(
+        rpc_identity,
+        "_probe_chain_id",
+        _probe({GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: 1}),
+    )
+    await initialize_verified_chain_rpc_urls(
+        _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
+    )
+
+    # Committing the check ends the opt-out: the excluded chain stops resolving
+    # even for a caller still passing its URL in.
+    assert verified_web3(SAPPHIRE_CHAIN, {SAPPHIRE_CHAIN: SAPPHIRE_URL}) is None
+    assert verified_web3(GOOD_CHAIN, {}) is not None
+
+
+async def test_reverification_readmits_a_recovered_endpoint(monkeypatch):
+    answers = {GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: TimeoutError("no answer")}
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", _probe(answers))
+    settings = _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
+    await initialize_verified_chain_rpc_urls(settings)
+    assert verified_web3(SAPPHIRE_CHAIN, {}) is None
+
+    answers[SAPPHIRE_URL] = SAPPHIRE_CHAIN
+
+    # Startup narrowed the mapping to the good chain; re-verification probes the
+    # configured set, so the recovered endpoint gets its chain back without a restart.
+    assert await reverify_chain_rpc_urls(settings) == {
+        GOOD_CHAIN: GOOD_URL,
+        SAPPHIRE_CHAIN: SAPPHIRE_URL,
+    }
+    assert settings.chain_rpc_urls == {GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL}
+    assert verified_web3(SAPPHIRE_CHAIN, {}) is not None
+
+
+async def test_reverification_drops_a_drifted_endpoint(monkeypatch, caplog):
+    answers = {GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: SAPPHIRE_CHAIN}
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", _probe(answers))
+    settings = _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
+    await initialize_verified_chain_rpc_urls(settings)
+    assert verified_web3(SAPPHIRE_CHAIN, {}) is not None
+
+    # The endpoint is re-pointed at another chain after startup — exactly what a
+    # one-shot probe would keep trusting.
+    answers[SAPPHIRE_URL] = 23294
+
+    with caplog.at_level("ERROR", logger="src.services.rpc_identity"):
+        assert await reverify_chain_rpc_urls(settings) == {GOOD_CHAIN: GOOD_URL}
+
+    assert settings.chain_rpc_urls == {GOOD_CHAIN: GOOD_URL}
+    assert verified_web3(SAPPHIRE_CHAIN, {SAPPHIRE_CHAIN: SAPPHIRE_URL}) is None
+    assert verified_web3(GOOD_CHAIN, {}) is not None
+    assert any("now unserved" in r.getMessage() for r in caplog.records)
+    assert SAPPHIRE_URL not in caplog.text
+
+
+async def test_reverification_loop_reprobes_until_stopped(monkeypatch):
+    answers = {GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: 1}
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", _probe(answers))
+    settings = _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
+    await initialize_verified_chain_rpc_urls(settings)
+
+    task = start_reverification_loop(settings, interval_seconds=0)
+    try:
+        # Idempotent: a second start does not stack a second prober.
+        assert start_reverification_loop(settings, interval_seconds=0) is task
+        answers[SAPPHIRE_URL] = SAPPHIRE_CHAIN
+        await _wait_until(lambda: verified_web3(SAPPHIRE_CHAIN, {}) is not None)
+        answers[SAPPHIRE_URL] = 23294
+        await _wait_until(lambda: verified_web3(SAPPHIRE_CHAIN, {}) is None)
+    finally:
+        await stop_reverification_loop()
+
+    assert task.cancelled()
+    assert rpc_identity._reverification_task is None

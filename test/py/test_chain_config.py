@@ -20,6 +20,7 @@ from src.config.chain_config import (
     MIN_DEPOSIT_ERC20_WEI,
     MIN_DEPOSIT_NATIVE_WEI,
     ChainConfig,
+    _build_chain_configs,
     get_finality_depth,
 )
 
@@ -230,12 +231,22 @@ def test_sapphire_testnet_chain_config_m6_1():
     assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
     assert cfg.discovery_lookback_blocks == 640
-    assert cfg.discovery_max_lookback_blocks == 3_800
+    assert cfg.discovery_max_lookback_blocks == 1_000
 
 
-def test_sapphire_localnet_chain_config():
-    assert 23293 in CHAIN_CONFIGS
-    cfg = CHAIN_CONFIGS[23293]
+def test_sapphire_localnet_absent_on_testnet(monkeypatch):
+    """The localnet mirror must not be depositable on a testnet deployment."""
+    monkeypatch.setenv("SAPPHIRE_CHAIN_ID", "23295")
+
+    assert 23293 not in _build_chain_configs()
+
+
+def test_sapphire_localnet_chain_config(monkeypatch):
+    monkeypatch.setenv("SAPPHIRE_CHAIN_ID", "23293")
+    configs = _build_chain_configs()
+
+    assert 23293 in configs
+    cfg = configs[23293]
     assert cfg.discovery_scan_chunk_blocks <= 100
     assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
