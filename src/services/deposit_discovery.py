@@ -101,12 +101,11 @@ class DepositDiscoveryService:
         Scanning an endpoint that may be a different chain is what that check exists to
         prevent, so an excluded chain raises instead of being scanned.
         """
-        if chain_id not in self._web3_cache:
-            w3 = verified_web3(chain_id, self._chain_rpc_urls)
-            if w3 is None:
-                raise DiscoveryNotConfiguredError(f"No verified RPC endpoint for chain {chain_id}")
-            self._web3_cache[chain_id] = w3
-        return self._web3_cache[chain_id]
+        w3 = verified_web3(chain_id, self._chain_rpc_urls)
+        if w3 is None:
+            self._web3_cache.pop(chain_id, None)
+            raise DiscoveryNotConfiguredError(f"No verified RPC endpoint for chain {chain_id}")
+        return self._web3_cache.setdefault(chain_id, w3)
 
     async def discover_pending_deposits(
         self,
