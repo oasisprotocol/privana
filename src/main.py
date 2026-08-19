@@ -23,7 +23,11 @@ from src.services.deposit_processor import get_deposit_processor
 from src.services.gas_price_bootstrap import bootstrap_gas_prices
 from src.services.onramp_intent import get_onramp_intent_key_manager
 from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
-from src.services.rpc_identity import initialize_verified_chain_rpc_urls
+from src.services.rpc_identity import (
+    initialize_verified_chain_rpc_urls,
+    start_reverification_loop,
+    stop_reverification_loop,
+)
 from src.services.token_info_bootstrap import bootstrap_token_info
 from src.services.withdrawal_processor import get_withdrawal_processor
 
@@ -127,6 +131,10 @@ async def lifespan(_app: FastAPI):
     served_chains = await initialize_verified_chain_rpc_urls(settings)
     logger.info("Serving source chains: %s", sorted(served_chains))
 
+    # Endpoints drift while the service runs; re-probe on a timer so a drifted one
+    # loses its chain and a recovered one gets it back without a restart.
+    start_reverification_loop(settings)
+
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()
     await jwt_key_manager.initialize()
@@ -188,6 +196,7 @@ async def lifespan(_app: FastAPI):
 
     yield
 
+    await stop_reverification_loop()
     await processor.stop()
     await withdrawal_processor.stop()
     logger.info("Accounting Module API shutting down...")

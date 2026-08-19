@@ -1,5 +1,6 @@
 """Per-chain deposit and sweep configuration."""
 
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Dict
@@ -50,48 +51,67 @@ class ChainConfig:
 
 # ─── Chain definitions (single source of truth) ────────────────────────
 
-CHAIN_CONFIGS: Dict[int, ChainConfig] = {
-    23295: ChainConfig(
-        chain_id=23295,
-        finality_depth=2,  # Sapphire Testnet
-        min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
-        min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
-        # The EVM debits gasLimit x gasPrice upfront, so fund the full 65k x 100 gwei
-        gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE
-        l2_type=L2Type.NONE,
-        discovery_scan_chunk_blocks=100,  # Sapphire gateway caps eth_getLogs at 100 blocks
-        discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
-        discovery_max_lookback_blocks=3_800,  # ~6h at ~5.7s blocks
-    ),
-    23293: ChainConfig(
-        chain_id=23293,  # sapphire-localnet dev-harness mirror
-        finality_depth=2,
-        min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
-        min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
-        gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
-        l2_type=L2Type.NONE,
-        discovery_scan_chunk_blocks=100,  # match Sapphire gateway log cap
-        discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
-        discovery_max_lookback_blocks=3_800,  # ~6h at ~5.7s blocks
-    ),
-    84532: ChainConfig(
-        chain_id=84532,
-        finality_depth=15,  # Base Sepolia (OP Stack)
-        min_deposit_native_wei=1_000_000_000_000_000,  # 0.001 ETH
-        min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
-        gas_funding_amount_wei=200_000_000_000_000,  # 0.0002 ETH (~65k gas * 3 gwei)
-        l2_type=L2Type.OP_STACK,
-        discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
-        discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
-    ),
-    11155111: ChainConfig(
-        chain_id=11155111,
-        finality_depth=2,  # Ethereum Sepolia Testnet/Localnet UX
-        min_deposit_native_wei=50_000_000_000_000_000,  # 0.05 ETH
-        min_deposit_erc20_wei=50_000_000,  # ERC-20 base-unit floor (token decimals vary)
-        gas_funding_amount_wei=2_000_000_000_000_000,  # 0.002 ETH (~65k gas * 30 gwei)
-    ),
-}
+_SAPPHIRE_LOCALNET_CHAIN_ID = 23293
+
+
+def _build_chain_configs() -> Dict[int, ChainConfig]:
+    """Build the chain table, including sapphire-localnet only when deployed against it.
+
+    ENVIRONMENT stays 'development' on testnet, so the localnet mirror is keyed off
+    SAPPHIRE_CHAIN_ID instead. src/config/__init__ (this module's parent package) runs
+    load_dotenv() before this module body, so the env var is populated.
+    """
+    configs: Dict[int, ChainConfig] = {
+        23295: ChainConfig(
+            chain_id=23295,
+            finality_depth=2,  # Sapphire Testnet
+            min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
+            min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
+            # The EVM debits gasLimit x gasPrice upfront, so fund the full 65k x 100 gwei
+            gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE
+            l2_type=L2Type.NONE,
+            discovery_scan_chunk_blocks=100,  # Sapphire gateway caps eth_getLogs at 100 blocks
+            discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
+            # ~1.6h at ~5.7s blocks: caps one client request at 10 chunked getLogs
+            # calls against the free public gateway.
+            discovery_max_lookback_blocks=1_000,
+        ),
+        84532: ChainConfig(
+            chain_id=84532,
+            finality_depth=15,  # Base Sepolia (OP Stack)
+            min_deposit_native_wei=1_000_000_000_000_000,  # 0.001 ETH
+            min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
+            gas_funding_amount_wei=200_000_000_000_000,  # 0.0002 ETH (~65k gas * 3 gwei)
+            l2_type=L2Type.OP_STACK,
+            discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
+            discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
+        ),
+        11155111: ChainConfig(
+            chain_id=11155111,
+            finality_depth=2,  # Ethereum Sepolia Testnet/Localnet UX
+            min_deposit_native_wei=50_000_000_000_000_000,  # 0.05 ETH
+            min_deposit_erc20_wei=50_000_000,  # ERC-20 base-unit floor (token decimals vary)
+            gas_funding_amount_wei=2_000_000_000_000_000,  # 0.002 ETH (~65k gas * 30 gwei)
+        ),
+    }
+
+    if os.getenv("SAPPHIRE_CHAIN_ID") == str(_SAPPHIRE_LOCALNET_CHAIN_ID):
+        configs[_SAPPHIRE_LOCALNET_CHAIN_ID] = ChainConfig(
+            chain_id=_SAPPHIRE_LOCALNET_CHAIN_ID,  # sapphire-localnet dev-harness mirror
+            finality_depth=2,
+            min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
+            min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
+            gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
+            l2_type=L2Type.NONE,
+            discovery_scan_chunk_blocks=100,  # match Sapphire gateway log cap
+            discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
+            discovery_max_lookback_blocks=1_000,  # ~1.6h at ~5.7s blocks
+        )
+
+    return configs
+
+
+CHAIN_CONFIGS: Dict[int, ChainConfig] = _build_chain_configs()
 
 DEFAULT_FINALITY_DEPTH = 32
 

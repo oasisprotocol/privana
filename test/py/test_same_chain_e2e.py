@@ -51,6 +51,9 @@ WITHDRAWAL_TX_HASH = "0x" + "d0" * 32
 DEPOSIT_BLOCK = 100
 LATEST_BLOCK = 110
 SAPPHIRE_GAS_PRICE = 100_000_000_000
+# EVMSignerAndVerifier sweep gas limits — what gas funding is sized from.
+NATIVE_SWEEP_GAS_LIMIT = 25_000
+ERC20_SWEEP_GAS_LIMIT = 65_000
 
 ONE_HONOR = 10**18
 TWO_ROSE = 2 * 10**18
@@ -214,6 +217,8 @@ def mock_accounting(token_registry) -> AsyncMock:
     svc.generate_gas_funding_tx = AsyncMock(return_value=b"\x01gas")
     svc.generate_sweep_native = AsyncMock(return_value=b"\x02native")
     svc.generate_sweep_erc20 = AsyncMock(return_value=b"\x03erc20")
+    svc.get_native_sweep_gas_limit = AsyncMock(return_value=NATIVE_SWEEP_GAS_LIMIT)
+    svc.get_erc20_sweep_gas_limit = AsyncMock(return_value=ERC20_SWEEP_GAS_LIMIT)
     svc.credit_deposit = AsyncMock()
     return svc
 
@@ -311,10 +316,10 @@ async def test_erc20_deposit_on_the_accounting_chain_is_verified_swept_and_credi
 
 
 @pytest.mark.asyncio
-async def test_erc20_sweep_funds_gas_with_the_injected_chain_amount(
+async def test_erc20_sweep_sizes_gas_funding_from_the_contract_sweep_limit(
     processor, verifier, engine, mock_accounting, injected_chain
 ):
-    """Gas funding uses the configured amount rather than the unconfigured fallback."""
+    """Gas funding is derived from the contract's sweep limit, not a hardcoded default."""
     node = _single_chain_node(
         receipts={
             ERC20_DEPOSIT_TX: {
@@ -347,7 +352,7 @@ async def test_erc20_sweep_funds_gas_with_the_injected_chain_amount(
     gas_kwargs = mock_accounting.generate_gas_funding_tx.await_args.kwargs
     assert gas_kwargs["chain_id"] == SAME_CHAIN_ID
     assert gas_kwargs["to_deposit_address"] == DEPOSIT_ADDRESS
-    assert gas_kwargs["gas_amount"] == injected_chain.gas_funding_amount_wei
+    assert gas_kwargs["gas_amount"] == ERC20_SWEEP_GAS_LIMIT * SAPPHIRE_GAS_PRICE * 13 // 10
     assert gas_kwargs["gas_amount"] != 200_000_000_000_000
     assert gas_kwargs["gas_price"] == SAPPHIRE_GAS_PRICE
     node.eth.get_transaction_count.assert_any_await(GAS_TANK_ADDRESS, "pending")
@@ -397,7 +402,7 @@ async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
     assert sweep_kwargs["chain_id"] == SAME_CHAIN_ID
     assert sweep_kwargs["amount"] == TWO_ROSE
     gas_kwargs = mock_accounting.generate_gas_funding_tx.await_args.kwargs
-    assert gas_kwargs["gas_amount"] == injected_chain.gas_funding_amount_wei
+    assert gas_kwargs["gas_amount"] == NATIVE_SWEEP_GAS_LIMIT * SAPPHIRE_GAS_PRICE * 13 // 10
 
     credit_kwargs = mock_accounting.credit_deposit.await_args.kwargs
     assert credit_kwargs["amount"] == TWO_ROSE

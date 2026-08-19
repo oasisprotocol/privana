@@ -38,9 +38,12 @@ def reset_rpc_identity():
     """Drop the process-wide verified-RPC set between tests.
 
     A test that runs the identity check would otherwise leave every later test
-    serving only the chains that test verified.
+    serving only the chains that test verified. The check itself is a startup
+    step: tests that never run it opt into the pre-check fallback, so a service
+    built with an injected mapping still resolves it.
     """
     rpc_identity.reset_verified_chain_rpc_urls()
+    rpc_identity.allow_unverified_urls()
     yield
     rpc_identity.reset_verified_chain_rpc_urls()
 

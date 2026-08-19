@@ -48,6 +48,9 @@ deployments:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_internal_m
+        permissions:
+          log.view:
+            - oasis1qpsmn7u78k9gm6jyra6zm2lu0n949pztgqpxss4n
   testnet:
     default: true
     app_id: rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y

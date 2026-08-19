@@ -273,7 +273,7 @@ uv run pytest test/py/ -v
 uv run pytest test/py/test_sweep_engine.py::test_sweep_native_happy_path -v
 ```
 
-Mocking: `services/sweep_engine.py` defines `DepositAccountingProtocol` (a runtime-checkable `Protocol`) — tests can pass any object that conforms to its 10 methods in place of `AccountingContractService`.
+Mocking: `services/sweep_engine.py` defines `DepositAccountingProtocol` (a runtime-checkable `Protocol`) — tests can pass any object that conforms to its methods in place of `AccountingContractService`.
 
 Notable test files:
 

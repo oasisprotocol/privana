@@ -57,8 +57,8 @@ _TOKEN_NAME_CACHE_TTL = 3600  # 1 hour - names rarely change
 _TOKEN_DECIMALS_CACHE_TTL = 3600  # 1 hour - decimals never change
 _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 # Contract constants are not immutable across upgrades (gasLimitNativeSweep changed
-# in this branch), so the withdrawal gas limits expire like any other cached read.
-_WITHDRAWAL_GAS_LIMIT_CACHE_TTL = 300  # 5 minutes
+# in this branch), so the sweep/withdrawal gas limits expire like any other cached read.
+_GAS_LIMIT_CACHE_TTL = 300  # 5 minutes
 
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
@@ -155,8 +155,9 @@ class AccountingContractService:
         self._token_list_cache: AsyncTTLCache[str, list[Dict[str, Any]]] = AsyncTTLCache(
             maxsize=1, ttl=_TOKEN_LIST_CACHE_TTL
         )
-        self._withdrawal_gas_limits: AsyncTTLCache[str, int] = AsyncTTLCache(
-            maxsize=2, ttl=_WITHDRAWAL_GAS_LIMIT_CACHE_TTL
+        # One entry per contract gas-limit getter (2 withdrawal legs + 2 sweep legs).
+        self._gas_limits: AsyncTTLCache[str, int] = AsyncTTLCache(
+            maxsize=4, ttl=_GAS_LIMIT_CACHE_TTL
         )
 
     # ------------------------------------------------------------------
@@ -424,22 +425,38 @@ class AccountingContractService:
             is_native=is_native,
         )
 
-    async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
-        """Read the gas limit the contract signs withdrawals with (TTL-cached).
+    async def _get_gas_limit(self, fn_name: str) -> int:
+        """Read one of the contract's ``public constant`` gas limits (TTL-cached).
 
-        ``gasLimitNativeWithdraw``/``gasLimitERC20Withdraw`` are ``public constant`` on
-        ``EVMSignerAndVerifier``; reading the getters keeps admission in step with signing
-        instead of mirroring numbers that can silently drift apart. They move with an
-        implementation upgrade, so the value expires instead of being pinned for the
+        Reading the getters keeps callers in step with what the contract actually signs
+        instead of mirroring numbers that can silently drift apart. The constants move
+        with an implementation upgrade, so values expire instead of being pinned for the
         process lifetime.
         """
-        fn_name = "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
 
         async def fetch() -> int:
             contract_reader = self._get_reader_contract()
             return int(await getattr(contract_reader.functions, fn_name)().call())
 
-        return await self._withdrawal_gas_limits.get_or_set_async(fn_name, fetch)
+        return await self._gas_limits.get_or_set_async(fn_name, fetch)
+
+    async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
+        """Gas limit the contract signs withdrawals with (evmAddress → user address)."""
+        return await self._get_gas_limit(
+            "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
+        )
+
+    async def get_native_sweep_gas_limit(self) -> int:
+        """Gas limit the contract signs native sweeps with (``gasLimitNativeSweep``).
+
+        Gas funding is sized from this: the EVM debits ``gasLimit * gasPrice`` upfront,
+        so funding less than the signed limit strands the sweep.
+        """
+        return await self._get_gas_limit("gasLimitNativeSweep")
+
+    async def get_erc20_sweep_gas_limit(self) -> int:
+        """Gas limit the contract signs ERC-20 sweeps with (``gasLimitERC20Sweep``)."""
+        return await self._get_gas_limit("gasLimitERC20Sweep")
 
     async def get_accounting_version(self) -> int:
         """Read the deployed implementation's VERSION (startup gate input)."""

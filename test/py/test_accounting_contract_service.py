@@ -820,7 +820,7 @@ async def test_withdrawal_gas_limit_is_served_from_cache_within_the_ttl() -> Non
 async def test_withdrawal_gas_limit_is_reread_once_the_cache_entry_expires(monkeypatch) -> None:
     """The constants move with an implementation upgrade, so the limit must not stay
     pinned for the process lifetime the way the plain dict pinned it."""
-    monkeypatch.setattr(accounting_contract, "_WITHDRAWAL_GAS_LIMIT_CACHE_TTL", 0)
+    monkeypatch.setattr(accounting_contract, "_GAS_LIMIT_CACHE_TTL", 0)
     service = _pre_init_service({})
     reader = MagicMock()
     reader.functions.gasLimitERC20Withdraw.return_value.call = AsyncMock(

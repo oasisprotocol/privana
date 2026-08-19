@@ -1505,6 +1505,7 @@ describe('Upgradability', function () {
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
   });
 
+  // Scope: the pre-upgrade mock compiles from current source (already VERSION 2), so this exercises proxy mechanics and state preservation, not a V1-layout migration; the live V1->V2 upgrade was rehearsed on testnet separately.
   it("Should upgrade implementation, report VERSION == 2, and preserve prior state", async function () {
     const user = getDeployer(2);
     const freshProxy = await deployMockAccounting(await mockSiweAuth.getAddress());

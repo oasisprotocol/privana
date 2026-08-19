@@ -1,5 +1,6 @@
 """Tests for withdrawal processing service."""
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,7 +9,7 @@ from web3.exceptions import TransactionNotFound
 
 from src.services.accounting_contract import AccountingContractService
 from src.services.cache import AsyncTTLCache
-from src.services.withdrawal_processor import WithdrawalProcessor
+from src.services.withdrawal_processor import _STUCK_NONCE_ALARM_CYCLES, WithdrawalProcessor
 
 TEST_USER_ADDRESS = "0x1234567890123456789012345678901234567890"
 TEST_TO_ADDRESS = "0x9876543210987654321098765432109876543210"
@@ -27,6 +28,15 @@ def _hash_lookup(known: dict) -> AsyncMock:
         return known[tx_hash]
 
     return AsyncMock(side_effect=_lookup)
+
+
+def _nonce_counts(pending: int, latest: int) -> AsyncMock:
+    """Mock get_transaction_count answering per block tag."""
+
+    def _count(_address, block):
+        return {"pending": pending, "latest": latest}[block]
+
+    return AsyncMock(side_effect=_count)
 
 
 def _resolved_withdrawal(nonce: int = 0) -> tuple:
@@ -621,6 +631,139 @@ class TestWithdrawalProcessor:
         processor.accounting_service._send_raw_transaction.assert_called_once()
         assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 9
 
+    @pytest.mark.asyncio
+    async def test_catch_up_rebroadcasts_nonce_pending_but_not_mined(self, processor, caplog):
+        """A resolved withdrawal that was broadcast but never mined sits between `latest`
+        and `pending`. Targets come from `latest`, so it stays re-broadcastable, and a gap
+        that persists across cycles raises the stuck-nonce alarm."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=4)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        # Nonce 3 is signed and queued: pending counts it spent, latest does not
+        mock_dest_web3.eth.get_transaction_count = _nonce_counts(pending=4, latest=3)
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
+        contract_reader.functions.withdrawals.return_value.call.return_value = _resolved_withdrawal(
+            nonce=3
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        mock_context = MagicMock()
+        mock_context.chain_id = TEST_CHAIN_ID
+        processor.accounting_service._get_token_context = AsyncMock(return_value=mock_context)
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="src.services.withdrawal_processor"):
+                for _ in range(_STUCK_NONCE_ALARM_CYCLES - 1):
+                    await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+                assert "nonce stuck" not in caplog.text
+                await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        # The unmined nonce is a re-broadcast target, not written off as spent
+        processor.accounting_service._send_raw_transaction.assert_called_with(
+            TEST_CHAIN_ID, TEST_SIGNED_TX
+        )
+        assert processor._stuck_nonce_cycles[TEST_CHAIN_ID] == _STUCK_NONCE_ALARM_CYCLES
+        assert (
+            f"nonce stuck: pending exceeds latest for {_STUCK_NONCE_ALARM_CYCLES} cycles"
+            in caplog.text
+        )
+
+    @pytest.mark.asyncio
+    async def test_matched_pending_and_latest_leaves_no_targets_and_no_alarm(
+        self, processor, caplog
+    ):
+        """Caught up on both views: nothing to re-broadcast and nothing stuck."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=5)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = _nonce_counts(pending=5, latest=5)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="src.services.withdrawal_processor"):
+                for _ in range(_STUCK_NONCE_ALARM_CYCLES + 1):
+                    await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        contract_reader.functions.withdrawalCount.assert_not_called()
+        processor.accounting_service._send_raw_transaction.assert_not_called()
+        assert TEST_CHAIN_ID not in processor._stuck_nonce_cycles
+        assert "nonce stuck" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_republished_gas_price_recognises_our_earlier_broadcast(self, processor):
+        """`setGasPrice` makes `resolveWithdrawal` re-sign at the new price, so the bytes it
+        returns later hash differently from the ones we sent. Payment is proven by the hash
+        we actually broadcast, never by the hash of today's bytes."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        mock_dest_web3 = MagicMock()
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        withdrawal = {"index": 0, "chain_id": TEST_CHAIN_ID}
+        assert await processor._resolve_and_broadcast(withdrawal) is True
+        assert processor._last_broadcast_hash[(TEST_CHAIN_ID, 0)] == TEST_TX_HASH
+
+        # Gas price republished: the payout is re-signed into different bytes
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = (
+            TEST_OTHER_SIGNED_TX
+        )
+        assert WithdrawalProcessor._expected_tx_hash(TEST_OTHER_SIGNED_TX) != TEST_TX_HASH
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
+        # Only the transaction we actually broadcast exists on the chain
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({TEST_TX_HASH: {"status": 1}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._chain_high_water_mark.clear()
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast(withdrawal)
+
+        assert result is True
+        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 0
+        # Remembered hash is checked first, so the unsendable fresh hash is never looked up
+        mock_dest_web3.eth.get_transaction_receipt.assert_awaited_once_with(TEST_TX_HASH)
+
+    @pytest.mark.asyncio
+    async def test_nothing_remembered_and_no_receipt_is_still_not_proven(self, processor):
+        """With no remembered broadcast and nothing mined, a rejected broadcast proves
+        nothing: the withdrawal stays unresolved."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert (TEST_CHAIN_ID, 0) not in processor._last_broadcast_hash
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+        # Nothing remembered, so only the freshly signed bytes were checked
+        mock_dest_web3.eth.get_transaction_receipt.assert_awaited_once_with(expected_hash)
+
 
 class TestWithdrawalAdmission:
     """Per-chain gas admission for withdrawals (`_check_destination_balance`)."""
@@ -644,7 +787,7 @@ class TestWithdrawalAdmission:
             return_value=TestWithdrawalAdmission.NATIVE_GAS_LIMIT
         )
         service.contract_reader = reader
-        service._withdrawal_gas_limits = AsyncTTLCache(maxsize=2, ttl=300)
+        service._gas_limits = AsyncTTLCache(maxsize=4, ttl=300)
         service.settings = MagicMock(min_withdrawal_gas_balance=floor)
 
         chain_w3 = MagicMock()
@@ -722,4 +865,4 @@ class TestWithdrawalAdmission:
             )
 
         reader.functions.gasLimitERC20Withdraw.return_value.call.assert_awaited_once()
-        assert service._withdrawal_gas_limits.get("gasLimitERC20Withdraw") == self.ERC20_GAS_LIMIT
+        assert service._gas_limits.get("gasLimitERC20Withdraw") == self.ERC20_GAS_LIMIT
