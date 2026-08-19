@@ -106,23 +106,15 @@ def _get_bool(name: str) -> bool:
 
 def _build_chain_rpc_urls(
     alchemy_api_key: Optional[str],
-    sapphire_chain_id: Optional[int] = None,
+    sapphire_chain_id: int,
     sapphire_rpc_url: Optional[str] = None,
 ) -> Dict[int, str]:
     """Map chain ID to RPC URL.
 
-    Sapphire is seeded from its own env vars before the Alchemy key is checked, so a
-    deployment without Alchemy still serves Sapphire.
+    Sapphire is seeded from its caller-supplied endpoint before the Alchemy key is
+    checked, so a deployment without Alchemy still serves Sapphire.
     """
     rpc_urls: Dict[int, str] = {}
-
-    if sapphire_chain_id is None:
-        raw_chain_id = os.getenv("SAPPHIRE_CHAIN_ID")
-        if raw_chain_id:
-            try:
-                sapphire_chain_id = int(raw_chain_id, 0)
-            except ValueError:
-                logging.error("SAPPHIRE_CHAIN_ID is invalid; cannot seed Sapphire RPC")
 
     if sapphire_rpc_url is None:
         sapphire_rpc_url = os.getenv("SAPPHIRE_RPC_URL")

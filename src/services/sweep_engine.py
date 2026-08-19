@@ -34,7 +34,7 @@ from web3.exceptions import TransactionNotFound
 from src.clients.rofl import TransactionRevertedError
 from src.config.chain_config import GAS_FUNDING_AMOUNT_WEI
 from src.services.l2_fee_estimator import estimate_l1_data_fee
-from src.services.rpc_identity import verified_web3
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -235,12 +235,7 @@ class SweepEngine:
         Sweeps broadcast signed transactions, so serving an excluded chain would move
         funds on a chain the signature was never meant for.
         """
-        if chain_id not in self._web3_cache:
-            w3 = verified_web3(chain_id, self._chain_rpc_urls)
-            if w3 is None:
-                raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
-            self._web3_cache[chain_id] = w3
-        return self._web3_cache[chain_id]
+        return require_verified_web3(chain_id, self._chain_rpc_urls, self._web3_cache)
 
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:
         """Return a gas price that is safe from underpricing on L2s.

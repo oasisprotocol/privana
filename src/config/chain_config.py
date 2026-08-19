@@ -1,7 +1,7 @@
 """Per-chain deposit and sweep configuration."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Dict
 
@@ -96,16 +96,9 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
     }
 
     if os.getenv("SAPPHIRE_CHAIN_ID") == str(_SAPPHIRE_LOCALNET_CHAIN_ID):
-        configs[_SAPPHIRE_LOCALNET_CHAIN_ID] = ChainConfig(
-            chain_id=_SAPPHIRE_LOCALNET_CHAIN_ID,  # sapphire-localnet dev-harness mirror
-            finality_depth=2,
-            min_deposit_native_wei=10_000_000_000_000_000,  # 0.01 ROSE
-            min_deposit_erc20_wei=1_000_000_000_000_000_000,  # 1 HONOR (18 decimals)
-            gas_funding_amount_wei=6_500_000_000_000_000,  # 0.0065 ROSE (65k gas * 100 gwei)
-            l2_type=L2Type.NONE,
-            discovery_scan_chunk_blocks=100,  # match Sapphire gateway log cap
-            discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
-            discovery_max_lookback_blocks=1_000,  # ~1.6h at ~5.7s blocks
+        # sapphire-localnet dev-harness mirror: identical to Sapphire Testnet but for chain_id
+        configs[_SAPPHIRE_LOCALNET_CHAIN_ID] = replace(
+            configs[23295], chain_id=_SAPPHIRE_LOCALNET_CHAIN_ID
         )
 
     return configs

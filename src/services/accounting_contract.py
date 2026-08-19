@@ -34,7 +34,7 @@ from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_ch
 from src.models.private_read import PrivateReadAuth
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
-from src.services.rpc_identity import verified_web3
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -362,18 +362,10 @@ class AccountingContractService:
         return int(block["timestamp"])
 
     async def _get_chain_web3(self, chain_id: int) -> AsyncWeb3:
-        if chain_id in self._chain_web3:
-            return self._chain_web3[chain_id]
-
         # Read `settings.chain_rpc_urls` live: this service is constructed at import,
         # before the startup identity check narrows it, and only `verified_web3` knows
         # which chains proved their ID.
-        web3 = verified_web3(chain_id, self.settings.chain_rpc_urls)
-        if web3 is None:
-            raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
-
-        self._chain_web3[chain_id] = web3
-        return web3
+        return require_verified_web3(chain_id, self.settings.chain_rpc_urls, self._chain_web3)
 
     @staticmethod
     def _as_raw_tx_bytes(value: Any) -> bytes:

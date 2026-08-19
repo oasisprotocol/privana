@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, Mapping, Optional
+from typing import Dict, Mapping, MutableMapping, Optional
 
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
@@ -185,7 +185,7 @@ async def initialize_verified_chain_rpc_urls(
         )
 
     logger.info("RPC identity check complete; serving chains %s", sorted(verified))
-    return dict(verified)
+    return verified
 
 
 async def reverify_chain_rpc_urls(
@@ -222,7 +222,7 @@ async def reverify_chain_rpc_urls(
         logger.error("RPC identity re-check failed; chains now unserved: %s", dropped)
     if not verified:
         logger.critical("No configured RPC endpoint passed re-verification; serving no chain")
-    return dict(verified)
+    return verified
 
 
 async def _reverification_loop(settings, interval_seconds: float, timeout: float) -> None:
@@ -230,8 +230,6 @@ async def _reverification_loop(settings, interval_seconds: float, timeout: float
         await asyncio.sleep(interval_seconds)
         try:
             await reverify_chain_rpc_urls(settings, timeout=timeout)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             # Keep the loop alive: the current verified set stays as it is, and the
             # next pass gets another chance to drop or readmit.
@@ -289,6 +287,25 @@ def verified_web3(chain_id: int, chain_rpc_urls: Mapping[int, str]) -> Optional[
     if not url:
         return None
     return _client_for_url(url)
+
+
+def require_verified_web3(
+    chain_id: int,
+    chain_rpc_urls: Mapping[int, str],
+    cache: MutableMapping[int, AsyncWeb3],
+) -> AsyncWeb3:
+    """Memoized `verified_web3` lookup; raises when the chain has no verified endpoint.
+
+    Callers that must have a client — they sign or broadcast — turn the None into
+    the same refusal, and memoize per instance so a chain dropped by a later
+    re-verification pass keeps the client it was already resolved with.
+    """
+    if chain_id not in cache:
+        w3 = verified_web3(chain_id, chain_rpc_urls)
+        if w3 is None:
+            raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
+        cache[chain_id] = w3
+    return cache[chain_id]
 
 
 def allow_unverified_urls() -> None:
