@@ -14,7 +14,7 @@ from src.config.chain_config import (
     TRANSFER_EVENT_TOPIC,
     get_finality_depth,
 )
-from src.services.rpc_identity import verified_web3
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +58,7 @@ class DepositVerifier:
         A chain missing here is unconfigured or was excluded by that check; both fail
         closed rather than verify a deposit against a possibly different chain.
         """
-        if chain_id not in self._web3_cache:
-            w3 = verified_web3(chain_id, self._chain_rpc_urls)
-            if w3 is None:
-                raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
-            self._web3_cache[chain_id] = w3
-        return self._web3_cache[chain_id]
+        return require_verified_web3(chain_id, self._chain_rpc_urls, self._web3_cache)
 
     async def verify_deposit(
         self,
