@@ -30,11 +30,11 @@ from typing import Any, Dict, Optional, Protocol, Set, runtime_checkable
 
 from web3 import AsyncWeb3
 from web3.exceptions import TransactionNotFound
-from web3.providers import AsyncHTTPProvider
 
 from src.clients.rofl import TransactionRevertedError
 from src.config.chain_config import GAS_FUNDING_AMOUNT_WEI
 from src.services.l2_fee_estimator import estimate_l1_data_fee
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +55,18 @@ class SweepCreditPendingError(Exception):
 # Longer than withdrawal polling (12s) because stuck sweeps are rare edge cases.
 SWEEP_RECOVERY_INTERVAL = 60
 
+# Headroom over the exact sweep cost, so a gas price bump between the funding tx and
+# the sweep tx does not strand the deposit.
+GAS_FUNDING_HEADROOM_PERCENT = 30
+# Used only when a chain is missing from GAS_FUNDING_AMOUNT_WEI.
+DEFAULT_GAS_FUNDING_WEI = 200_000_000_000_000
+
 
 @runtime_checkable
 class DepositAccountingProtocol(Protocol):
     """Interface expected by deposit processing from AccountingContractService.
 
-    Formalizes the 10 methods used by SweepEngine and DepositProcessor.
+    Formalizes the methods used by SweepEngine and DepositProcessor.
     """
 
     async def generate_sweep_native(
@@ -96,6 +102,10 @@ class DepositAccountingProtocol(Protocol):
     ) -> bytes: ...
 
     async def get_gas_tank_address(self) -> str: ...
+
+    async def get_native_sweep_gas_limit(self) -> int: ...
+
+    async def get_erc20_sweep_gas_limit(self) -> int: ...
 
     async def credit_deposit(
         self,
@@ -220,12 +230,12 @@ class SweepEngine:
         return self._gas_funding_tx_hashes
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        if chain_id not in self._web3_cache:
-            rpc_url = self._chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
-        return self._web3_cache[chain_id]
+        """Get the chain's startup-verified client (see `rpc_identity`).
+
+        Sweeps broadcast signed transactions, so serving an excluded chain would move
+        funds on a chain the signature was never meant for.
+        """
+        return require_verified_web3(chain_id, self._chain_rpc_urls, self._web3_cache)
 
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:
         """Return a gas price that is safe from underpricing on L2s.
@@ -245,6 +255,33 @@ class SweepEngine:
             gas_price,
         )
         return gas_price
+
+    async def _gas_funding_amount(self, chain_id: int, gas_price: int, is_erc20: bool) -> int:
+        """Size the gas funding tx from the gas limit the contract signs the sweep with.
+
+        The EVM debits ``gasLimit * gasPrice`` upfront, so the exact cost is the
+        contract's own ``gasLimit*Sweep`` constant at the price this sweep will use.
+        Deriving it beats a static per-chain amount, which either overfunds (dust
+        stranded at the deposit address) or underfunds once gas prices move.
+        """
+        try:
+            gas_limit = (
+                await self._accounting.get_erc20_sweep_gas_limit()
+                if is_erc20
+                else await self._accounting.get_native_sweep_gas_limit()
+            )
+            return gas_limit * gas_price * (100 + GAS_FUNDING_HEADROOM_PERCENT) // 100
+        except Exception:
+            fallback = GAS_FUNDING_AMOUNT_WEI.get(chain_id, DEFAULT_GAS_FUNDING_WEI)
+            logger.warning(
+                "Could not read the %s sweep gas limit from the contract; funding "
+                "chain %d with the static GAS_FUNDING_AMOUNT_WEI fallback of %d wei",
+                "ERC20" if is_erc20 else "native",
+                chain_id,
+                fallback,
+                exc_info=True,
+            )
+            return fallback
 
     def _record_path(self, deposit_id_hex: str) -> Path:
         # deposit_id is the unique 32-byte id, so one file per deposit: two
@@ -372,7 +409,7 @@ class SweepEngine:
 
                 # Step 1: Fund gas to deposit address (same pattern as ERC20)
                 # Base gas covers L2 execution; L1 data fee covers calldata posting
-                gas_amount = GAS_FUNDING_AMOUNT_WEI.get(chain_id, 200_000_000_000_000)
+                gas_amount = await self._gas_funding_amount(chain_id, gas_price, is_erc20=False)
                 l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=False)
                 gas_amount += l1_data_fee
 
@@ -411,9 +448,8 @@ class SweepEngine:
                     if gas_receipt["status"] != 1:
                         raise ValueError(f"Gas funding tx reverted: {gas_tx_hash_hex}")
 
-                # Step 2: Sweep full verified amount (re-read gas price — may have changed)
-                gas_price = await self._get_safe_gas_price(w3, chain_id)
-
+                # Step 2: Sweep full verified amount. Signed at the same gas price the
+                # funding was sized for — re-reading it here could outrun that funding.
                 nonce = await w3.eth.get_transaction_count(deposit_address)
 
                 signed_tx = await self._accounting.generate_sweep_native(
@@ -536,7 +572,7 @@ class SweepEngine:
 
                 # Step 1: Fund gas to deposit address
                 # Base gas covers L2 execution; L1 data fee covers calldata posting
-                gas_amount = GAS_FUNDING_AMOUNT_WEI.get(chain_id, 200_000_000_000_000)
+                gas_amount = await self._gas_funding_amount(chain_id, gas_price, is_erc20=True)
                 l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=True)
                 gas_amount += l1_data_fee
 
@@ -573,9 +609,8 @@ class SweepEngine:
                     if gas_receipt["status"] != 1:
                         raise ValueError(f"Gas funding tx reverted: {gas_tx_hash_hex}")
 
-                # Step 2: Sweep ERC20 (re-read gas price — may have changed during gas funding)
-                gas_price = await self._get_safe_gas_price(w3, chain_id)
-
+                # Step 2: Sweep ERC20. Signed at the same gas price the funding was
+                # sized for — re-reading it here could outrun that funding.
                 deposit_nonce = await w3.eth.get_transaction_count(deposit_address)
 
                 signed_tx = await self._accounting.generate_sweep_erc20(

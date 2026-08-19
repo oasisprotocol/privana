@@ -9,9 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.clients.rofl import TransactionRevertedError
+from src.config.chain_config import GAS_FUNDING_AMOUNT_WEI
 from src.services.sweep_engine import SweepEngine, SweepRecord, SweepState
 
 L2_FEE_PATCH = "src.services.sweep_engine.estimate_l1_data_fee"
+NATIVE_SWEEP_GAS_LIMIT = 25_000
+ERC20_SWEEP_GAS_LIMIT = 65_000
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +48,9 @@ def mock_accounting():
     svc.generate_sweep_erc20 = AsyncMock(return_value=b"\x04\x05\x06")
     svc.generate_gas_funding_tx = AsyncMock(return_value=b"\x07\x08\x09")
     svc.credit_deposit = AsyncMock()
+    # Contract sweep gas limits, the basis for gas funding (EVMSignerAndVerifier).
+    svc.get_native_sweep_gas_limit = AsyncMock(return_value=NATIVE_SWEEP_GAS_LIMIT)
+    svc.get_erc20_sweep_gas_limit = AsyncMock(return_value=ERC20_SWEEP_GAS_LIMIT)
     return svc
 
 
@@ -406,9 +412,9 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
         )
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=False)
-    # gas_amount = static 200_000_000_000_000 + l1_fee 50_000_000_000_000
+    # gas_amount = 25,000 gas * 1 gwei * 1.3 headroom + l1_fee 50_000_000_000_000
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
-    assert call_kwargs.kwargs["gas_amount"] == 200_000_000_000_000 + l1_fee
+    assert call_kwargs.kwargs["gas_amount"] == 32_500_000_000_000 + l1_fee
 
 
 @pytest.mark.asyncio
@@ -460,8 +466,151 @@ async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
         )
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=True)
+    # gas_amount = 65,000 gas * 1 gwei * 1.3 headroom + l1_fee 80_000_000_000_000
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
-    assert call_kwargs.kwargs["gas_amount"] == 200_000_000_000_000 + l1_fee
+    assert call_kwargs.kwargs["gas_amount"] == 84_500_000_000_000 + l1_fee
+
+
+@pytest.mark.asyncio
+async def test_sweep_native_gas_funding_sized_from_contract_limit(engine, mock_accounting):
+    """Native funding = gasLimitNativeSweep * the price the sweep is signed at * 1.3."""
+    gas_price = 100_000_000_000  # 100 gwei
+
+    with (
+        patch.object(engine, "_get_web3") as mock_get_w3,
+        patch.object(
+            engine,
+            "_get_gas_tank_address",
+            new_callable=AsyncMock,
+            return_value="0x" + "ff" * 20,
+        ),
+    ):
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=10**18)
+        w3.eth.get_transaction_count = AsyncMock(return_value=0)
+        w3.eth.gas_price = _AwaitableValue(gas_price)
+        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": gas_price})
+        w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
+        w3.eth.get_transaction_receipt = AsyncMock(
+            side_effect=[
+                {"status": 1, "blockNumber": 100},
+                {"status": 1, "blockNumber": 101},
+            ]
+        )
+        mock_get_w3.return_value = w3
+
+        await engine.sweep_native(
+            deposit_address="0x" + "aa" * 20,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+        )
+
+    gas_kwargs = mock_accounting.generate_gas_funding_tx.call_args.kwargs
+    assert gas_kwargs["gas_amount"] == NATIVE_SWEEP_GAS_LIMIT * gas_price * 13 // 10
+    # Funding and sweep must agree on the price, or the funding can fall short
+    assert gas_kwargs["gas_price"] == gas_price
+    assert mock_accounting.generate_sweep_native.call_args.kwargs["gas_price"] == gas_price
+
+
+@pytest.mark.asyncio
+async def test_sweep_erc20_gas_funding_sized_from_contract_limit(engine, mock_accounting):
+    """ERC20 funding = gasLimitERC20Sweep * the price the sweep is signed at * 1.3."""
+    gas_price = 100_000_000_000  # 100 gwei
+
+    with (
+        patch.object(engine, "_get_web3") as mock_get_w3,
+        patch.object(
+            engine,
+            "_get_erc20_balance",
+            new_callable=AsyncMock,
+            return_value=1000 * 10**6,
+        ),
+        patch.object(
+            engine,
+            "_get_gas_tank_address",
+            new_callable=AsyncMock,
+            return_value="0x" + "ff" * 20,
+        ),
+    ):
+        w3 = AsyncMock()
+        w3.eth.get_transaction_count = AsyncMock(return_value=0)
+        w3.eth.gas_price = _AwaitableValue(gas_price)
+        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": gas_price})
+        w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
+        w3.eth.get_transaction_receipt = AsyncMock(
+            side_effect=[
+                {"status": 1, "blockNumber": 100},
+                {"status": 1, "blockNumber": 101},
+            ]
+        )
+        mock_get_w3.return_value = w3
+
+        await engine.sweep_erc20(
+            deposit_address="0x" + "aa" * 20,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_address="0x" + "cc" * 20,
+            token_id=b"\x11" * 32,
+            amount=1000 * 10**6,
+            deposit_id=b"\x22" * 32,
+        )
+
+    gas_kwargs = mock_accounting.generate_gas_funding_tx.call_args.kwargs
+    assert gas_kwargs["gas_amount"] == ERC20_SWEEP_GAS_LIMIT * gas_price * 13 // 10
+    assert gas_kwargs["gas_price"] == gas_price
+    assert mock_accounting.generate_sweep_erc20.call_args.kwargs["gas_price"] == gas_price
+
+
+@pytest.mark.asyncio
+async def test_gas_funding_falls_back_to_static_amount(engine, mock_accounting):
+    """An unreadable contract limit funds the chain's static GAS_FUNDING_AMOUNT_WEI."""
+    mock_accounting.get_native_sweep_gas_limit = AsyncMock(
+        side_effect=ValueError("SAPPHIRE_RPC_URL must be configured")
+    )
+
+    with (
+        patch.object(engine, "_get_web3") as mock_get_w3,
+        patch.object(
+            engine,
+            "_get_gas_tank_address",
+            new_callable=AsyncMock,
+            return_value="0x" + "ff" * 20,
+        ),
+    ):
+        w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=10**18)
+        w3.eth.get_transaction_count = AsyncMock(return_value=0)
+        w3.eth.gas_price = _AwaitableValue(1_000_000_000)
+        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
+        w3.eth.get_transaction_receipt = AsyncMock(
+            side_effect=[
+                {"status": 1, "blockNumber": 100},
+                {"status": 1, "blockNumber": 101},
+            ]
+        )
+        mock_get_w3.return_value = w3
+
+        await engine.sweep_native(
+            deposit_address="0x" + "aa" * 20,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            chain_id=84532,
+            token_id=b"\x11" * 32,
+            amount=10**18,
+            deposit_id=b"\x22" * 32,
+        )
+
+    gas_kwargs = mock_accounting.generate_gas_funding_tx.call_args.kwargs
+    assert gas_kwargs["gas_amount"] == GAS_FUNDING_AMOUNT_WEI[84532]
 
 
 def test_persist_error_skips_record_with_broadcast_sweep_tx(engine):

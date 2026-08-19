@@ -1,17 +1,55 @@
 """Tests for withdrawal processing service."""
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from eth_abi import encode
+from web3.exceptions import TransactionNotFound
 
-from src.services.withdrawal_processor import WithdrawalProcessor
+from src.services.accounting_contract import AccountingContractService
+from src.services.cache import AsyncTTLCache
+from src.services.withdrawal_processor import _STUCK_NONCE_ALARM_CYCLES, WithdrawalProcessor
 
 TEST_USER_ADDRESS = "0x1234567890123456789012345678901234567890"
 TEST_TO_ADDRESS = "0x9876543210987654321098765432109876543210"
 TEST_CHAIN_ID = 84532
 TEST_TX_HASH = "0x" + "ab" * 32
 TEST_SIGNED_TX = b"\x00" * 64
+TEST_OTHER_SIGNED_TX = b"\xff" * 64
+
+
+def _hash_lookup(known: dict) -> AsyncMock:
+    """Mock node lookup answering only for known hashes."""
+
+    def _lookup(tx_hash):
+        if tx_hash not in known:
+            raise TransactionNotFound(f"{tx_hash} not found")
+        return known[tx_hash]
+
+    return AsyncMock(side_effect=_lookup)
+
+
+def _nonce_counts(pending: int, latest: int) -> AsyncMock:
+    """Mock get_transaction_count answering per block tag."""
+
+    def _count(_address, block):
+        return {"pending": pending, "latest": latest}[block]
+
+    return AsyncMock(side_effect=_count)
+
+
+def _resolved_withdrawal(nonce: int = 0) -> tuple:
+    """withdrawals(index) tuple: (user, to, amount, block, tokenId, resolved, txId)."""
+    return (
+        TEST_USER_ADDRESS,
+        TEST_TO_ADDRESS,
+        100,
+        50,
+        b"\x00" * 32,
+        True,
+        encode(["uint64"], [nonce]),
+    )
 
 
 class TestWithdrawalProcessor:
@@ -258,26 +296,101 @@ class TestWithdrawalProcessor:
         processor.accounting_service._send_raw_transaction.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_resolve_and_broadcast_nonce_too_low(self, processor):
-        """Test that 'nonce too low' error is treated as success."""
+    async def test_duplicate_broadcast_confirmed_by_receipt_succeeds(self, processor):
+        """A rejected re-broadcast counts as success only when a status-1 receipt exists
+        for the exact signed transaction's hash."""
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS,
-            TEST_TO_ADDRESS,
-            100,
-            50,
-            b"\x00" * 32,
-            True,
-            encode(["uint64"], [0]),
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        # Oasis wording, not geth's "nonce too low" - the error text must not matter
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("invalid nonce")
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({expected_hash: {"status": 1}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is True
+        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 0
+        mock_dest_web3.eth.get_transaction_receipt.assert_any_await(expected_hash)
+
+    @pytest.mark.asyncio
+    async def test_reverted_receipt_is_not_treated_as_paid(self, processor):
+        """A status-0 receipt for the expected hash is a failed payout, never proof of
+        payment: the withdrawal must stay unresolved so it can be recovered."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("already known")
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({expected_hash: {"status": 0}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({expected_hash: {"hash": expected_hash}})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+        # A reverted receipt settles it - the mempool must not be consulted as a fallback
+        mock_dest_web3.eth.get_transaction.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pending_tx_alone_is_not_treated_as_paid(self, processor):
+        """A mempool entry for the expected hash is in flight, not paid: retry next cycle
+        instead of marking the withdrawal done."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("already known")
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({expected_hash: {"hash": expected_hash}})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+        mock_dest_web3.eth.get_transaction.assert_any_await(expected_hash)
+
+    @pytest.mark.asyncio
+    async def test_nonce_spent_by_foreign_tx_is_not_resolved(self, processor):
+        """A nonce burned by a different transaction must never read as a paid
+        withdrawal."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
         processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
 
-        withdrawal = {"index": 0, "chain_id": TEST_CHAIN_ID}
-        result = await processor._resolve_and_broadcast(withdrawal)
+        foreign_hash = WithdrawalProcessor._expected_tx_hash(TEST_OTHER_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({foreign_hash: {"status": 1}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({foreign_hash: {"hash": foreign_hash}})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
 
-        assert result is True
-        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 0
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
 
     @pytest.mark.asyncio
     async def test_resolve_and_broadcast_invalid_chain_id(self, processor):
@@ -359,26 +472,24 @@ class TestWithdrawalProcessor:
 
     @pytest.mark.asyncio
     async def test_catch_up_handles_already_broadcast(self, processor):
-        """Test catch-up handles 'nonce too low' gracefully."""
+        """Catch-up counts a rejected re-broadcast only when the chain has the exact
+        signed transaction."""
         processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
 
         processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=2)
         processor._evm_address = TEST_USER_ADDRESS
 
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
         mock_dest_web3 = MagicMock()
         mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=1)
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({expected_hash: {"status": 1}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
         processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
 
         contract_reader = processor.accounting_service._get_reader_contract()
         contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
-        contract_reader.functions.withdrawals.return_value.call.return_value = (
-            TEST_USER_ADDRESS,
-            TEST_TO_ADDRESS,
-            100,
-            50,
-            b"\x00" * 32,
-            True,
-            encode(["uint64"], [1]),
+        contract_reader.functions.withdrawals.return_value.call.return_value = _resolved_withdrawal(
+            nonce=1
         )
         contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
 
@@ -387,7 +498,371 @@ class TestWithdrawalProcessor:
         processor.accounting_service._get_token_context = AsyncMock(return_value=mock_context)
 
         # Simulate already broadcast
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("invalid nonce")
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        mock_dest_web3.eth.get_transaction_receipt.assert_any_await(expected_hash)
+
+    @pytest.mark.asyncio
+    async def test_catch_up_does_not_trust_error_text_for_foreign_nonce(self, processor):
+        """A duplicate-broadcast error is verified by hash, so a nonce spent elsewhere
+        is never counted as broadcast."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=2)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=1)
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
+        contract_reader.functions.withdrawals.return_value.call.return_value = _resolved_withdrawal(
+            nonce=1
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+
+        mock_context = MagicMock()
+        mock_context.chain_id = TEST_CHAIN_ID
+        processor.accounting_service._get_token_context = AsyncMock(return_value=mock_context)
+
         processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
 
-        # Should not raise, just log and continue
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        mock_dest_web3.eth.get_transaction_receipt.assert_any_await(expected_hash)
+        mock_dest_web3.eth.get_transaction.assert_any_await(expected_hash)
+
+    @pytest.mark.asyncio
+    async def test_process_chain_refuses_when_contract_nonce_behind_chain(self, processor):
+        """A fresh chain whose evmAddress has already transacted must not be processed:
+        the contract would sign nonces the chain has already spent."""
+        processor._is_running = True
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=0)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=3)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+
+        await processor._process_chain(TEST_CHAIN_ID, [{"index": 0, "chain_id": TEST_CHAIN_ID}])
+
+        contract_reader.functions.withdrawals.assert_not_called()
+        processor.accounting_service.resolve_withdrawal.assert_not_called()
+        processor.accounting_service._send_raw_transaction.assert_not_called()
+        assert processor._chain_high_water_mark == {}
+        # Pending count includes queued transactions that spent nonces
+        mock_dest_web3.eth.get_transaction_count.assert_any_await(TEST_USER_ADDRESS, "pending")
+
+    @pytest.mark.asyncio
+    async def test_catch_up_refuses_when_contract_nonce_behind_chain(self, processor):
+        """The same gate stops the catch-up pass before it scans or broadcasts."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=1)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=4)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+
         await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        contract_reader.functions.withdrawalCount.assert_not_called()
+        processor.accounting_service._send_raw_transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_chain_proceeds_when_nonces_match(self, processor):
+        """Matched nonces are the ready state: the chain processes normally."""
+        processor._is_running = True
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=4)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=4)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = _resolved_withdrawal(
+            nonce=4
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        await processor._process_chain(TEST_CHAIN_ID, [{"index": 7, "chain_id": TEST_CHAIN_ID}])
+
+        processor.accounting_service._send_raw_transaction.assert_called_once_with(
+            TEST_CHAIN_ID, TEST_SIGNED_TX
+        )
+        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 7
+
+    @pytest.mark.asyncio
+    async def test_process_chain_allows_contract_nonce_ahead_of_chain(self, processor):
+        """The gate is one-directional: a contract nonce ahead of the chain is an
+        un-broadcast backlog, not a hazard."""
+        processor._is_running = True
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=6)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = AsyncMock(return_value=4)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = _resolved_withdrawal(
+            nonce=6
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        await processor._process_chain(TEST_CHAIN_ID, [{"index": 9, "chain_id": TEST_CHAIN_ID}])
+
+        processor.accounting_service._send_raw_transaction.assert_called_once()
+        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 9
+
+    @pytest.mark.asyncio
+    async def test_catch_up_rebroadcasts_nonce_pending_but_not_mined(self, processor, caplog):
+        """A resolved withdrawal that was broadcast but never mined sits between `latest`
+        and `pending`. Targets come from `latest`, so it stays re-broadcastable, and a gap
+        that persists across cycles raises the stuck-nonce alarm."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=4)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        # Nonce 3 is signed and queued: pending counts it spent, latest does not
+        mock_dest_web3.eth.get_transaction_count = _nonce_counts(pending=4, latest=3)
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawalCount.return_value.call.return_value = 1
+        contract_reader.functions.withdrawals.return_value.call.return_value = _resolved_withdrawal(
+            nonce=3
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        mock_context = MagicMock()
+        mock_context.chain_id = TEST_CHAIN_ID
+        processor.accounting_service._get_token_context = AsyncMock(return_value=mock_context)
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="src.services.withdrawal_processor"):
+                for _ in range(_STUCK_NONCE_ALARM_CYCLES - 1):
+                    await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+                assert "nonce stuck" not in caplog.text
+                await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        # The unmined nonce is a re-broadcast target, not written off as spent
+        processor.accounting_service._send_raw_transaction.assert_called_with(
+            TEST_CHAIN_ID, TEST_SIGNED_TX
+        )
+        assert processor._stuck_nonce_cycles[TEST_CHAIN_ID] == _STUCK_NONCE_ALARM_CYCLES
+        assert (
+            f"nonce stuck: pending exceeds latest for {_STUCK_NONCE_ALARM_CYCLES} cycles"
+            in caplog.text
+        )
+
+    @pytest.mark.asyncio
+    async def test_matched_pending_and_latest_leaves_no_targets_and_no_alarm(
+        self, processor, caplog
+    ):
+        """Caught up on both views: nothing to re-broadcast and nothing stuck."""
+        processor.settings.chain_rpc_urls = {TEST_CHAIN_ID: "https://example.com"}
+        processor._contract.functions.nonces.return_value.call = AsyncMock(return_value=5)
+        processor._evm_address = TEST_USER_ADDRESS
+
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_count = _nonce_counts(pending=5, latest=5)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="src.services.withdrawal_processor"):
+                for _ in range(_STUCK_NONCE_ALARM_CYCLES + 1):
+                    await processor._catch_up_missing_broadcasts([TEST_CHAIN_ID])
+
+        contract_reader.functions.withdrawalCount.assert_not_called()
+        processor.accounting_service._send_raw_transaction.assert_not_called()
+        assert TEST_CHAIN_ID not in processor._stuck_nonce_cycles
+        assert "nonce stuck" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_republished_gas_price_recognises_our_earlier_broadcast(self, processor):
+        """`setGasPrice` makes `resolveWithdrawal` re-sign at the new price, so the bytes it
+        returns later hash differently from the ones we sent. Payment is proven by the hash
+        we actually broadcast, never by the hash of today's bytes."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.return_value = TEST_TX_HASH
+
+        mock_dest_web3 = MagicMock()
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        withdrawal = {"index": 0, "chain_id": TEST_CHAIN_ID}
+        assert await processor._resolve_and_broadcast(withdrawal) is True
+        assert processor._last_broadcast_hash[(TEST_CHAIN_ID, 0)] == TEST_TX_HASH
+
+        # Gas price republished: the payout is re-signed into different bytes
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = (
+            TEST_OTHER_SIGNED_TX
+        )
+        assert WithdrawalProcessor._expected_tx_hash(TEST_OTHER_SIGNED_TX) != TEST_TX_HASH
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
+        # Only the transaction we actually broadcast exists on the chain
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({TEST_TX_HASH: {"status": 1}})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._chain_high_water_mark.clear()
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast(withdrawal)
+
+        assert result is True
+        assert processor._chain_high_water_mark[TEST_CHAIN_ID] == 0
+        # Remembered hash is checked first, so the unsendable fresh hash is never looked up
+        mock_dest_web3.eth.get_transaction_receipt.assert_awaited_once_with(TEST_TX_HASH)
+
+    @pytest.mark.asyncio
+    async def test_nothing_remembered_and_no_receipt_is_still_not_proven(self, processor):
+        """With no remembered broadcast and nothing mined, a rejected broadcast proves
+        nothing: the withdrawal stays unresolved."""
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.side_effect = Exception("nonce too low")
+
+        expected_hash = WithdrawalProcessor._expected_tx_hash(TEST_SIGNED_TX)
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = _hash_lookup({})
+        mock_dest_web3.eth.get_transaction = _hash_lookup({})
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        with patch("src.services.withdrawal_processor.asyncio.sleep", new_callable=AsyncMock):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert (TEST_CHAIN_ID, 0) not in processor._last_broadcast_hash
+        assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+        # Nothing remembered, so only the freshly signed bytes were checked
+        mock_dest_web3.eth.get_transaction_receipt.assert_awaited_once_with(expected_hash)
+
+
+class TestWithdrawalAdmission:
+    """Per-chain gas admission for withdrawals (`_check_destination_balance`)."""
+
+    SAPPHIRE_GAS_PRICE = 100_000_000_000  # 100 gwei, as published for chain 23295
+    SAPPHIRE_CHAIN_ID = 23295
+    ERC20_GAS_LIMIT = 100_000  # gasLimitERC20Withdraw
+    NATIVE_GAS_LIMIT = 50_000  # gasLimitNativeWithdraw
+    GLOBAL_FLOOR = 10_000_000_000_000  # MIN_WITHDRAWAL_GAS_BALANCE, only a floor
+
+    @staticmethod
+    def _make_service(gas_price: int, balance: int, floor: int = 0) -> AccountingContractService:
+        service = AccountingContractService.__new__(AccountingContractService)
+
+        reader = MagicMock()
+        reader.functions.gasPrices.return_value.call = AsyncMock(return_value=gas_price)
+        reader.functions.gasLimitERC20Withdraw.return_value.call = AsyncMock(
+            return_value=TestWithdrawalAdmission.ERC20_GAS_LIMIT
+        )
+        reader.functions.gasLimitNativeWithdraw.return_value.call = AsyncMock(
+            return_value=TestWithdrawalAdmission.NATIVE_GAS_LIMIT
+        )
+        service.contract_reader = reader
+        service._gas_limits = AsyncTTLCache(maxsize=4, ttl=300)
+        service.settings = MagicMock(min_withdrawal_gas_balance=floor)
+
+        chain_w3 = MagicMock()
+        chain_w3.eth.get_balance = AsyncMock(return_value=balance)
+        service._get_chain_web3 = AsyncMock(return_value=chain_w3)
+        service._get_deposit_address = AsyncMock(return_value=TEST_USER_ADDRESS)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_rejects_balance_that_only_clears_the_global_floor(self):
+        """1e13 wei clears the flat gas-balance floor but covers 0.1% of a 100 gwei
+        ERC-20 withdrawal: 100_000 gas x 100 gwei = 1e16 wei, 1.2e16 with the buffer."""
+        service = self._make_service(
+            self.SAPPHIRE_GAS_PRICE, balance=self.GLOBAL_FLOOR, floor=self.GLOBAL_FLOOR
+        )
+
+        with pytest.raises(ValueError, match="needs at least 12000000000000000 wei"):
+            await service._check_destination_balance(
+                self.SAPPHIRE_CHAIN_ID, is_native=False, amount=10**18
+            )
+
+    @pytest.mark.asyncio
+    async def test_admits_when_balance_covers_gas_price_times_gas_limit(self):
+        service = self._make_service(
+            self.SAPPHIRE_GAS_PRICE, balance=12_000_000_000_000_000, floor=self.GLOBAL_FLOOR
+        )
+
+        await service._check_destination_balance(
+            self.SAPPHIRE_CHAIN_ID, is_native=False, amount=10**18
+        )
+
+    @pytest.mark.asyncio
+    async def test_native_withdrawal_requires_gas_plus_amount(self):
+        gas_required = self.SAPPHIRE_GAS_PRICE * self.NATIVE_GAS_LIMIT * 120 // 100
+        amount = 5 * 10**16
+        service = self._make_service(self.SAPPHIRE_GAS_PRICE, balance=gas_required + amount - 1)
+        reader = service.contract_reader
+
+        with pytest.raises(ValueError, match="Insufficient native balance"):
+            await service._check_destination_balance(
+                self.SAPPHIRE_CHAIN_ID, is_native=True, amount=amount
+            )
+
+        # Native withdrawals require the native gas limit, not ERC-20
+        reader.functions.gasLimitNativeWithdraw.return_value.call.assert_awaited_once()
+        reader.functions.gasLimitERC20Withdraw.return_value.call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_min_withdrawal_gas_balance_remains_a_floor(self):
+        """A near-zero published gas price still requires the configured floor."""
+        service = self._make_service(1, balance=10**12, floor=self.GLOBAL_FLOOR)
+
+        with pytest.raises(ValueError, match="needs at least 10000000000000 wei"):
+            await service._check_destination_balance(84532, is_native=False, amount=1)
+
+    @pytest.mark.asyncio
+    async def test_rejects_chain_without_published_gas_price(self):
+        """No gasPrices(chainId) means the contract cannot sign; admit nothing."""
+        service = self._make_service(0, balance=10**18, floor=self.GLOBAL_FLOOR)
+
+        with pytest.raises(ValueError, match="No gas price published"):
+            await service._check_destination_balance(
+                self.SAPPHIRE_CHAIN_ID, is_native=False, amount=1
+            )
+
+    @pytest.mark.asyncio
+    async def test_gas_limit_is_read_from_the_contract_and_cached(self):
+        """The limit comes from the contract getter, never a Python mirror."""
+        service = self._make_service(self.SAPPHIRE_GAS_PRICE, balance=10**18)
+        reader = service.contract_reader
+
+        for _ in range(2):
+            await service._check_destination_balance(
+                self.SAPPHIRE_CHAIN_ID, is_native=False, amount=1
+            )
+
+        reader.functions.gasLimitERC20Withdraw.return_value.call.assert_awaited_once()
+        assert service._gas_limits.get("gasLimitERC20Withdraw") == self.ERC20_GAS_LIMIT

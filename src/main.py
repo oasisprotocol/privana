@@ -23,6 +23,11 @@ from src.services.deposit_processor import get_deposit_processor
 from src.services.gas_price_bootstrap import bootstrap_gas_prices
 from src.services.onramp_intent import get_onramp_intent_key_manager
 from src.services.rofl_signer_bootstrap import bootstrap_rofl_signer_address
+from src.services.rpc_identity import (
+    initialize_verified_chain_rpc_urls,
+    start_reverification_loop,
+    stop_reverification_loop,
+)
 from src.services.token_info_bootstrap import bootstrap_token_info
 from src.services.withdrawal_processor import get_withdrawal_processor
 
@@ -32,6 +37,10 @@ logger = logging.getLogger(__name__)
 _LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read_text(
     encoding="utf-8"
 )
+
+# Sapphire sweeps need the 25,000 gasLimitNativeSweep; a pre-upgrade proxy signs
+# them at 21,000 and strands every deposit. The lifespan refuses to start below this.
+REQUIRED_ACCOUNTING_VERSION = 2
 
 settings = load_settings()
 
@@ -116,6 +125,16 @@ async def lifespan(_app: FastAPI):
     logger.info("Accounting Module API starting...")
     logger.info("Accounting contract: %s", settings.accounting_contract_address)
 
+    # Must run before anything else: every service below builds its chain clients
+    # lazily from the narrowed settings mapping, and a deployment that can serve no
+    # chain should not sync keys or register tokens on its way to failing.
+    served_chains = await initialize_verified_chain_rpc_urls(settings)
+    logger.info("Serving source chains: %s", sorted(served_chains))
+
+    # Endpoints drift while the service runs; re-probe on a timer so a drifted one
+    # loses its chain and a recovered one gets it back without a restart.
+    start_reverification_loop(settings)
+
     # Initialize JWT key manager (derives keys from ROFL seed in TEE)
     jwt_key_manager = get_jwt_key_manager()
     await jwt_key_manager.initialize()
@@ -133,6 +152,19 @@ async def lifespan(_app: FastAPI):
     # Sync the encryption key to the contract (skipped when DISABLE_ROFL_KEYS is set).
     # TODO: Remove DISABLE_ROFL_KEYS check when Sapphire localnet e2e tests are available.
     if not os.getenv("DISABLE_ROFL_KEYS"):
+        deployed_version = await get_accounting_contract_service().get_accounting_version()
+        if deployed_version < REQUIRED_ACCOUNTING_VERSION:
+            logger.critical(
+                "Accounting implementation VERSION %d is below the required %d; refusing to "
+                "start so no token registration or 21,000-gas Sapphire sweep happens before "
+                "the proxy upgrade lands",
+                deployed_version,
+                REQUIRED_ACCOUNTING_VERSION,
+            )
+            raise RuntimeError(
+                f"Accounting VERSION {deployed_version} < required {REQUIRED_ACCOUNTING_VERSION}; "
+                "upgrade the proxy before restarting the service"
+            )
         try:
             await auth_token_key_manager.sync_key_to_contract()
         except Exception:
@@ -164,6 +196,7 @@ async def lifespan(_app: FastAPI):
 
     yield
 
+    await stop_reverification_loop()
     await processor.stop()
     await withdrawal_processor.stop()
     logger.info("Accounting Module API shutting down...")
