@@ -200,8 +200,8 @@ async def reverify_chain_rpc_urls(
     — as safe as admitting it at startup — while one that has drifted drops out and
     leaves its chain unserved.
 
-    A drop binds every chain resolved from here on; consumers that already
-    memoized the chain's client keep it until they are rebuilt.
+    A drop binds every consumer on its next call: `require_verified_web3` re-consults
+    the gate per resolution, so even an already-memoized client stops being handed out.
 
     Never raises `NoVerifiedChainsError`: a running service must not die of an RPC
     outage, and a gate that verifies nothing already refuses every chain.
@@ -294,18 +294,18 @@ def require_verified_web3(
     chain_rpc_urls: Mapping[int, str],
     cache: MutableMapping[int, AsyncWeb3],
 ) -> AsyncWeb3:
-    """Memoized `verified_web3` lookup; raises when the chain has no verified endpoint.
+    """`verified_web3` for callers that must have a client; raises when none is served.
 
-    Callers that must have a client — they sign or broadcast — turn the None into
-    the same refusal, and memoize per instance so a chain dropped by a later
-    re-verification pass keeps the client it was already resolved with.
+    The gate is consulted on every call, so a chain dropped by a later
+    re-verification pass stops resolving immediately: its memoized client is
+    evicted rather than kept. The per-instance cache only pins which client object
+    the caller keeps seeing while the chain stays served.
     """
-    if chain_id not in cache:
-        w3 = verified_web3(chain_id, chain_rpc_urls)
-        if w3 is None:
-            raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
-        cache[chain_id] = w3
-    return cache[chain_id]
+    w3 = verified_web3(chain_id, chain_rpc_urls)
+    if w3 is None:
+        cache.pop(chain_id, None)
+        raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
+    return cache.setdefault(chain_id, w3)
 
 
 def allow_unverified_urls() -> None:

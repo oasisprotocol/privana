@@ -281,6 +281,27 @@ async def test_reverification_drops_a_drifted_endpoint(monkeypatch, caplog):
     assert SAPPHIRE_URL not in caplog.text
 
 
+async def test_memoized_client_is_evicted_when_its_chain_is_dropped(monkeypatch):
+    answers = {GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: SAPPHIRE_CHAIN}
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", _probe(answers))
+    settings = _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
+    await initialize_verified_chain_rpc_urls(settings)
+
+    # A consumer resolves and memoizes the client while the chain is served.
+    cache: dict = {}
+    client = rpc_identity.require_verified_web3(SAPPHIRE_CHAIN, settings.chain_rpc_urls, cache)
+    assert cache == {SAPPHIRE_CHAIN: client}
+
+    answers[SAPPHIRE_URL] = 23294
+    await reverify_chain_rpc_urls(settings)
+
+    # The drop binds the memoizing consumer too: the cached client is evicted
+    # and the next resolution refuses instead of reusing it.
+    with pytest.raises(ValueError, match="No verified RPC endpoint"):
+        rpc_identity.require_verified_web3(SAPPHIRE_CHAIN, settings.chain_rpc_urls, cache)
+    assert SAPPHIRE_CHAIN not in cache
+
+
 async def test_reverification_loop_reprobes_until_stopped(monkeypatch):
     answers = {GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: 1}
     monkeypatch.setattr(rpc_identity, "_probe_chain_id", _probe(answers))
