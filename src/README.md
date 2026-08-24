@@ -93,7 +93,7 @@ Key files: `services/deposit_processor.py`, `services/deposit_verifier.py`, `ser
 `ONRAMP_PROVIDER` selects either MoonPay or Transak for new launches. Both providers are thin correlation adapters around the same signed intent and deposit authority:
 
 1. `POST /onramp/intent` binds the authenticated user, freshly derived deposit address, registered token, chain, provider, and asset.
-2. MoonPay uses `POST /onramp/sign-url`; Transak uses backend-only `POST /onramp/session` with a trusted proxy-owned client IP. The browser must preserve `Referer` when it opens the returned opaque URL—never use `noreferrer` or `no-referrer`.
+2. MoonPay uses `POST /onramp/sign-url`; Transak uses backend-only `POST /onramp/session` with the real client IP, sourced either from a trusted proxy-owned header (`header` mode) or from an edge-signed attestation the request carries (`attested` mode); see `TRANSAK_CLIENT_IP_MODE`. The browser must preserve `Referer` when it opens the returned opaque URL—never use `noreferrer` or `no-referrer`.
 3. `GET /onramp/pending` performs bounded provider reads and returns only strictly admitted completed orders with an on-chain transaction hash.
 4. The client submits the matching transfer-log amount to `/deposits/check`; only the existing verifier → sweep → ROFL credit path changes balances.
 
@@ -246,10 +246,12 @@ Environment variables: see `.env.localnet`, `.env.testnet`, and `.env.localnet.s
 - `ONRAMP_PROVIDER` — required deployment-owned provider selection; shipped environments select `moonpay`
 - `TRANSAK_API_KEY`, `TRANSAK_API_SECRET` — backend-only partner credentials
 - `TRANSAK_API_BASE_URL`, `TRANSAK_GATEWAY_BASE_URL`, `TRANSAK_REFERRER_DOMAIN` — approved Transak environment/domain
-- `TRANSAK_CLIENT_IP_HEADER` — proxy-owned single client-IP header; leave unset until spoofing is prevented
+- `TRANSAK_CLIENT_IP_MODE` — client-IP sourcing for widget sessions: `header` (default) or `attested`
+- `TRANSAK_CLIENT_IP_HEADER` — header mode only: proxy-owned single client-IP header; leave unset until spoofing is prevented
+- `TRANSAK_IP_ATTESTATION_SECRET` — attested mode only: shared HMAC secret (>= 32 chars) with the edge IP-attestation Worker
 - `TRANSAK_CRYPTO_CURRENCY_CODE`, `TRANSAK_NETWORK`, `TRANSAK_CHAIN_ID`, `TRANSAK_TOKEN_ADDRESS` — the one supported Transak asset
 
-Invalid or incomplete Transak configuration disables its endpoints with `503` without blocking application startup. Do not switch `ONRAMP_PROVIDER=transak` until the asset is registered and the proxy/header, allowlist, credentials, and one-worker token-refresh topology are verified.
+Invalid or incomplete Transak configuration disables its endpoints with `503` without blocking application startup. Do not switch `ONRAMP_PROVIDER=transak` until the asset is registered and the client-IP source (`header` mode's spoof-proof proxy header, or `attested` mode's deployed Worker and shared secret), egress allowlist, credentials, and one-worker token-refresh topology are verified.
 
 ## Running Locally
 

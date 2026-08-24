@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -279,6 +282,146 @@ def test_session_rejects_missing_or_ambiguous_trusted_ip(monkeypatch, tmp_path) 
     assert missing.status_code == 400
     assert ambiguous.status_code == 400
     provider_service.create_widget_session.assert_not_awaited()
+
+
+ATTESTATION_SECRET = "route-attestation-shared-secret-0123456789"
+
+
+def _make_attested_client(monkeypatch, tmp_path):
+    client, accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRANSAK_CLIENT_IP_MODE", "attested")
+    monkeypatch.setenv("TRANSAK_IP_ATTESTATION_SECRET", ATTESTATION_SECRET)
+    monkeypatch.delenv("TRANSAK_CLIENT_IP_HEADER")
+    src.config._settings = None
+    monkeypatch.setattr(transak, "_ip_attestation_nonces", {})
+    return client, accounting, provider_service
+
+
+def _ip_attestation(
+    transaction_id: str,
+    ip: str = "8.8.8.8",
+    *,
+    nonce: str = "0123456789abcdef0123456789abcdef",
+) -> dict:
+    issued_at = int(time.time())
+    expires_at = issued_at + 60
+    intent_hash = hashlib.sha256(transaction_id.encode()).hexdigest()
+    payload = "|".join(
+        (
+            "v1",
+            "app.testnet.privana.finance",
+            intent_hash,
+            ip,
+            str(issued_at),
+            str(expires_at),
+            nonce,
+        )
+    )
+    signature = hmac.new(ATTESTATION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return {
+        "v": 1,
+        "ip": ip,
+        "iat": issued_at,
+        "exp": expires_at,
+        "nonce": nonce,
+        "sig": signature,
+    }
+
+
+def test_attested_session_verifies_edge_claim_without_header(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_attested_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    response = client.post(
+        "/v1/accounting/onramp/session",
+        json={
+            "transaction_id": intent["transaction_id"],
+            "ip_attestation": _ip_attestation(intent["transaction_id"]),
+        },
+    )
+    assert response.status_code == 200, response.text
+    kwargs = provider_service.create_widget_session.await_args.kwargs
+    assert kwargs["user_ip"] == "8.8.8.8"
+
+
+def test_attested_session_rejects_missing_tampered_or_replayed_claims(
+    monkeypatch, tmp_path
+) -> None:
+    client, _accounting, provider_service = _make_attested_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+
+    missing = client.post(
+        "/v1/accounting/onramp/session",
+        json={"transaction_id": intent["transaction_id"]},
+        headers={"x-original-user-ip": "8.8.8.8"},
+    )
+    assert missing.status_code == 400
+    assert missing.json()["detail"] == "Client IP attestation is required"
+
+    tampered = _ip_attestation(intent["transaction_id"])
+    tampered["ip"] = "198.51.100.7"
+    rejected = client.post(
+        "/v1/accounting/onramp/session",
+        json={"transaction_id": intent["transaction_id"], "ip_attestation": tampered},
+    )
+    assert rejected.status_code == 400
+    provider_service.create_widget_session.assert_not_awaited()
+
+    claim = _ip_attestation(intent["transaction_id"])
+    first = client.post(
+        "/v1/accounting/onramp/session",
+        json={"transaction_id": intent["transaction_id"], "ip_attestation": claim},
+    )
+    replayed = client.post(
+        "/v1/accounting/onramp/session",
+        json={"transaction_id": intent["transaction_id"], "ip_attestation": claim},
+    )
+    assert first.status_code == 200
+    assert replayed.status_code == 400
+    assert replayed.json()["detail"] == "Client IP attestation was already used"
+    provider_service.create_widget_session.assert_awaited_once()
+
+
+def test_attested_session_rejects_loosely_typed_claim_fields(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_attested_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    for mutation in (
+        {"v": True},
+        {"iat": str(int(time.time()))},
+        {"exp": float(int(time.time()) + 60)},
+        {"unexpected": "field"},
+    ):
+        claim = {**_ip_attestation(intent["transaction_id"]), **mutation}
+        response = client.post(
+            "/v1/accounting/onramp/session",
+            json={"transaction_id": intent["transaction_id"], "ip_attestation": claim},
+        )
+        assert response.status_code == 422, (mutation, response.text)
+    provider_service.create_widget_session.assert_not_awaited()
+
+
+def test_attested_mode_keeps_intent_and_pending_available(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_attested_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    provider_service.get_orders_by_wallet.return_value = []
+    pending = client.get("/v1/accounting/onramp/pending")
+    assert pending.status_code == 200
+    assert intent["transaction_id"]
+
+
+def test_header_mode_ignores_attestation_blob(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    response = client.post(
+        "/v1/accounting/onramp/session",
+        json={
+            "transaction_id": intent["transaction_id"],
+            "ip_attestation": _ip_attestation(intent["transaction_id"]),
+        },
+        headers={"x-original-user-ip": "198.51.100.9"},
+    )
+    assert response.status_code == 200
+    kwargs = provider_service.create_widget_session.await_args.kwargs
+    assert kwargs["user_ip"] == "198.51.100.9"
 
 
 def test_session_is_disabled_when_moonpay_is_selected(monkeypatch, tmp_path) -> None:

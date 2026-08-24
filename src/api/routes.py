@@ -117,6 +117,7 @@ from src.services.onramp_intent import (
     decode_intent,
 )
 from src.services.transak import (
+    TRANSAK_CLIENT_IP_MODE_ATTESTED,
     TransakAPIError,
     TransakConfig,
     TransakRateLimitError,
@@ -127,6 +128,7 @@ from src.services.transak import (
     load_transak_config,
     pending_records_from_transak_orders,
     transak_webhook_log_summary,
+    verify_ip_attestation,
 )
 
 logger = logging.getLogger(__name__)
@@ -729,10 +731,27 @@ async def create_onramp_session(
             token_id=token_id,
             config=config,
         )
-        user_ip = client_ip_from_values(
-            request.headers.getlist(config.client_ip_header),
-            header_name=config.client_ip_header,
-        )
+        if config.client_ip_mode == TRANSAK_CLIENT_IP_MODE_ATTESTED:
+            attestation = payload.ip_attestation
+            if attestation is None:
+                raise OnRampError("Client IP attestation is required")
+            user_ip = verify_ip_attestation(
+                version=attestation.v,
+                ip=attestation.ip,
+                issued_at=attestation.iat,
+                expires_at=attestation.exp,
+                nonce=attestation.nonce,
+                signature=attestation.sig,
+                transaction_id=payload.transaction_id,
+                config=config,
+            )
+        else:
+            if config.client_ip_header is None:  # pragma: no cover - guarded by config load
+                raise OnRampNotConfiguredError("Transak client IP header is not configured")
+            user_ip = client_ip_from_values(
+                request.headers.getlist(config.client_ip_header),
+                header_name=config.client_ip_header,
+            )
         session = await get_transak_service().create_widget_session(
             transaction_id=payload.transaction_id,
             wallet_address=deposit_address,

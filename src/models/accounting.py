@@ -656,10 +656,35 @@ class CreateOnRampIntentRequest(BaseModel):
         return _normalise_currency_code(value)
 
 
+class OnRampIpAttestation(BaseModel):
+    """Edge-signed client-IP claim for deployments using attested IP mode."""
+
+    # Strict: reject unknown fields and coerced wire types (bool-as-1,
+    # numeric-string, float-as-int) so the parsed claim matches the exact
+    # integer contract the edge Worker signs.
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    v: Literal[1]
+    ip: str = Field(..., min_length=1, max_length=64)
+    iat: int = Field(..., gt=0)
+    exp: int = Field(..., gt=0)
+    nonce: str = Field(..., pattern=r"^[0-9a-fA-F]{16,64}$")
+    sig: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("v", "iat", "exp", mode="before")
+    def _reject_bool(cls, value: object) -> object:
+        # bool is an int subclass and `True == 1`, so Literal[1]/int fields
+        # otherwise accept `true` from the wire. Refuse it explicitly.
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
+
 class CreateOnRampSessionRequest(BaseModel):
     """Request a short-lived session for a signed on-ramp intent."""
 
     transaction_id: str = Field(..., min_length=1, max_length=INTENT_MAX_LENGTH)
+    ip_attestation: OnRampIpAttestation | None = None
 
 
 class OnRampSessionResponse(BaseModel):

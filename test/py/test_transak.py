@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -27,7 +30,9 @@ CONFIG = transak.TransakConfig(
     api_base_url="https://api-stg.transak.test",
     gateway_base_url="https://gateway-stg.transak.test",
     referrer_domain="app.testnet.privana.finance",
+    client_ip_mode="header",
     client_ip_header="x-original-user-ip",
+    ip_attestation_secret=None,
     crypto_currency_code="USDC",
     network="base",
     chain_id=84532,
@@ -91,7 +96,9 @@ def test_load_config_is_lazy_fail_closed_and_secret_safe(monkeypatch) -> None:
         "transak_api_base_url": CONFIG.api_base_url,
         "transak_gateway_base_url": CONFIG.gateway_base_url,
         "transak_referrer_domain": CONFIG.referrer_domain,
+        "transak_client_ip_mode": None,
         "transak_client_ip_header": CONFIG.client_ip_header,
+        "transak_ip_attestation_secret": None,
         "transak_crypto_currency_code": CONFIG.crypto_currency_code,
         "transak_network": CONFIG.network,
         "transak_chain_id": CONFIG.chain_id,
@@ -113,6 +120,7 @@ def test_load_config_is_lazy_fail_closed_and_secret_safe(monkeypatch) -> None:
         ("transak_referrer_domain", "https://app.testnet.privana.finance"),
         ("transak_referrer_domain", "app.testnet.privana.finance:not-a-port"),
         ("transak_client_ip_header", "bad header"),
+        ("transak_client_ip_mode", "bogus"),
         ("transak_crypto_currency_code", "USDC,ETH"),
         ("transak_network", ""),
         ("transak_api_secret", "secret\u2603"),
@@ -144,6 +152,252 @@ def test_client_ip_rejects_missing_ambiguous_or_invalid(values) -> None:
         transak.client_ip_from_values(values, header_name="x-original-user-ip")
 
 
+ATTESTATION_SECRET = "attestation-shared-secret-0123456789abcdef"
+ATTESTED_CONFIG = replace(
+    CONFIG,
+    client_ip_mode="attested",
+    client_ip_header=None,
+    ip_attestation_secret=ATTESTATION_SECRET,
+)
+ATTESTATION_NOW = 1_800_000_000
+ATTESTATION_TRANSACTION_ID = "signed-intent-value"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_attestation_nonce_cache(monkeypatch):
+    monkeypatch.setattr(transak, "_ip_attestation_nonces", {})
+
+
+def _attestation(
+    ip: str,
+    *,
+    transaction_id: str = ATTESTATION_TRANSACTION_ID,
+    issued_at: int = ATTESTATION_NOW,
+    expires_at: int = ATTESTATION_NOW + 60,
+    nonce: str = "0123456789abcdef0123456789abcdef",
+    secret: str = ATTESTATION_SECRET,
+    referrer_domain: str = ATTESTED_CONFIG.referrer_domain,
+) -> dict:
+    intent_hash = hashlib.sha256(transaction_id.encode()).hexdigest()
+    payload = "|".join(
+        ("v1", referrer_domain, intent_hash, ip, str(issued_at), str(expires_at), nonce)
+    )
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return {
+        "version": 1,
+        "ip": ip,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "nonce": nonce,
+        "signature": signature,
+    }
+
+
+def test_attested_mode_config_is_mode_aware_fail_closed(monkeypatch) -> None:
+    values = {
+        "transak_api_key": CONFIG.api_key,
+        "transak_api_secret": CONFIG.api_secret,
+        "transak_api_base_url": CONFIG.api_base_url,
+        "transak_gateway_base_url": CONFIG.gateway_base_url,
+        "transak_referrer_domain": CONFIG.referrer_domain,
+        "transak_client_ip_mode": "attested",
+        "transak_client_ip_header": None,
+        "transak_ip_attestation_secret": ATTESTATION_SECRET,
+        "transak_crypto_currency_code": CONFIG.crypto_currency_code,
+        "transak_network": CONFIG.network,
+        "transak_chain_id": CONFIG.chain_id,
+        "transak_token_address": CONFIG.token_address,
+    }
+    monkeypatch.setattr(transak, "load_settings", lambda: SimpleNamespace(**values))
+    loaded = transak.load_transak_config()
+    assert loaded.client_ip_mode == "attested"
+    assert loaded.client_ip_header is None
+    assert loaded.ip_attestation_secret == ATTESTATION_SECRET
+    assert ATTESTATION_SECRET not in repr(loaded)
+
+    for field, bad_value in [
+        ("transak_ip_attestation_secret", None),
+        ("transak_ip_attestation_secret", "too-short"),
+    ]:
+        invalid = {**values, field: bad_value}
+        monkeypatch.setattr(
+            transak, "load_settings", lambda invalid=invalid: SimpleNamespace(**invalid)
+        )
+        with pytest.raises(onramp_intent.OnRampNotConfiguredError):
+            transak.load_transak_config()
+
+
+@pytest.mark.parametrize(
+    ("ip", "expected"),
+    [
+        ("8.8.8.8", "8.8.8.8"),
+        ("2606:4700:4700:0000::1111", "2606:4700:4700::1111"),
+    ],
+)
+def test_ip_attestation_accepts_valid_global_claims(ip, expected) -> None:
+    claim = _attestation(ip)
+    attested = transak.verify_ip_attestation(
+        transaction_id=ATTESTATION_TRANSACTION_ID,
+        config=ATTESTED_CONFIG,
+        now=ATTESTATION_NOW + 1,
+        **claim,
+    )
+    assert attested == expected
+
+
+def test_ip_attestation_binds_intent_domain_and_secret() -> None:
+    for claim in [
+        _attestation("8.8.8.8", transaction_id="other-intent"),
+        _attestation("8.8.8.8", referrer_domain="evil.example"),
+        _attestation("8.8.8.8", secret="wrong-secret-0123456789abcdef0123"),
+        {**_attestation("8.8.8.8"), "signature": "ab" * 32},
+    ]:
+        with pytest.raises(onramp_intent.OnRampError, match="Invalid client IP attestation"):
+            transak.verify_ip_attestation(
+                transaction_id=ATTESTATION_TRANSACTION_ID,
+                config=ATTESTED_CONFIG,
+                now=ATTESTATION_NOW + 1,
+                **claim,
+            )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"issued_at": 0}, "Invalid client IP attestation"),
+        ({"expires_at": 0}, "Invalid client IP attestation"),
+        (
+            {"issued_at": ATTESTATION_NOW + 31, "expires_at": ATTESTATION_NOW + 91},
+            "not yet valid",
+        ),
+        ({"expires_at": ATTESTATION_NOW - 1}, "has expired"),
+        (
+            {"issued_at": ATTESTATION_NOW - 1, "expires_at": ATTESTATION_NOW + 90},
+            "window is too long",
+        ),
+        (
+            {"issued_at": ATTESTATION_NOW + 20, "expires_at": ATTESTATION_NOW + 10},
+            "Invalid client IP attestation",
+        ),
+    ],
+)
+def test_ip_attestation_enforces_short_single_window(overrides, message) -> None:
+    claim = _attestation(
+        "8.8.8.8",
+        issued_at=overrides.get("issued_at", ATTESTATION_NOW),
+        expires_at=overrides.get("expires_at", ATTESTATION_NOW + 60),
+    )
+    with pytest.raises(onramp_intent.OnRampError, match=message):
+        transak.verify_ip_attestation(
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=ATTESTED_CONFIG,
+            now=ATTESTATION_NOW,
+            **claim,
+        )
+
+
+@pytest.mark.parametrize(
+    ("ip", "message"),
+    [
+        ("10.0.0.1", "public IP"),
+        ("127.0.0.1", "public IP"),
+        ("169.254.1.1", "public IP"),
+        ("fc00::1", "public IP"),
+        ("2a06:98c0:3600::1", "direct request"),
+        ("not-an-ip", "Invalid client IP attestation"),
+        ("203.0.113.4 ", "Invalid client IP attestation"),
+    ],
+)
+def test_ip_attestation_requires_direct_global_ip(ip, message) -> None:
+    claim = _attestation(ip)
+    with pytest.raises(onramp_intent.OnRampError, match=message):
+        transak.verify_ip_attestation(
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=ATTESTED_CONFIG,
+            now=ATTESTATION_NOW + 1,
+            **claim,
+        )
+
+
+def test_ip_attestation_rejects_malformed_and_wrong_version_claims() -> None:
+    base = _attestation("8.8.8.8")
+    with pytest.raises(onramp_intent.OnRampError, match="version"):
+        transak.verify_ip_attestation(
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=ATTESTED_CONFIG,
+            now=ATTESTATION_NOW + 1,
+            **{**base, "version": 2},
+        )
+    for field, bad_value in [
+        ("nonce", "short"),
+        ("nonce", "zz" * 16),
+        ("signature", "AB" * 32),
+        ("signature", "ab" * 31),
+        ("ip", ""),
+        ("ip", "3" * 65),
+    ]:
+        with pytest.raises(onramp_intent.OnRampError, match="Invalid client IP attestation"):
+            transak.verify_ip_attestation(
+                transaction_id=ATTESTATION_TRANSACTION_ID,
+                config=ATTESTED_CONFIG,
+                now=ATTESTATION_NOW + 1,
+                **{**base, field: bad_value},
+            )
+
+
+def test_ip_attestation_is_single_use_and_bounded() -> None:
+    claim = _attestation("8.8.8.8")
+    first = transak.verify_ip_attestation(
+        transaction_id=ATTESTATION_TRANSACTION_ID,
+        config=ATTESTED_CONFIG,
+        now=ATTESTATION_NOW + 1,
+        **claim,
+    )
+    assert first == "8.8.8.8"
+    replay = _attestation("8.8.8.8", nonce=claim["nonce"].upper())
+    with pytest.raises(onramp_intent.OnRampError, match="already used"):
+        transak.verify_ip_attestation(
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=ATTESTED_CONFIG,
+            now=ATTESTATION_NOW + 1,
+            **replay,
+        )
+
+    transak._ip_attestation_nonces.clear()
+    transak._ip_attestation_nonces.update(
+        {f"{index:032x}": ATTESTATION_NOW + 600 for index in range(10_000)}
+    )
+    fresh = _attestation("8.8.8.8", nonce="f" * 32)
+    with pytest.raises(onramp_intent.OnRampError, match="could not be recorded"):
+        transak.verify_ip_attestation(
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=ATTESTED_CONFIG,
+            now=ATTESTATION_NOW + 1,
+            **fresh,
+        )
+
+    transak._ip_attestation_nonces.clear()
+    transak._ip_attestation_nonces["stale" + "0" * 27] = ATTESTATION_NOW - 1
+    transak.verify_ip_attestation(
+        transaction_id=ATTESTATION_TRANSACTION_ID,
+        config=ATTESTED_CONFIG,
+        now=ATTESTATION_NOW + 1,
+        **fresh,
+    )
+    assert "stale" + "0" * 27 not in transak._ip_attestation_nonces
+
+
+def test_ip_attestation_requires_attested_mode() -> None:
+    claim = _attestation("8.8.8.8")
+    with pytest.raises(onramp_intent.OnRampNotConfiguredError):
+        transak.verify_ip_attestation(
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=CONFIG,
+            now=ATTESTATION_NOW + 1,
+            **claim,
+        )
+
+
 async def test_token_cache_and_session_request_are_exact() -> None:
     now = [1_800_000_000.0]
     requests: list[httpx.Request] = []
@@ -163,13 +417,13 @@ async def test_token_cache_and_session_request_are_exact() -> None:
     first = await service.create_widget_session(
         transaction_id=intent["transaction_id"],
         wallet_address=WALLET,
-        user_ip="203.0.113.4",
+        user_ip="8.8.8.8",
         config=CONFIG,
     )
     await service.create_widget_session(
         transaction_id=intent["transaction_id"],
         wallet_address=WALLET,
-        user_ip="203.0.113.4",
+        user_ip="8.8.8.8",
         config=CONFIG,
     )
 
@@ -182,7 +436,7 @@ async def test_token_cache_and_session_request_are_exact() -> None:
     session_request = requests[1]
     assert session_request.headers["access-token"] == "access-token-1"
     assert session_request.headers["x-api-key"] == CONFIG.api_key
-    assert session_request.headers["x-user-ip"] == "203.0.113.4"
+    assert session_request.headers["x-user-ip"] == "8.8.8.8"
     assert json.loads(session_request.content) == {
         "widgetParams": {
             "apiKey": CONFIG.api_key,
@@ -213,7 +467,7 @@ async def test_session_expiry_is_measured_from_request_start() -> None:
     session = await service.create_widget_session(
         transaction_id=_intent()["transaction_id"],
         wallet_address=WALLET,
-        user_ip="203.0.113.4",
+        user_ip="8.8.8.8",
         config=CONFIG,
     )
 
@@ -244,7 +498,7 @@ async def test_malformed_widget_urls_are_rejected(widget_url) -> None:
         await service.create_widget_session(
             transaction_id=_intent()["transaction_id"],
             wallet_address=WALLET,
-            user_ip="203.0.113.4",
+            user_ip="8.8.8.8",
             config=CONFIG,
         )
 

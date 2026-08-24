@@ -1,0 +1,19 @@
+name = "privana-onramp-ip-attestation"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# Same-origin route on the frontend zone: no CORS, no extra DNS, no extra cert.
+# The path is claimed by the Worker only; the SPA never serves it.
+
+[env.staging]
+routes = [
+  { pattern = "app.testnet.privana.finance/__onramp-ip-attest", zone_name = "privana.finance" },
+]
+
+[env.staging.vars]
+REFERRER_DOMAIN = "app.testnet.privana.finance"
+
+# Secrets (never in this file):
+#   wrangler secret put ATTESTATION_SECRET --env staging
+# The same value is provisioned to the backend as TRANSAK_IP_ATTESTATION_SECRET
+# via an encrypted ROFL secret. Minimum 32 characters.
