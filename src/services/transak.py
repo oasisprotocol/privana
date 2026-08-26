@@ -276,13 +276,15 @@ def verify_ip_attestation(
         parsed = ipaddress.ip_address(ip)
     except ValueError as exc:
         raise OnRampError("Invalid client IP attestation") from exc
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        raise OnRampError("Client IP attestation must carry a public IP")
     canonical_ip = parsed.compressed.lower()
     if ip != canonical_ip:
         raise OnRampError("Client IP attestation must carry a canonical IP")
     if not parsed.is_global or parsed.is_multicast or parsed.is_reserved:
         raise OnRampError("Client IP attestation must carry a public IP")
     if isinstance(parsed, ipaddress.IPv6Address):
-        if parsed.is_site_local or parsed.ipv4_mapped is not None:
+        if parsed.is_site_local:
             raise OnRampError("Client IP attestation must carry a public IP")
         if parsed in _CF_WORKER_SOURCE_NETWORK:
             raise OnRampError("Client IP attestation must come from a direct request")
