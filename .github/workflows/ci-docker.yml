@@ -104,13 +104,3 @@ jobs:
           for tag in $TAGS; do
             oras tag "$att_ref" "${tag##*:}-att"
           done
-
-      - name: Prune old images
-        uses: vlaurin/action-ghcr-prune@v0.6.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          organization: oasisprotocol
-          container: privana
-          keep-younger-than: 60
-          keep-last: 5
-          prune-untagged: true
