@@ -381,13 +381,14 @@ def test_attested_session_rejects_missing_tampered_or_replayed_claims(
     provider_service.create_widget_session.assert_awaited_once()
 
 
-def test_attested_session_rejects_loosely_typed_claim_fields(monkeypatch, tmp_path) -> None:
+def test_attested_session_rejects_invalid_claim_fields(monkeypatch, tmp_path) -> None:
     client, _accounting, provider_service = _make_attested_client(monkeypatch, tmp_path)
     intent = _create_intent(client)
     for mutation in (
         {"v": True},
         {"iat": str(int(time.time()))},
         {"exp": float(int(time.time()) + 60)},
+        {"nonce": "AB" * 16},
         {"unexpected": "field"},
     ):
         claim = {**_ip_attestation(intent["transaction_id"]), **mutation}

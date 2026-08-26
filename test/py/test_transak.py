@@ -6,7 +6,10 @@ import asyncio
 import hashlib
 import hmac
 import json
+import shutil
+import subprocess
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -23,6 +26,8 @@ TOKEN_ADDRESS = Web3.to_checksum_address("0x" + "cc" * 20)
 TOKEN_ID = "0x" + "11" * 32
 TX_HASH = "0x" + "22" * 32
 SIGNING_KEY = b"transak-test-intent-signing-key-0001"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+IP_ATTESTATION_WORKER_RUNNER = REPOSITORY_ROOT / "test/js/ip_attestation_worker_runner.mjs"
 
 CONFIG = transak.TransakConfig(
     api_key="transak-api-key",
@@ -119,6 +124,16 @@ def test_load_config_is_lazy_fail_closed_and_secret_safe(monkeypatch) -> None:
         ("transak_gateway_base_url", "https://gateway.transak.test:70000"),
         ("transak_referrer_domain", "https://app.testnet.privana.finance"),
         ("transak_referrer_domain", "app.testnet.privana.finance:not-a-port"),
+        ("transak_referrer_domain", "app.testnet.privana.finance:443"),
+        ("transak_referrer_domain", "APP.TESTNET.PRIVANA.FINANCE"),
+        ("transak_referrer_domain", "app_testnet.privana.finance"),
+        ("transak_referrer_domain", "-app.testnet.privana.finance"),
+        ("transak_referrer_domain", "app..privana.finance"),
+        ("transak_referrer_domain", "app.testnet.privana.finance."),
+        ("transak_referrer_domain", "localhost"),
+        ("transak_referrer_domain", "127.0.0.1"),
+        ("transak_referrer_domain", "127.1"),
+        ("transak_referrer_domain", "|"),
         ("transak_client_ip_header", "bad header"),
         ("transak_client_ip_mode", "bogus"),
         ("transak_crypto_currency_code", "USDC,ETH"),
@@ -161,6 +176,7 @@ ATTESTED_CONFIG = replace(
 )
 ATTESTATION_NOW = 1_800_000_000
 ATTESTATION_TRANSACTION_ID = "signed-intent-value"
+ATTESTATION_NONCE = "00112233445566778899aabbccddeeff"
 
 
 @pytest.fixture(autouse=True)
@@ -193,6 +209,192 @@ def _attestation(
     }
 
 
+def _worker_input(**overrides) -> dict:
+    intent_hash = hashlib.sha256(ATTESTATION_TRANSACTION_ID.encode()).hexdigest()
+    worker_input = {
+        "url": "https://app.testnet.privana.finance/__onramp-ip-attest",
+        "headers": {
+            "cf-connecting-ip": "2606:4700:4700:0000::1111",
+            "content-type": "application/json",
+        },
+        "body": {"intentHash": intent_hash},
+        "env": {
+            "ATTESTATION_SECRET": ATTESTATION_SECRET,
+            "REFERRER_DOMAIN": ATTESTED_CONFIG.referrer_domain,
+        },
+        "nowMs": ATTESTATION_NOW * 1000,
+        "nonceHex": ATTESTATION_NONCE,
+    }
+    worker_input.update(overrides)
+    return worker_input
+
+
+def _run_worker(worker_input: dict) -> dict:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for Worker/Python conformance tests"
+    completed = subprocess.run(
+        [node, str(IP_ATTESTATION_WORKER_RUNNER)],
+        cwd=REPOSITORY_ROOT,
+        input=json.dumps(worker_input),
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.parametrize(
+    ("observed_ip", "canonical_ip"),
+    [
+        ("8.8.8.8", "8.8.8.8"),
+        ("2606:4700:4700:0000::1111", "2606:4700:4700::1111"),
+        # First /32 after the rejected Cloudflare Worker egress /29.
+        ("2a06:98c8::1", "2a06:98c8::1"),
+    ],
+)
+def test_worker_python_ip_attestation_conformance(observed_ip, canonical_ip) -> None:
+    worker_input = _worker_input()
+    worker_input["headers"]["cf-connecting-ip"] = observed_ip
+    result = _run_worker(worker_input)
+    assert result["status"] == 200, result
+    assert result["headers"]["cache-control"] == "no-store"
+    claim = result["body"]
+    assert set(claim) == {"v", "ip", "iat", "exp", "nonce", "sig"}
+    assert claim["ip"] == canonical_ip
+    assert claim["iat"] == ATTESTATION_NOW
+    assert claim["exp"] == ATTESTATION_NOW + 60
+    assert claim["nonce"] == ATTESTATION_NONCE
+
+    intent_hash = hashlib.sha256(ATTESTATION_TRANSACTION_ID.encode()).hexdigest()
+    payload = "|".join(
+        (
+            "v1",
+            ATTESTED_CONFIG.referrer_domain,
+            intent_hash,
+            claim["ip"],
+            str(claim["iat"]),
+            str(claim["exp"]),
+            claim["nonce"],
+        )
+    )
+    assert (
+        claim["sig"]
+        == hmac.new(ATTESTATION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    )
+    assert (
+        transak.verify_ip_attestation(
+            version=claim["v"],
+            ip=claim["ip"],
+            issued_at=claim["iat"],
+            expires_at=claim["exp"],
+            nonce=claim["nonce"],
+            signature=claim["sig"],
+            transaction_id=ATTESTATION_TRANSACTION_ID,
+            config=ATTESTED_CONFIG,
+            now=ATTESTATION_NOW,
+        )
+        == claim["ip"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_status"),
+    [
+        (
+            {
+                "body": {
+                    "intentHash": hashlib.sha256(ATTESTATION_TRANSACTION_ID.encode()).hexdigest(),
+                    "extra": True,
+                }
+            },
+            400,
+        ),
+        (
+            {
+                "env": {
+                    "ATTESTATION_SECRET": ATTESTATION_SECRET,
+                    "REFERRER_DOMAIN": "bad|domain",
+                }
+            },
+            503,
+        ),
+        (
+            {
+                "env": {
+                    "ATTESTATION_SECRET": "a" * 31 + " ",
+                    "REFERRER_DOMAIN": ATTESTED_CONFIG.referrer_domain,
+                }
+            },
+            503,
+        ),
+        (
+            {
+                "headers": {
+                    "cf-connecting-ip": "2606:4700:4700::1111%zone",
+                    "content-type": "application/json",
+                }
+            },
+            400,
+        ),
+        (
+            {
+                "headers": {
+                    "cf-connecting-ip": "999.1.1.1",
+                    "content-type": "application/json",
+                }
+            },
+            400,
+        ),
+        ({"url": "https://attacker.example/__onramp-ip-attest"}, 403),
+        (
+            {
+                "headers": {
+                    "cf-connecting-ip": "8.8.8.8",
+                    "content-type": "text/plain",
+                }
+            },
+            415,
+        ),
+        (
+            {
+                "headers": {
+                    "cf-connecting-ip": "8.8.8.8",
+                    "cf-worker": "attacker.example",
+                    "content-type": "application/json",
+                }
+            },
+            403,
+        ),
+        (
+            {
+                "headers": {
+                    "cf-connecting-ip": "2a06:98c7::1",
+                    "content-type": "application/json",
+                }
+            },
+            400,
+        ),
+        (
+            {
+                "headers": {
+                    "cf-connecting-ip": "fec0::1",
+                    "content-type": "application/json",
+                }
+            },
+            400,
+        ),
+        ({"bodyText": "x" * 513}, 413),
+        ({"url": "https://app.testnet.privana.finance/other"}, 403),
+        ({"url": "https://app.testnet.privana.finance/__onramp-ip-attest?x=1"}, 403),
+    ],
+)
+def test_worker_rejects_noncanonical_or_ambiguous_inputs(overrides, expected_status) -> None:
+    result = _run_worker(_worker_input(**overrides))
+    assert result["status"] == expected_status, result
+
+
 def test_attested_mode_config_is_mode_aware_fail_closed(monkeypatch) -> None:
     values = {
         "transak_api_key": CONFIG.api_key,
@@ -218,6 +420,8 @@ def test_attested_mode_config_is_mode_aware_fail_closed(monkeypatch) -> None:
     for field, bad_value in [
         ("transak_ip_attestation_secret", None),
         ("transak_ip_attestation_secret", "too-short"),
+        ("transak_ip_attestation_secret", "a" * 31 + " "),
+        ("transak_ip_attestation_secret", "a" * 31 + "\u2603"),
     ]:
         invalid = {**values, field: bad_value}
         monkeypatch.setattr(
@@ -231,7 +435,7 @@ def test_attested_mode_config_is_mode_aware_fail_closed(monkeypatch) -> None:
     ("ip", "expected"),
     [
         ("8.8.8.8", "8.8.8.8"),
-        ("2606:4700:4700:0000::1111", "2606:4700:4700::1111"),
+        ("2606:4700:4700::1111", "2606:4700:4700::1111"),
     ],
 )
 def test_ip_attestation_accepts_valid_global_claims(ip, expected) -> None:
@@ -306,6 +510,13 @@ def test_ip_attestation_enforces_short_single_window(overrides, message) -> None
         ("2a06:98c0:3600::1", "direct request"),
         ("not-an-ip", "Invalid client IP attestation"),
         ("203.0.113.4 ", "Invalid client IP attestation"),
+        ("2606:4700:4700:0000::1111", "canonical IP"),
+        ("2606:4700:4700::1111%zone", "Invalid client IP attestation"),
+        ("224.0.0.1", "public IP"),
+        ("ff00::1", "public IP"),
+        ("::ffff:808:808", "public IP"),
+        ("::808:808", "public IP"),
+        ("fec0::1", "public IP"),
     ],
 )
 def test_ip_attestation_requires_direct_global_ip(ip, message) -> None:
@@ -331,6 +542,7 @@ def test_ip_attestation_rejects_malformed_and_wrong_version_claims() -> None:
     for field, bad_value in [
         ("nonce", "short"),
         ("nonce", "zz" * 16),
+        ("nonce", "AB" * 16),
         ("signature", "AB" * 32),
         ("signature", "ab" * 31),
         ("ip", ""),
@@ -354,7 +566,7 @@ def test_ip_attestation_is_single_use_and_bounded() -> None:
         **claim,
     )
     assert first == "8.8.8.8"
-    replay = _attestation("8.8.8.8", nonce=claim["nonce"].upper())
+    replay = _attestation("8.8.8.8", nonce=claim["nonce"])
     with pytest.raises(onramp_intent.OnRampError, match="already used"):
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,

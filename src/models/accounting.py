@@ -668,13 +668,13 @@ class OnRampIpAttestation(BaseModel):
     ip: str = Field(..., min_length=1, max_length=64)
     iat: int = Field(..., gt=0)
     exp: int = Field(..., gt=0)
-    nonce: str = Field(..., pattern=r"^[0-9a-fA-F]{16,64}$")
+    nonce: str = Field(..., pattern=r"^[0-9a-f]{32}$")
     sig: str = Field(..., pattern=r"^[0-9a-f]{64}$")
 
-    @field_validator("v", "iat", "exp", mode="before")
+    @field_validator("v", mode="before")
     def _reject_bool(cls, value: object) -> object:
-        # bool is an int subclass and `True == 1`, so Literal[1]/int fields
-        # otherwise accept `true` from the wire. Refuse it explicitly.
+        # bool is an int subclass and `True == 1`, so Literal[1] otherwise
+        # accepts `true` from the wire. Refuse it explicitly.
         if isinstance(value, bool):
             raise ValueError("must be an integer, not a boolean")
         return value

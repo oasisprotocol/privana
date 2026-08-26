@@ -1,6 +1,6 @@
 # On-ramp client-IP attestation Worker
 
-A ~100-line Cloudflare Worker on the frontend zone that signs the
+A small Cloudflare Worker on the frontend zone that signs the
 Cloudflare-observed client IP into a short-lived claim. The backend
 (`TRANSAK_CLIENT_IP_MODE=attested`) verifies the claim and forwards the IP to
 Transak as `x-user-ip`. This uses Transak's documented CDN-derived-IP pattern
@@ -39,6 +39,35 @@ enabling attested mode:
 - **"Remove visitor IP headers" managed transform: Off** for this route.
 - The route stays on the frontend zone; never proxy or CDN-front the API host,
   because bearer tokens are replayable.
+
+### Edge rate-limit gate
+
+Create and verify a Cloudflare zone
+[rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/)
+before deploying this route or setting `TRANSAK_CLIENT_IP_MODE=attested`:
+
+- expression: `http.request.uri.path eq "/__onramp-ip-attest"`;
+- counting characteristic: source IP (`ip.src`), or **IP with NAT support** if
+  the zone plan supports it;
+- initial limit: 5 requests per 10 seconds per characteristic;
+- action: block for 10 seconds.
+
+That path/IP/10-second configuration is available on every current Cloudflare
+plan. On Pro or higher, also scope the expression to
+`http.host eq "app.testnet.privana.finance"` (substitute the production host in
+production). On Business or higher, use **IP with NAT support** and also match
+method `POST`; lower plans should keep the portable path/IP rule. The initial
+ceiling allows short client retries while still bounding unauthenticated HMAC
+work; re-evaluate it from staging traffic before production rather than silently
+raising it.
+
+Enablement evidence is the active rule ID/configuration plus a staging probe
+that continues until mitigation is observed, appears in Cloudflare Security
+Events, and confirms mitigated requests do not invoke the Worker; verify normal
+access again after the 10-second mitigation window. Do not require an exact
+triggering request number: Cloudflare documents a short counter-update delay.
+A Worker-only counter is not a substitute because the abuse gate must run before
+Worker CPU and HMAC work.
 
 ## Limits of the design (known, accepted)
 

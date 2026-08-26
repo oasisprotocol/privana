@@ -54,7 +54,7 @@ TRANSAK_IP_ATTESTATION_MAX_NONCES = 10_000
 # Cloudflare rewrites CF-Connecting-IP to this range for cross-zone Worker
 # subrequests; a claim carrying it was not minted for a direct browser request.
 _CF_WORKER_SOURCE_NETWORK = ipaddress.ip_network("2a06:98c0::/29")
-_IP_ATTESTATION_NONCE_PATTERN = re.compile(r"[0-9a-fA-F]{16,64}\Z")
+_IP_ATTESTATION_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _IP_ATTESTATION_SIG_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
@@ -63,6 +63,10 @@ _MAX_DISPLAY_VALUE_BYTES = 256
 _MAX_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z
 _HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _PROVIDER_CODE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,31}\Z")
+_REFERRER_DOMAIN_PATTERN = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z"
+)
 _TX_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}\Z")
 _EXACT_ORDER_NOT_FOUND_MESSAGE = "Invalid partnerOrderId or order not found"
 
@@ -237,7 +241,7 @@ def verify_ip_attestation(
         raise OnRampError("Invalid client IP attestation")
     if not _IP_ATTESTATION_SIG_PATTERN.fullmatch(signature):
         raise OnRampError("Invalid client IP attestation")
-    if not ip or len(ip.encode()) > 64:
+    if not isinstance(ip, str) or not ip or len(ip.encode()) > 64 or "%" in ip or "|" in ip:
         raise OnRampError("Invalid client IP attestation")
 
     current = time.time() if now is None else now
@@ -272,13 +276,19 @@ def verify_ip_attestation(
         parsed = ipaddress.ip_address(ip)
     except ValueError as exc:
         raise OnRampError("Invalid client IP attestation") from exc
-    if not parsed.is_global:
+    canonical_ip = parsed.compressed.lower()
+    if ip != canonical_ip:
+        raise OnRampError("Client IP attestation must carry a canonical IP")
+    if not parsed.is_global or parsed.is_multicast or parsed.is_reserved:
         raise OnRampError("Client IP attestation must carry a public IP")
-    if parsed.version == 6 and parsed in _CF_WORKER_SOURCE_NETWORK:
-        raise OnRampError("Client IP attestation must come from a direct request")
+    if isinstance(parsed, ipaddress.IPv6Address):
+        if parsed.is_site_local or parsed.ipv4_mapped is not None:
+            raise OnRampError("Client IP attestation must carry a public IP")
+        if parsed in _CF_WORKER_SOURCE_NETWORK:
+            raise OnRampError("Client IP attestation must come from a direct request")
 
-    _reserve_ip_attestation_nonce(nonce.lower(), expires_at, current)
-    return parsed.compressed
+    _reserve_ip_attestation_nonce(nonce, expires_at, current)
+    return canonical_ip
 
 
 class TransakService:
@@ -794,22 +804,10 @@ def _https_base_url(value: str | None) -> str:
 
 def _referrer_domain(value: str | None) -> str:
     candidate = _required_setting(value)
-    try:
-        parsed = urlparse(f"//{candidate}")
-        parsed_port = parsed.port
-        normalized = httpx.URL(f"https://{candidate}")
-    except (ValueError, UnicodeError, httpx.InvalidURL) as exc:
-        raise OnRampNotConfiguredError("Transak on-ramp is not configured") from exc
-    if (
-        not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or normalized.scheme != "https"
-        or not normalized.host
-        or (parsed_port is not None and parsed_port <= 0)
+    # Privana is a web integration. Transak requires the exact approved domain,
+    # so accept one lowercase ASCII DNS hostname with no scheme, port, or path.
+    if not _REFERRER_DOMAIN_PATTERN.fullmatch(candidate) or not any(
+        character.isalpha() for character in candidate.rsplit(".", 1)[-1]
     ):
         raise OnRampNotConfiguredError("Transak on-ramp is not configured")
     return candidate

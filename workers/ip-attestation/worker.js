@@ -11,11 +11,17 @@
  */
 
 const ATTESTATION_TTL_SECONDS = 60;
+const ATTESTATION_PATH = "/__onramp-ip-attest";
 const INTENT_HASH_PATTERN = /^[0-9a-f]{64}$/;
+const ATTESTATION_SECRET_PATTERN = /^[\x21-\x7e]{32,}$/;
+const REFERRER_DOMAIN_PATTERN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 // The only field is a 64-char hex hash; a well-formed body is well under 256
 // bytes. Cap it so this unauthenticated endpoint cannot be made to buffer and
 // parse a large payload.
 const MAX_BODY_BYTES = 512;
+
+class RequestBodyTooLargeError extends Error {}
 
 // Reject-heuristics only; the backend re-validates the IP fail-closed.
 const REJECTED_V4_PREFIXES = [
@@ -51,8 +57,11 @@ async function readBoundedText(request, limit) {
     if (done) break;
     total += value.byteLength;
     if (total > limit) {
-      await reader.cancel();
-      throw new Error("request body too large");
+      try {
+        await reader.cancel();
+      } finally {
+        throw new RequestBodyTooLargeError();
+      }
     }
     chunks.push(value);
   }
@@ -65,19 +74,61 @@ async function readBoundedText(request, limit) {
   return new TextDecoder().decode(merged);
 }
 
+function canonicalizeIp(value) {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > 64 ||
+    value !== value.trim() ||
+    value.includes("%") ||
+    value.includes("|")
+  ) {
+    return null;
+  }
+  if (!value.includes(":")) {
+    const octets = value.split(".");
+    if (
+      octets.length !== 4 ||
+      octets.some(
+        (octet) =>
+          !/^(0|[1-9][0-9]{0,2})$/.test(octet) || Number(octet) > 255,
+      )
+    ) {
+      return null;
+    }
+    return octets.join(".");
+  }
+  try {
+    const hostname = new URL(`https://[${value}]/`).hostname;
+    if (!hostname.startsWith("[") || !hostname.endsWith("]")) {
+      return null;
+    }
+    return hostname.slice(1, -1).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isValidReferrerDomain(value) {
+  if (typeof value !== "string" || !REFERRER_DOMAIN_PATTERN.test(value)) {
+    return false;
+  }
+  const topLevelLabel = value.slice(value.lastIndexOf(".") + 1);
+  return /[a-z]/.test(topLevelLabel);
+}
+
 function isRejectedIp(ip) {
-  if (!ip) return true;
   if (ip.includes(":")) {
     const lower = ip.toLowerCase();
-    // loopback, unspecified, link-local, unique-local, v4-mapped, CF Worker egress
+    // Unspecified/compatible, link/site-local, unique-local, multicast, mapped,
+    // and CF Worker egress. The backend independently enforces public unicast.
     return (
-      lower === "::1" ||
-      lower === "::" ||
-      lower.startsWith("fe8") ||
+      lower.startsWith("::") ||
       lower.startsWith("fc") ||
       lower.startsWith("fd") ||
-      lower.startsWith("::ffff:") ||
-      // CF Worker egress 2a06:98c0::/29 — the low three bits of the fourth
+      lower.startsWith("fe") ||
+      lower.startsWith("ff") ||
+      // CF Worker egress 2a06:98c0::/29 — the low three bits of the second
       // hextet are zero, so only 2a06:98c0..2a06:98c7 belong to the range.
       /^2a06:98c[0-7](:|$)/.test(lower)
     );
@@ -90,17 +141,41 @@ export default {
     if (request.method !== "POST") {
       return json(405, { error: "method not allowed" });
     }
-    if (!env.ATTESTATION_SECRET || env.ATTESTATION_SECRET.length < 32 || !env.REFERRER_DOMAIN) {
+    if (
+      typeof env.ATTESTATION_SECRET !== "string" ||
+      !ATTESTATION_SECRET_PATTERN.test(env.ATTESTATION_SECRET) ||
+      !isValidReferrerDomain(env.REFERRER_DOMAIN)
+    ) {
       return json(503, { error: "attestation is not configured" });
     }
-    // A cross-zone Worker-originated request carries cf-worker; a direct
-    // browser request cannot set it (Cloudflare strips inbound values).
+    let requestUrl;
+    try {
+      requestUrl = new URL(request.url);
+    } catch {
+      return json(400, { error: "invalid request url" });
+    }
+    if (
+      requestUrl.protocol !== "https:" ||
+      requestUrl.hostname !== env.REFERRER_DOMAIN ||
+      requestUrl.port ||
+      requestUrl.pathname !== ATTESTATION_PATH ||
+      requestUrl.search
+    ) {
+      return json(403, { error: "request host is not attestable" });
+    }
+    // Worker-originated subrequests carry cf-worker. Reject its presence as an
+    // additional heuristic; the backend independently rejects Worker egress.
     if (request.headers.get("cf-worker")) {
       return json(403, { error: "indirect requests are not attestable" });
     }
-    const ip = request.headers.get("cf-connecting-ip");
-    if (isRejectedIp(ip)) {
+    const ip = canonicalizeIp(request.headers.get("cf-connecting-ip"));
+    if (!ip || isRejectedIp(ip)) {
       return json(400, { error: "client ip is not attestable" });
+    }
+
+    const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/json") {
+      return json(415, { error: "content type must be application/json" });
     }
 
     // Reject an oversized body before reading it. A declared length over the cap
@@ -110,13 +185,25 @@ export default {
       return json(413, { error: "request body too large" });
     }
 
-    let intentHash;
+    let body;
     try {
-      const body = await readBoundedText(request, MAX_BODY_BYTES);
-      ({ intentHash } = JSON.parse(body));
-    } catch {
+      body = JSON.parse(await readBoundedText(request, MAX_BODY_BYTES));
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return json(413, { error: "request body too large" });
+      }
       return json(400, { error: "invalid request body" });
     }
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 1 ||
+      !Object.hasOwn(body, "intentHash")
+    ) {
+      return json(400, { error: "invalid request body" });
+    }
+    const { intentHash } = body;
     if (typeof intentHash !== "string" || !INTENT_HASH_PATTERN.test(intentHash)) {
       return json(400, { error: "invalid intent hash" });
     }

@@ -79,9 +79,6 @@ deployments:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
-    metadata:
-      env.ONRAMP_PROVIDER: transak
-      env.TRANSAK_CLIENT_IP_HEADER: X-Privana-Test-Client-IP
     secrets:
       - name: ALCHEMY_API_KEY
         value: pGJwa1ggJZlnbqC9PdW3EY8b7q/1mmKHDa+KrtuUoX/0rYNRXg5kbmFtZVgfBiOjEJguCpyi3B7pnover4t/lqTtYqTYjWk6tsgWhGVub25jZU+J2kr8BCXyZ/oB5Rg4iY1ldmFsdWVYJc+0rcicYGp0fE5tnufQiPq3cdRHbqMkHtluXeujqTqpLGRDmaA=

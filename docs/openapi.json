@@ -830,7 +830,7 @@
             "type": "string"
           },
           "nonce": {
-            "pattern": "^[0-9a-fA-F]{16,64}$",
+            "pattern": "^[0-9a-f]{32}$",
             "title": "Nonce",
             "type": "string"
           },

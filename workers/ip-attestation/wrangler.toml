@@ -1,9 +1,12 @@
 name = "privana-onramp-ip-attestation"
 main = "worker.js"
 compatibility_date = "2026-08-01"
+workers_dev = false
 
 # Same-origin route on the frontend zone: no CORS, no extra DNS, no extra cert.
 # The path is claimed by the Worker only; the SPA never serves it.
+# Before deployment, install and verify the required zone rate-limit rule in
+# README.md. The gate must execute before this Worker is invoked.
 
 [env.staging]
 routes = [
