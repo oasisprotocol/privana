@@ -53,6 +53,8 @@ const sidebars: SidebarsConfig = {
         'architecture/fallback-recovery',
         'architecture/trust-model',
         'architecture/research-basis',
+        'architecture/about-us',
+        'architecture/integration-partners',
       ],
     },
   ],
