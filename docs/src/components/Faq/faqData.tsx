@@ -69,6 +69,33 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
     label: 'Swapping & Yield',
     items: [
       {
+        q: 'What can I deposit, and what can I swap?',
+        a: (
+          <>
+            <p>
+              <strong>Deposit.</strong> Privana runs one vault per chain. Each vault holds two assets: a stablecoin and the chain's native token.
+            </p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Chain</th>
+                  <th>Stablecoin</th>
+                  <th>Native token</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>Ethereum</td><td>USDC</td><td>ETH</td></tr>
+                <tr><td>Base</td><td>USDC</td><td>ETH</td></tr>
+                <tr><td>HyperEVM</td><td>USDC</td><td>HYPE</td></tr>
+              </tbody>
+            </table>
+            <p>
+              <strong>Swap.</strong> Not limited to those six. When both sides of your trade are assets Privana already holds, the swap settles against vault liquidity. Everything else routes through LiFi aggregator, which reaches most of DeFi. Those trades execute from a pooled vault address, so they appear on-chain but can't be traced back to you.
+            </p>
+          </>
+        ),
+      },
+      {
         q: 'How does Privana execute a swap?',
         a: (
           <>
@@ -133,6 +160,14 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
     id: 'self-custody',
     label: 'Self-Custody',
     items: [
+      {
+        q: 'Do I need a wallet to use Privana?',
+        a: 'No. Sign in with an email and a wallet is generated for you on the spot through Turnkey. No extension necessary, no seed phrase to write down. If you already have a wallet, you can use that instead. Either way, the wallet remains fully non-custodial.',
+      },
+      {
+        q: 'Can I fund my account with a card?',
+        a: 'Yes, through Transak. Pick an amount, pay, and the assets arrive in your vault. Transak is a regulated on-ramp and handles identity verification directly — that verification is between you and Transak.',
+      },
       {
         q: 'Who holds my private keys on Privana?',
         a: "Private keys on Privana are held inside the TEE on Oasis Sapphire. Privana does not hold your keys and engineers cannot access them. The vault's signing key is generated inside the enclave and has never existed outside it, enforced by Intel SGX hardware, not policy.",
