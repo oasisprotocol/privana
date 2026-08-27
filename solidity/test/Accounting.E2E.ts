@@ -1500,8 +1500,57 @@ describe('Upgradability', function () {
     expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
     expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");
 
+    expect(await upgraded.VERSION()).to.equal(2n, "VERSION should be 2 after upgrade");
     // Verify the proxy address is the same
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
+  });
+
+  // Scope: the pre-upgrade mock compiles from current source (already VERSION 2), so this exercises proxy mechanics and state preservation, not a V1-layout migration; the live V1->V2 upgrade was rehearsed on testnet separately.
+  it("Should upgrade implementation, report VERSION == 2, and preserve prior state", async function () {
+    const user = getDeployer(2);
+    const freshProxy = await deployMockAccounting(await mockSiweAuth.getAddress());
+    const freshProxyAddress = await freshProxy.getAddress();
+
+    expect(await freshProxy.VERSION()).to.equal(2n);
+
+    const data = ethers.concat([
+      ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
+      ethers.zeroPadValue(TEST_TOKEN.address, 20)
+    ]);
+    await freshProxy.setTokenInfo({
+      tokenType: TEST_TOKEN.tokenType,
+      data: data
+    });
+
+    const testBalance = parseUsdt("500");
+    await freshProxy.setBalance(user.address, TEST_TOKEN.tokenId, testBalance);
+
+    const testChainId = 23295n;
+    const testGasPrice = 100000000000n; // 100 gwei
+    await freshProxy.setGasPrice(testChainId, testGasPrice);
+
+    const balanceBefore = await freshProxy.getBalance(user.address, TEST_TOKEN.tokenId);
+    const ownerBefore = await freshProxy.owner();
+    const gasPriceBefore = await freshProxy.gasPrices(testChainId);
+    const tokenInfoBefore = await freshProxy.tokens(TEST_TOKEN.tokenId);
+
+    const MockAccountingFactory = await ethers.getContractFactory('MockAccounting');
+    const newImplAddress = await upgrades.prepareUpgrade(freshProxyAddress, MockAccountingFactory, {
+      kind: 'uups',
+      constructorArgs: [await mockSiweAuth.getAddress()],
+      redeployImplementation: 'always',
+    }) as string;
+
+    await (await freshProxy.proposeUpgrade(newImplAddress, 0)).wait();
+    await (await freshProxy.upgradeToAndCall(newImplAddress, "0x")).wait();
+
+    const upgraded = (await ethers.getContractFactory('MockAccounting')).attach(freshProxyAddress) as unknown as MockAccounting;
+
+    expect(await upgraded.VERSION()).to.equal(2n, "VERSION must report 2");
+    expect(await upgraded.getBalance(user.address, TEST_TOKEN.tokenId)).to.equal(balanceBefore, "User balance must be preserved");
+    expect(await upgraded.owner()).to.equal(ownerBefore, "Contract owner must be preserved");
+    expect(await upgraded.gasPrices(testChainId)).to.equal(gasPriceBefore, "Chain gas price must be preserved");
+    expect((await upgraded.tokens(TEST_TOKEN.tokenId)).data).to.equal(tokenInfoBefore.data, "Token data must be preserved");
   });
 
   it("Should only allow owner to upgrade", async function () {

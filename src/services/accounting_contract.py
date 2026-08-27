@@ -34,6 +34,7 @@ from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_ch
 from src.models.private_read import PrivateReadAuth
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,16 @@ _TOKEN_SYMBOL_CACHE_TTL = 3600  # 1 hour - symbols rarely change
 _TOKEN_NAME_CACHE_TTL = 3600  # 1 hour - names rarely change
 _TOKEN_DECIMALS_CACHE_TTL = 3600  # 1 hour - decimals never change
 _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
+# Contract constants are not immutable across upgrades (gasLimitNativeSweep changed
+# in this branch), so the sweep/withdrawal gas limits expire like any other cached read.
+_GAS_LIMIT_CACHE_TTL = 300  # 5 minutes
 
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
+
+# Headroom over the exact gas cost the contract signs with, so a gas price update
+# between admission and broadcast does not strand the withdrawal.
+_WITHDRAWAL_GAS_BUFFER_PERCENT = 20
 
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
@@ -127,7 +135,6 @@ class AccountingContractService:
         self._eip712_domain: Optional[Dict[str, Any]] = None
 
         self.rofl_client = RoflAppdClient()
-        self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, AsyncWeb3] = {}
         self.default_token_symbol = "ETH"
         self.chain_names = CHAIN_NAMES
@@ -147,6 +154,10 @@ class AccountingContractService:
         )
         self._token_list_cache: AsyncTTLCache[str, list[Dict[str, Any]]] = AsyncTTLCache(
             maxsize=1, ttl=_TOKEN_LIST_CACHE_TTL
+        )
+        # One entry per contract gas-limit getter (2 withdrawal legs + 2 sweep legs).
+        self._gas_limits: AsyncTTLCache[str, int] = AsyncTTLCache(
+            maxsize=4, ttl=_GAS_LIMIT_CACHE_TTL
         )
 
     # ------------------------------------------------------------------
@@ -351,20 +362,10 @@ class AccountingContractService:
         return int(block["timestamp"])
 
     async def _get_chain_web3(self, chain_id: int) -> AsyncWeb3:
-        if chain_id in self._chain_web3:
-            return self._chain_web3[chain_id]
-
-        rpc_url = self.chain_rpc_urls.get(chain_id)
-        if not rpc_url:
-            raise ValueError(f"No RPC endpoint configured for chain ID {chain_id}")
-
-        web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
-        connected = await web3.is_connected()
-        if not connected:
-            raise ValueError(f"Failed to connect to RPC endpoint for chain ID {chain_id}")
-
-        self._chain_web3[chain_id] = web3
-        return web3
+        # Read `settings.chain_rpc_urls` live: this service is constructed at import,
+        # before the startup identity check narrows it, and only `verified_web3` knows
+        # which chains proved their ID.
+        return require_verified_web3(chain_id, self.settings.chain_rpc_urls, self._chain_web3)
 
     @staticmethod
     def _as_raw_tx_bytes(value: Any) -> bytes:
@@ -416,21 +417,83 @@ class AccountingContractService:
             is_native=is_native,
         )
 
+    async def _get_gas_limit(self, fn_name: str) -> int:
+        """Read one of the contract's ``public constant`` gas limits (TTL-cached).
+
+        Reading the getters keeps callers in step with what the contract actually signs
+        instead of mirroring numbers that can silently drift apart. The constants move
+        with an implementation upgrade, so values expire instead of being pinned for the
+        process lifetime.
+        """
+
+        async def fetch() -> int:
+            contract_reader = self._get_reader_contract()
+            return int(await getattr(contract_reader.functions, fn_name)().call())
+
+        return await self._gas_limits.get_or_set_async(fn_name, fetch)
+
+    async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
+        """Gas limit the contract signs withdrawals with (evmAddress → user address)."""
+        return await self._get_gas_limit(
+            "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
+        )
+
+    async def get_native_sweep_gas_limit(self) -> int:
+        """Gas limit the contract signs native sweeps with (``gasLimitNativeSweep``).
+
+        Gas funding is sized from this: the EVM debits ``gasLimit * gasPrice`` upfront,
+        so funding less than the signed limit strands the sweep.
+        """
+        return await self._get_gas_limit("gasLimitNativeSweep")
+
+    async def get_erc20_sweep_gas_limit(self) -> int:
+        """Gas limit the contract signs ERC-20 sweeps with (``gasLimitERC20Sweep``)."""
+        return await self._get_gas_limit("gasLimitERC20Sweep")
+
+    async def get_accounting_version(self) -> int:
+        """Read the deployed implementation's VERSION (startup gate input)."""
+        contract_reader = self._get_reader_contract()
+        return int(await contract_reader.functions.VERSION().call())
+
     async def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
-        """Check that evmAddress has enough native balance on the destination chain for gas."""
+        """Check that evmAddress can pay for this withdrawal on the destination chain.
+
+        Derived from the two values the contract signs with — ``gasPrices[chainId]`` and
+        the withdrawal gas limit — because the EVM debits ``gasLimit * gasPrice`` upfront.
+        A single global floor cannot express that: at 1e13 wei it admitted ~1000x too
+        early on a 100 gwei chain, where an ERC-20 withdrawal needs
+        100_000 * 100 gwei = 1e16 wei.
+        """
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+
+        gas_price = await self.get_gas_price(chain_id)
+        if gas_price <= 0:
+            raise ValueError(
+                f"No gas price published for {chain_name}. The contract cannot sign a "
+                f"withdrawal for chain {chain_id} until setGasPrice({chain_id}, ...) lands."
+            )
+
+        gas_limit = await self._get_withdrawal_gas_limit(is_native)
+        gas_cost = gas_price * gas_limit
+        required = gas_cost * (100 + _WITHDRAWAL_GAS_BUFFER_PERCENT) // 100
+        # MIN_WITHDRAWAL_GAS_BALANCE is kept as an additional floor for chains whose
+        # published gas price understates what the broadcaster actually needs.
+        required = max(required, self.settings.min_withdrawal_gas_balance)
+        if is_native:
+            required += amount
+
         chain_w3 = await self._get_chain_web3(chain_id)
         evm_address = await self._get_deposit_address()
         balance = await chain_w3.eth.get_balance(evm_address)
 
-        required = self.settings.min_withdrawal_gas_balance
-        if is_native:
-            required += amount
-
         if balance < required:
-            chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+            detail = f"{gas_limit} gas x {gas_price} wei +{_WITHDRAWAL_GAS_BUFFER_PERCENT}% buffer"
+            if is_native:
+                detail += f" + {amount} wei withdrawn"
             raise ValueError(
                 f"Insufficient native balance on {chain_name}. "
-                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
+                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei "
+                f"({detail})."
             )
 
     async def _get_token_symbol(self, token: HexBytes) -> Optional[str]:

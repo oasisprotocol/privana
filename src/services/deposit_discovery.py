@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 from aiohttp import ClientError
 from web3 import AsyncWeb3, Web3
 from web3.exceptions import Web3Exception
-from web3.providers import AsyncHTTPProvider
 
 from src.config.chain_config import (
     CHAIN_CONFIGS,
@@ -24,6 +23,7 @@ from src.config.chain_config import (
 )
 from src.services.cache import AsyncTTLCache
 from src.services.deposit_processor import compute_deposit_id
+from src.services.rpc_identity import verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,11 @@ class DiscoveryRPCError(Exception):
 
 
 class DiscoveryNotConfiguredError(Exception):
-    """No source-chain RPC URL is configured for the requested chain.
+    """No verified source-chain RPC endpoint is available for the requested chain.
 
     Deployment fault, not caller error: the chain passed route validation
-    (it is in CHAIN_CONFIGS) but settings carry no RPC URL for it.
+    (it is in CHAIN_CONFIGS) but settings carry no RPC URL for it, or its
+    endpoint was excluded by the startup chain-ID identity check.
     """
 
 
@@ -95,12 +96,16 @@ class DepositDiscoveryService:
         )
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        if chain_id not in self._web3_cache:
-            rpc_url = self._chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise DiscoveryNotConfiguredError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
-        return self._web3_cache[chain_id]
+        """Get the chain's startup-verified client (see `rpc_identity`).
+
+        Scanning an endpoint that may be a different chain is what that check exists to
+        prevent, so an excluded chain raises instead of being scanned.
+        """
+        w3 = verified_web3(chain_id, self._chain_rpc_urls)
+        if w3 is None:
+            self._web3_cache.pop(chain_id, None)
+            raise DiscoveryNotConfiguredError(f"No verified RPC endpoint for chain {chain_id}")
+        return self._web3_cache.setdefault(chain_id, w3)
 
     async def discover_pending_deposits(
         self,

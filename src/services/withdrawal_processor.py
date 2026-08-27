@@ -3,16 +3,18 @@
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from eth_abi import decode
 from hexbytes import HexBytes
 from web3 import AsyncWeb3, Web3
+from web3.exceptions import TransactionNotFound
 from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
 from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import AccountingContractService
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,9 @@ def decode_contract_error(exc: Exception) -> tuple[str, str]:
 
 
 _MIN_RPC_INTERVAL = 0.1
+
+# Consecutive nonce observations with an unmined signed withdrawal before alarming
+_STUCK_NONCE_ALARM_CYCLES = 10
 
 
 class WithdrawalProcessor:
@@ -63,6 +68,17 @@ class WithdrawalProcessor:
         self._last_rpc_call: float = 0
         self._destination_web3: Dict[int, AsyncWeb3] = {}
         self._evm_address: Optional[str] = None
+        # Divergence is logged critical the first time and error after, to stay loud
+        # without flooding every poll cycle
+        self._nonce_divergence_reported: Set[int] = set()
+        # Consecutive nonce reads where one of our signed withdrawals sits unmined
+        self._stuck_nonce_cycles: Dict[int, int] = {}
+        # (chain_id, withdrawal_index) -> hash of the bytes we last broadcast.
+        # resolveWithdrawal re-signs at the current gasPrices[chainId], so after a
+        # setGasPrice the fresh bytes hash differently from what we actually sent.
+        # In-process only (cleared in stop()): after a restart there is nothing to
+        # remember and recognition falls back to the freshly signed bytes.
+        self._last_broadcast_hash: Dict[tuple[int, int], str] = {}
 
     async def _rate_limited_call(self, coro_factory):
         """Execute an async call with rate limiting and retries.
@@ -93,13 +109,12 @@ class WithdrawalProcessor:
                 raise
 
     def _get_destination_web3(self, chain_id: int) -> AsyncWeb3:
-        """Get or create AsyncWeb3 instance for a destination chain."""
-        if chain_id not in self._destination_web3:
-            rpc_url = self.settings.chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._destination_web3[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
-        return self._destination_web3[chain_id]
+        """Get the destination chain's startup-verified client (see `rpc_identity`).
+
+        Withdrawals are signed for one chain ID and broadcast here, so an endpoint filed
+        under the wrong chain would send a signed transaction somewhere it never belonged.
+        """
+        return require_verified_web3(chain_id, self.settings.chain_rpc_urls, self._destination_web3)
 
     async def _get_evm_address(self) -> str:
         """Get the EVM address used for withdrawals."""
@@ -108,6 +123,189 @@ class WithdrawalProcessor:
                 lambda: self._contract.functions.evmAddress().call()
             )
         return self._evm_address
+
+    async def _chain_nonce_state(self, chain_id: int) -> Optional[tuple[int, int]]:
+        """Read ``(contract_next_nonce, chain_latest_nonce)``, or None if unsafe.
+
+        ``nonces[chainId]`` is the nonce the contract embeds in the next withdrawal it
+        signs for that chain. It starts at 0 and ``EVMSignerAndVerifier`` only ever
+        increments it (``getEVMNonceAndIncrement``) — there is no setter, so divergence
+        cannot be repaired from this side.
+
+        ``contract >= chain`` is safe: equal means caught up, greater means signed
+        withdrawals still awaiting broadcast. ``contract < chain`` is not — the chain has
+        already spent nonces the contract never issued, so everything signed from now on
+        reuses a spent nonce and can never land. None makes callers refuse the chain
+        outright rather than sign into that gap.
+
+        The gate compares against ``pending``, so a queued transaction counts as spent.
+        ``latest`` is the nonce returned, because the two disagree exactly when a broadcast
+        is stuck unmined, and that gap is what still needs re-broadcasting.
+        """
+        contract_next_nonce = await self._rate_limited_call(
+            lambda: self._contract.functions.nonces(chain_id).call()
+        )
+
+        evm_address = await self._get_evm_address()
+        dest_web3 = self._get_destination_web3(chain_id)
+        # "pending" so queued-but-unmined transactions count as spent nonces
+        chain_pending_nonce = await self._rate_limited_call(
+            lambda: dest_web3.eth.get_transaction_count(evm_address, "pending")
+        )
+        # "latest" counts only mined nonces; anything above it has not landed yet
+        chain_latest_nonce = await self._rate_limited_call(
+            lambda: dest_web3.eth.get_transaction_count(evm_address, "latest")
+        )
+
+        if contract_next_nonce >= chain_pending_nonce:
+            self._nonce_divergence_reported.discard(chain_id)
+            self._track_stuck_nonce(
+                chain_id, contract_next_nonce, chain_pending_nonce, chain_latest_nonce
+            )
+            return contract_next_nonce, chain_latest_nonce
+
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+        message = (
+            f"{chain_name}: REFUSING WITHDRAWALS - contract nonce {contract_next_nonce} is behind "
+            f"the pending nonce {chain_pending_nonce} of {evm_address}. The chain has spent "
+            f"{chain_pending_nonce - contract_next_nonce} nonce(s) the contract never issued, so "
+            f"every transaction signed for chain {chain_id} would reuse a spent nonce and never "
+            f"pay out. nonces({chain_id}) can only advance by signing, so this needs operator "
+            f"intervention."
+        )
+        if chain_id in self._nonce_divergence_reported:
+            logger.error(message)
+        else:
+            self._nonce_divergence_reported.add(chain_id)
+            logger.critical(message)
+        return None
+
+    def _track_stuck_nonce(
+        self,
+        chain_id: int,
+        contract_next_nonce: int,
+        chain_pending_nonce: int,
+        chain_latest_nonce: int,
+    ) -> None:
+        """Alarm when one of our signed withdrawals has been broadcast but never mines.
+
+        ``pending > latest`` means the node is holding a transaction it has not mined, and
+        ``contract_next > latest`` means a nonce the contract signed is what sits there.
+        Re-broadcasting the same bytes cannot rescue an underpriced transaction - only a
+        higher ``gasPrices[chainId]``, which re-signs the payout, can - so a gap that
+        persists across cycles needs an operator.
+        """
+        stuck = (
+            chain_pending_nonce > chain_latest_nonce and contract_next_nonce > chain_latest_nonce
+        )
+        if not stuck:
+            self._stuck_nonce_cycles.pop(chain_id, None)
+            return
+
+        cycles = self._stuck_nonce_cycles.get(chain_id, 0) + 1
+        self._stuck_nonce_cycles[chain_id] = cycles
+        if cycles >= _STUCK_NONCE_ALARM_CYCLES:
+            chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+            logger.error(
+                f"{chain_name}: nonce stuck: pending exceeds latest for {cycles} cycles - "
+                f"resolved withdrawal may be underpriced, consider raising the published gas price"
+            )
+
+    async def _fetch_receipt(self, chain_id: int, tx_hash: str) -> Optional[Any]:
+        """Receipt for ``tx_hash`` on ``chain_id``; None when absent or unreadable."""
+        dest_web3 = self._get_destination_web3(chain_id)
+
+        async def fetch_receipt():
+            try:
+                return await dest_web3.eth.get_transaction_receipt(tx_hash)
+            except TransactionNotFound:
+                return None
+
+        try:
+            return await self._rate_limited_call(fetch_receipt)
+        except Exception as exc:
+            logger.warning(f"Could not look up receipt for {tx_hash} on chain {chain_id}: {exc}")
+            return None
+
+    def _remember_broadcast(self, chain_id: int, index: int, tx_hash: str) -> None:
+        """Record the hash we sent, normalised, so a re-sign at a new price stays traceable."""
+        self._last_broadcast_hash[(chain_id, index)] = HexBytes(tx_hash).to_0x_hex()
+
+    @staticmethod
+    def _expected_tx_hash(signed_tx: Any) -> str:
+        """Compute the hash a node files ``signed_tx`` under: keccak256 of its raw bytes."""
+        raw_bytes = AccountingContractService._as_raw_tx_bytes(signed_tx)
+        return HexBytes(Web3.keccak(raw_bytes)).to_0x_hex()
+
+    async def _find_broadcast_tx(self, chain_id: int, index: int, signed_tx: Any) -> Optional[str]:
+        """Return the hash of the transaction that proves this withdrawal was paid, or None
+        when nothing proves it.
+
+        A rejected broadcast only proves the *nonce* is unusable, never that our
+        transaction is what used it: "nonce too low" (geth), "already known" and "invalid
+        nonce" (Oasis) read identically whether the withdrawal landed or an unrelated
+        transaction burned the nonce. Only a status-1 receipt for the exact signed bytes
+        proves payment: a status-0 receipt means the payout reverted and a mempool entry
+        is merely in flight, so both answer None. None means "not proven", and the caller
+        must leave the withdrawal unresolved.
+
+        Two hashes can carry that proof, and the one we actually broadcast is checked
+        first: ``resolveWithdrawal`` re-signs at the *current* ``gasPrices[chainId]``, so
+        once an operator republishes a price the freshly resolved bytes hash differently
+        from the ones already on the chain, and looking up only today's hash would ask
+        after a transaction that never existed and report a paid withdrawal as unproven.
+        """
+        expected_hash = self._expected_tx_hash(signed_tx)
+        remembered = self._last_broadcast_hash.get((chain_id, index))
+        candidates = [] if remembered is None else [remembered]
+        if expected_hash != remembered:
+            candidates.append(expected_hash)
+
+        for candidate in candidates:
+            receipt = await self._fetch_receipt(chain_id, candidate)
+            if receipt is None:
+                continue
+            if receipt["status"] == 1:
+                return candidate
+            if candidate == remembered:
+                logger.error(
+                    f"Withdrawal #{index}: our earlier broadcast {remembered} mined on chain "
+                    f"{chain_id} with status {receipt['status']} - the payout reverted, so this "
+                    f"withdrawal is NOT paid; manual investigation required"
+                )
+            else:
+                logger.error(
+                    f"Withdrawal #{index}: tx {expected_hash} mined on chain {chain_id} with "
+                    f"status {receipt['status']} - the payout reverted, so this withdrawal is "
+                    f"NOT paid and stays unresolved; manual investigation required"
+                )
+            return None
+
+        # Nothing mined. A mempool entry proves nothing either way, so this lookup only
+        # reports, and today's hash is the one a retry would put back on the wire.
+        dest_web3 = self._get_destination_web3(chain_id)
+
+        async def fetch_transaction():
+            try:
+                return await dest_web3.eth.get_transaction(expected_hash)
+            except TransactionNotFound:
+                return None
+
+        try:
+            pending_tx = await self._rate_limited_call(fetch_transaction)
+        except Exception as exc:
+            logger.warning(
+                f"Could not look up pending tx for {expected_hash} on chain {chain_id}: {exc}"
+            )
+            return None
+
+        if pending_tx is not None:
+            logger.info(
+                f"Withdrawal #{index}: tx {expected_hash} in flight on chain {chain_id} with no "
+                f"receipt yet - retrying next cycle"
+            )
+
+        return None
 
     async def _catch_up_missing_broadcasts(self, chain_ids: Optional[List[int]] = None):
         """Find and broadcast any resolved-but-not-broadcast withdrawals.
@@ -126,30 +324,26 @@ class WithdrawalProcessor:
             try:
                 chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
 
-                # Get contract's next nonce (what it will use next)
-                contract_next_nonce = await self._rate_limited_call(
-                    lambda: self._contract.functions.nonces(chain_id).call()
-                )
+                nonce_state = await self._chain_nonce_state(chain_id)
+                if nonce_state is None:
+                    continue
+                contract_next_nonce, chain_latest_nonce = nonce_state
 
-                # Get current nonce on destination chain (what's been broadcast)
-                evm_address = await self._get_evm_address()
-                dest_web3 = self._get_destination_web3(chain_id)
-                chain_current_nonce = await self._rate_limited_call(
-                    lambda: dest_web3.eth.get_transaction_count(evm_address)
-                )
-
-                if contract_next_nonce <= chain_current_nonce:
+                if contract_next_nonce == chain_latest_nonce:
                     logger.info(f"{chain_name}: no missing broadcasts")
                     continue
 
-                missing_count = contract_next_nonce - chain_current_nonce
+                missing_count = contract_next_nonce - chain_latest_nonce
                 logger.info(
-                    f"{chain_name}: found {missing_count} missing broadcasts "
-                    f"(nonces {chain_current_nonce} to {contract_next_nonce - 1})"
+                    f"{chain_name}: found {missing_count} un-mined nonce(s) "
+                    f"(nonces {chain_latest_nonce} to {contract_next_nonce - 1})"
                 )
 
-                # Find and broadcast missing withdrawals
-                target_nonces = set(range(chain_current_nonce, contract_next_nonce))
+                # From "latest", not "pending": a nonce the node holds unmined is a stuck
+                # broadcast, and re-sending is how a replacement re-signed at a raised gas
+                # price gets out. Identical bytes are harmless - the node answers "already
+                # known" and `_find_broadcast_tx` reports in flight, so the next cycle retries.
+                target_nonces = set(range(chain_latest_nonce, contract_next_nonce))
                 await self._broadcast_missing_for_chain(chain_id, target_nonces)
 
             except Exception as e:
@@ -207,6 +401,8 @@ class WithdrawalProcessor:
 
             # Decode nonce from txIdentifier
             nonce = decode(["uint64"], tx_identifier)[0]
+            if nonce not in target_nonces:
+                continue
 
             # Get chain_id for this withdrawal
             token_id_bytes = result[4]
@@ -217,7 +413,7 @@ class WithdrawalProcessor:
                 logger.warning(f"Withdrawal #{index}: failed to get token context - {e}")
                 withdrawal_chain_id = 0
 
-            if withdrawal_chain_id != chain_id or nonce not in target_nonces:
+            if withdrawal_chain_id != chain_id:
                 continue
 
             # Found a missing one - broadcast it
@@ -230,14 +426,21 @@ class WithdrawalProcessor:
                     lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
                 )
                 logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
+                self._remember_broadcast(chain_id, index, tx_hash)
                 found_nonces.add(nonce)
             except Exception as exc:
-                error_str = str(exc).lower()
-                if "nonce too low" in error_str or "already known" in error_str:
-                    logger.info(f"Withdrawal #{index}: already broadcast")
+                broadcast_hash = await self._find_broadcast_tx(chain_id, index, signed_tx)
+                if broadcast_hash is not None:
+                    logger.info(f"Withdrawal #{index}: already mined, tx_hash={broadcast_hash}")
                     found_nonces.add(nonce)
                 else:
-                    logger.error(f"Withdrawal #{index}: broadcast failed - {exc}")
+                    logger.error(
+                        f"Withdrawal #{index}: broadcast failed and no successful transaction "
+                        f"matching the signed payload exists on {chain_name} - nonce {nonce} may "
+                        f"have been spent by a different transaction, leaving this withdrawal "
+                        f"unpayable: "
+                        f"{exc}"
+                    )
 
             if index > 0 and index % 100 == 0:
                 logger.info(
@@ -347,10 +550,34 @@ class WithdrawalProcessor:
 
             # Step 4: Broadcast to destination chain
             logger.info(f"Withdrawal #{index}: broadcasting to {chain_name}")
-            tx_hash = await self._rate_limited_call(
-                lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
-            )
-            logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
+            try:
+                tx_hash = await self._rate_limited_call(
+                    lambda: self.accounting_service._send_raw_transaction(chain_id, signed_tx)
+                )
+            except Exception as exc:
+                # The hash we actually sent is checked before the freshly signed one's: a
+                # setGasPrice in between re-signs to bytes that hash differently.
+                tx_hash = await self._find_broadcast_tx(chain_id, index, signed_tx)
+                if tx_hash is None:
+                    logger.error(
+                        f"Withdrawal #{index}: broadcast to {chain_name} failed and no "
+                        f"successful transaction matching the signed payload "
+                        f"({self._expected_tx_hash(signed_tx)}) exists there - leaving it "
+                        f"unresolved rather than marking it paid: {exc}"
+                    )
+                    return False
+                if tx_hash == self._expected_tx_hash(signed_tx):
+                    logger.info(
+                        f"Withdrawal #{index}: already mined on {chain_name}, tx_hash={tx_hash}"
+                    )
+                else:
+                    logger.info(
+                        f"Withdrawal #{index}: paid on {chain_name} by our earlier broadcast, "
+                        f"tx_hash={tx_hash}"
+                    )
+            else:
+                logger.info(f"Withdrawal #{index}: broadcast successful, tx_hash={tx_hash}")
+                self._remember_broadcast(chain_id, index, tx_hash)
 
             self._chain_high_water_mark[chain_id] = max(
                 self._chain_high_water_mark.get(chain_id, -1), index
@@ -358,21 +585,48 @@ class WithdrawalProcessor:
             return True
 
         except Exception as exc:
-            error_str = str(exc).lower()
             selector, error_name = decode_contract_error(exc)
-
-            if "nonce too low" in error_str or "already known" in error_str:
-                logger.info(f"Withdrawal #{index}: already broadcast to {chain_name}")
-                self._chain_high_water_mark[chain_id] = max(
-                    self._chain_high_water_mark.get(chain_id, -1), index
-                )
-                return True
-            elif selector:
+            if selector:
                 logger.error(f"Withdrawal #{index}: contract error - {error_name}")
-                return False
             else:
                 logger.error(f"Withdrawal #{index}: failed - {exc}")
-                return False
+            return False
+
+    async def _process_chain(self, chain_id: int, withdrawals: List[Dict]):
+        """Process one chain's pending withdrawals in index order.
+
+        The nonce gate runs once per chain, before anything is signed: on divergence the
+        whole chain is skipped, so no withdrawal is resolved against a nonce the
+        destination chain has already spent.
+        """
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+
+        try:
+            nonce_state = await self._chain_nonce_state(chain_id)
+        except Exception as exc:
+            logger.error(f"{chain_name}: nonce readiness check failed, skipping chain: {exc}")
+            return
+
+        if nonce_state is None:
+            logger.error(
+                f"{chain_name}: skipping {len(withdrawals)} pending withdrawal(s) - "
+                f"destination nonce check failed"
+            )
+            return
+
+        if withdrawals:
+            logger.info(f"Processing {len(withdrawals)} withdrawals for {chain_name}")
+
+        for withdrawal in withdrawals:
+            if not self._is_running:
+                return
+
+            if not await self._resolve_and_broadcast(withdrawal):
+                # Withdrawal failed - run catch-up to handle any nonce gaps,
+                # then retry on next poll cycle
+                logger.warning(f"Withdrawal failed, pausing {chain_name} processing")
+                await self._catch_up_missing_broadcasts([chain_id])
+                return
 
     async def _run_processor(self):
         """Main processing loop."""
@@ -398,22 +652,7 @@ class WithdrawalProcessor:
                     if not self._is_running:
                         break
 
-                    chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
-                    if withdrawals:
-                        logger.info(f"Processing {len(withdrawals)} withdrawals for {chain_name}")
-
-                    # Process in order for this chain
-                    for withdrawal in withdrawals:
-                        if not self._is_running:
-                            break
-
-                        success = await self._resolve_and_broadcast(withdrawal)
-                        if not success:
-                            # Withdrawal failed - run catch-up to handle any nonce gaps,
-                            # then retry on next poll cycle
-                            logger.warning(f"Withdrawal failed, pausing {chain_name} processing")
-                            await self._catch_up_missing_broadcasts([chain_id])
-                            break
+                    await self._process_chain(chain_id, withdrawals)
 
             except Exception:
                 logger.exception("Error during withdrawal processing poll")
@@ -448,6 +687,9 @@ class WithdrawalProcessor:
                 pass
 
         self._chain_high_water_mark.clear()
+        self._nonce_divergence_reported.clear()
+        self._stuck_nonce_cycles.clear()
+        self._last_broadcast_hash.clear()
         logger.info("Withdrawal processor stopped")
 
 

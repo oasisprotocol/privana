@@ -16,6 +16,41 @@ artifacts:
   container:
     runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.9.0/rofl-containers#e2e074d03ab2fbacaacb01e6d63ce093fde04e4cc620dd8804e8afbb20390525
 deployments:
+  rubetest:
+    app_id: rofl1qz20hu6qztr665w0t4d6y75fys6nq0j3xg24y0ey
+    network: testnet
+    paratime: sapphire
+    admin: easy
+    oci_repository: rofl.sh/68e77c16-1772-4704-a61e-46b5b0d40329:1787056637
+    artifacts:
+      container:
+        compose: compose.rubetest.yaml
+    trust_root:
+      height: 33528862
+      hash: 85a14586757cf1c2faf0b330061cad488ed173d213fe075f1dd19996c0b706a9
+    policy:
+      quotes:
+        pcs:
+          tcb_validity_period: 30
+          min_tcb_evaluation_data_number: 18
+          tdx: {}
+      enclaves:
+        - id: HrmgPQNWyy9pnt7g4aTJttaWRg+iI/JPOpI9X971GCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: zHfMCzeB4Kp3/BNGNEPVuhn88nY0A49MJem2ys//JbMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+      endorsements:
+        - any: {}
+      fees: endorsing_node
+      max_expiration: 3
+    secrets:
+      - name: ALCHEMY_API_KEY
+        value: pGJwa1ggx0W8WwyLtMy9DrUCxrzDHQDmd1byeEPOsoj8v2oHtW5kbmFtZVgf2cX8oK6/8yxXobeL47bCpKB++Bgd+YSjBXgJJp/zImVub25jZU9j2hhC1iug9wI0WjAOTZZldmFsdWVYJrO+lggTX3we+OuUAls0Spn/pR/msjQvPTGPDh/NPrjXuSPZMWe4
+    machines:
+      default:
+        provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
+        offer: playground_internal_m
+        permissions:
+          log.view:
+            - oasis1qpsmn7u78k9gm6jyra6zm2lu0n949pztgqpxss4n
   testnet:
     default: true
     app_id: rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y

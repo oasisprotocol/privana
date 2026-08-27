@@ -27,7 +27,7 @@ import {UPUPSUpgradeable} from "./lib/UPUPSUpgradeable.sol";
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UPUPSUpgradeable {
     /// @notice Contract version, bumped on each upgrade for tracking/verification.
-    uint64 public constant VERSION = 1;
+    uint64 public constant VERSION = 2;
 
     /// @dev Maximum entries returned by `getHistory` in a single call.
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
