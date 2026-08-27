@@ -1,5 +1,5 @@
 name: privana
-version: 1.0.2
+version: 1.0.3
 tee: tdx
 kind: container
 resources:
@@ -16,6 +16,43 @@ artifacts:
   container:
     runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.9.0/rofl-containers#e2e074d03ab2fbacaacb01e6d63ce093fde04e4cc620dd8804e8afbb20390525
 deployments:
+  mainnet:
+    app_id: rofl1qpzsmmpdl68spwd5y37s5m8znafahna9hc28retn
+    network: mainnet
+    paratime: sapphire
+    admin: privana_mainnet_bootstrap
+    oci_repository: rofl.sh/2ef1ae2d-7f04-495d-be0c-35593853dc55:1787832314
+    artifacts:
+      container:
+        compose: compose.mainnet.yaml
+    trust_root:
+      height: 31507279
+      hash: ad5012532a6592af5b3c7966f3776a4422f6ec89b858088cf46636900e117d7e
+    policy:
+      quotes:
+        pcs:
+          tcb_validity_period: 30
+          min_tcb_evaluation_data_number: 18
+          tdx: {}
+      enclaves:
+        - id: mZnMZ5kOmpu4a8HdS59y+02CWj3S7NkEQx5Nq/Ze/1cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: sSqjZ8YsyLAw8Aul6YexGw4jPidU6SZKUO54ckvIFP4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+      endorsements:
+        - any: {}
+      fees: endorsing_node
+      max_expiration: 3
+    secrets:
+      - name: ALCHEMY_API_KEY
+        value: pGJwa1gglvAnRmfV9cpskvYdv4N6RYcC4cqE9TIANnXVYOzX5H1kbmFtZVgfHbcSGIXKp9jCATOAo3AQP6Pgjs1zWE85P7XO0mk9i2Vub25jZU/JaW26BCcpA75m6HMfXHpldmFsdWVYJcWF5tMCPmRvvLwrTZoZto0xaqr0uHecEN6zs2RPlBH9YQLDBsI=
+      - name: TRANSAK_API_KEY
+        value: pGJwa1gg2fXusZnijO9/RmOhI6TsVyOSTrLb1JPdvqsus7ho9hVkbmFtZVgf6/bbKxfjH9PyEFMdkgfhN12kx4HVGY89n4SbuSOLwWVub25jZU9aKHoySwVq2+QA7MK93f1ldmFsdWVYNChoMkGv6F/kyG09EUnMRCrEAb2G08Rce1xpqRVpPuT+ZknVa39w01t3FAi7qArII4LLjp4=
+      - name: TRANSAK_API_SECRET
+        value: pGJwa1ggZ9isc3vdD7ryyePluAXBuuTVfYJviJP0fVPWugrBLihkbmFtZVgiNU3dgATgeE1Q8pY7clnNvlJ94+Clc9aTAAmgfLNTNJQdW2Vub25jZU9DkZ4BJNp+Jiynr8Ej/3dldmFsdWVYKPMuIcEfW4iEXrpWwNkbARlf3qcdwArvc1zXcnHaW7lurJzcJKLJ8Q4=
+    machines:
+      default:
+        provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
+        offer: internal_large
+        id: "0000000000000112"
   testnet:
     default: true
     app_id: rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y
@@ -36,8 +73,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: QSXsIbWzCxaR3VaeDRCyFeRIcL3178es13mZ+VZ6WgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: jpEdQw9gY2f549WOn8X+BHqQUDMS5IE0fRfABBjxvgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: Dvc/wfBV0FLSliS9a3Qv09YhjSWsq0g/cghZX1vTc6YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: xVXzODm4vnTja9yz3loGoKcJ05voNwkYVmLQAl0MUO0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node

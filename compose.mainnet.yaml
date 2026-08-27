@@ -3,8 +3,8 @@ services:
     build:
       context: .
       args:
-        - ENV_FILE=.env.testnet
-    image: "ghcr.io/oasisprotocol/privana@sha256:876da784181bae00b071b51adc532c8ce278d0e4a95cef848505c08c99f43943"
+        - ENV_FILE=.env.mainnet
+    image: "ghcr.io/oasisprotocol/privana@sha256:115ff4996e173f2a12164ad53f16d5991f2f1477fb8efce543d3b9b98e5bbaef"
     platform: linux/amd64
     environment:
       - SWEEP_STATE_DIR=/data/sweep-engine
@@ -22,7 +22,7 @@ services:
     ports:
       - "8000:8000"
     annotations:
-      net.oasis.proxy.ports.8000.custom_domain: api.testnet.privana.finance
+      net.oasis.proxy.ports.8000.custom_domain: api.privana.finance
     restart: on-failure
 
 volumes:
