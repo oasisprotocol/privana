@@ -1,0 +1,29 @@
+services:
+  privana:
+    build:
+      context: .
+      args:
+        - ENV_FILE=.env.mainnet
+    image: "ghcr.io/oasisprotocol/privana@sha256:115ff4996e173f2a12164ad53f16d5991f2f1477fb8efce543d3b9b98e5bbaef"
+    platform: linux/amd64
+    environment:
+      - SWEEP_STATE_DIR=/data/sweep-engine
+      - ONRAMP_PROVIDER
+      - TRANSAK_CLIENT_IP_HEADER
+      - ALCHEMY_API_KEY
+      - MOONPAY_API_KEY
+      - MOONPAY_SECRET_KEY
+      - MOONPAY_WEBHOOK_SECRET_KEY
+      - TRANSAK_API_KEY
+      - TRANSAK_API_SECRET
+    volumes:
+      - /run/rofl-appd.sock:/run/rofl-appd.sock
+      - sweep-engine-data:/data/sweep-engine
+    ports:
+      - "8000:8000"
+    annotations:
+      net.oasis.proxy.ports.8000.custom_domain: api.privana.finance
+    restart: on-failure
+
+volumes:
+  sweep-engine-data:
