@@ -6,7 +6,6 @@ description: "The services Privana connects to, and what each one does."
 ---
 
 # Integration Partners
----
 
 ## Live today
 
