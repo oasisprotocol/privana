@@ -46,8 +46,3 @@ so promptly.
 > service's own risks, terms and availability, which are outside Privana's
 > control.
 
----
-
-**Next:** [Underlying Technology](/underlying-technology) ·
-[Architecture Deep Dive](./deep-dive.md) ·
-[Trust Model](./trust-model.md)
