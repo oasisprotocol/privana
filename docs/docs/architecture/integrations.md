@@ -21,7 +21,6 @@ description: "The services Privana connects to, and what each one does."
 | **Midas** | Tokenised T-bill exposure (mTBILL) as a second yield strategy. |
 | **Transak** | Fiat on-ramp for funding an account with a card or bank transfer. |
 
----
 
 ## How to read this page
 
