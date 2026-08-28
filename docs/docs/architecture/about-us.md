@@ -32,9 +32,3 @@ That matters for a reason worth stating plainly: the privacy guarantee does not 
 ## Where things stand
 
 Privana is live on **testnet**. The deposit, swap and earn paths work end to end, and the smart contracts are deployed on Sapphire Testnet. Mainnet is not deployed yet, and the contracts have not completed a third-party security audit.
-
----
-
-**Next:** [How It Connects](../overview/privana-on-oasis.md) ·
-[What is a TEE?](../concepts/what-is-a-tee.md) ·
-[Trust Model](./trust-model.md)
