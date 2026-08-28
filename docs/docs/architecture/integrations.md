@@ -33,7 +33,6 @@ If you represent one of these services and would like your name or logo removed
 from this page, [get in touch](https://discord.gg/oasisprotocol) and we will do
 so promptly.
 
----
 
 > #### These are integrations, not partnerships
 >
