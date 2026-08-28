@@ -7,14 +7,17 @@ Transak as `x-user-ip`. This uses Transak's documented CDN-derived-IP pattern
 (`cf-connecting-ip`) without trusting any spoofable inbound header at the ROFL
 proxy.
 
-## Contract
+## HTTP contract
+
+The browser SDK calls this same-origin Worker route directly; the Privana
+backend does not serve it.
 
 - `POST https://app.testnet.privana.finance/__onramp-ip-attest`
 - Request: `{"intentHash": "<sha256 hex of the signed intent value>"}` — the
   raw signed intent never reaches Cloudflare.
 - Response: `{"v": 1, "ip", "iat", "exp", "nonce", "sig"}` with a 60-second
-  expiry. The SDK passes this object unchanged as `ip_attestation` in
-  `POST /onramp/session`.
+  expiry. The SDK must fetch a new claim before each `POST /onramp/session` and
+  pass it unchanged as `ip_attestation`.
 - Signed payload, shared with `src/services/transak.py`:
   `v1|{REFERRER_DOMAIN}|{intentHash}|{ip}|{iat}|{exp}|{nonce}` (HMAC-SHA256,
   lowercase hex).
@@ -42,9 +45,9 @@ enabling attested mode:
 
 ### Edge rate-limit gate
 
-Create and verify a Cloudflare zone
+Create a Cloudflare zone
 [rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/)
-before deploying this route or setting `TRANSAK_CLIENT_IP_MODE=attested`:
+before deploying the Worker, then verify it before enabling attested mode:
 
 - expression: `http.request.uri.path eq "/__onramp-ip-attest"`;
 - counting characteristic: source IP (`ip.src`), or **IP with NAT support** if
@@ -52,24 +55,12 @@ before deploying this route or setting `TRANSAK_CLIENT_IP_MODE=attested`:
 - initial limit: 5 requests per 10 seconds per characteristic;
 - action: block for 10 seconds.
 
-That path/IP/10-second configuration is available on every current Cloudflare
-plan. On Pro or higher, also scope the expression to
-`http.host eq "app.testnet.privana.finance"` (substitute the production host in
-production). On Business or higher, use **IP with NAT support** and also match
-method `POST`; lower plans should keep the portable path/IP rule. The initial
-ceiling allows short client retries while still bounding unauthenticated HMAC
-work; re-evaluate it from staging traffic before production rather than silently
-raising it.
+When supported, also match the frontend host and `POST` method. After deployment,
+verify mitigation in Cloudflare Security Events and normal access after the block
+window. The gate must run before Worker execution; a Worker-local counter is not
+a substitute.
 
-Enablement evidence is the active rule ID/configuration plus a staging probe
-that continues until mitigation is observed, appears in Cloudflare Security
-Events, and confirms mitigated requests do not invoke the Worker; verify normal
-access again after the 10-second mitigation window. Do not require an exact
-triggering request number: Cloudflare documents a short counter-update delay.
-A Worker-only counter is not a substitute because the abuse gate must run before
-Worker CPU and HMAC work.
-
-## Limits of the design (known, accepted)
+## Security notes
 
 - The `cf-worker` header check rejects honest cross-zone Worker traffic; it is
   a heuristic, not tamper-proof. The backend independently rejects the
@@ -77,5 +68,3 @@ Worker CPU and HMAC work.
 - Replay protection is a best-effort in-memory nonce cache in the one-machine
   backend; the primary controls are the 60-second window, the intent binding,
   and the per-user session rate limit.
-- A VPN user gets their VPN egress IP attested; that is the same behavior as
-  any CDN-derived IP and is acceptable to Transak.
