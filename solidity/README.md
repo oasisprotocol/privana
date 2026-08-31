@@ -282,9 +282,9 @@ Run `npx hardhat <task> --help` for parameter details.
 
 | Contract | Address |
 |----------|---------|
-| Accounting (Proxy) | TBD |
+| Accounting (Proxy) | `0x5f16C90a0F410AE4Cdb76d9964f5FFDDeE305876` |
 
-**ROFL App ID:** TBD
+**ROFL App ID:** `rofl1qpzsmmpdl68spwd5y37s5m8znafahna9hc28retn`
 
 ## Security Considerations
 
