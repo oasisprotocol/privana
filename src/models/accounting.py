@@ -672,11 +672,11 @@ class OnRampIpAttestation(BaseModel):
     sig: str = Field(..., pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("v", mode="before")
-    def _reject_bool(cls, value: object) -> object:
-        # bool is an int subclass and `True == 1`, so Literal[1] otherwise
-        # accepts `true` from the wire. Refuse it explicitly.
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
+    def _require_exact_integer(cls, value: object) -> object:
+        # Literal equality accepts True and 1.0 because both compare equal to 1.
+        # Require the exact JSON integer type promised by the Worker contract.
+        if type(value) is not int:
+            raise ValueError("must be an integer")
         return value
 
 

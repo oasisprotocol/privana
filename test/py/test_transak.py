@@ -8,7 +8,6 @@ import hmac
 import json
 import shutil
 import subprocess
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,13 +34,15 @@ CONFIG = transak.TransakConfig(
     api_base_url="https://api-stg.transak.test",
     gateway_base_url="https://gateway-stg.transak.test",
     referrer_domain="app.testnet.privana.finance",
-    client_ip_mode="header",
-    client_ip_header="x-original-user-ip",
-    ip_attestation_secret=None,
     crypto_currency_code="USDC",
     network="base",
     chain_id=84532,
     token_address=TOKEN_ADDRESS,
+)
+HEADER_SESSION_IP_CONFIG = transak.TransakSessionIpConfig(
+    mode="header",
+    header="x-original-user-ip",
+    attestation_secret=None,
 )
 
 
@@ -101,8 +102,9 @@ def test_load_config_is_lazy_fail_closed_and_secret_safe(monkeypatch) -> None:
         "transak_api_base_url": CONFIG.api_base_url,
         "transak_gateway_base_url": CONFIG.gateway_base_url,
         "transak_referrer_domain": CONFIG.referrer_domain,
-        "transak_client_ip_mode": None,
-        "transak_client_ip_header": CONFIG.client_ip_header,
+        # Session-only settings must not gate intent creation or order recovery.
+        "transak_client_ip_mode": "attested",
+        "transak_client_ip_header": None,
         "transak_ip_attestation_secret": None,
         "transak_crypto_currency_code": CONFIG.crypto_currency_code,
         "transak_network": CONFIG.network,
@@ -134,8 +136,6 @@ def test_load_config_is_lazy_fail_closed_and_secret_safe(monkeypatch) -> None:
         ("transak_referrer_domain", "127.0.0.1"),
         ("transak_referrer_domain", "127.1"),
         ("transak_referrer_domain", "|"),
-        ("transak_client_ip_header", "bad header"),
-        ("transak_client_ip_mode", "bogus"),
         ("transak_crypto_currency_code", "USDC,ETH"),
         ("transak_network", ""),
         ("transak_api_secret", "secret\u2603"),
@@ -168,11 +168,10 @@ def test_client_ip_rejects_missing_ambiguous_or_invalid(values) -> None:
 
 
 ATTESTATION_SECRET = "attestation-shared-secret-0123456789abcdef"
-ATTESTED_CONFIG = replace(
-    CONFIG,
-    client_ip_mode="attested",
-    client_ip_header=None,
-    ip_attestation_secret=ATTESTATION_SECRET,
+ATTESTED_SESSION_IP_CONFIG = transak.TransakSessionIpConfig(
+    mode="attested",
+    header=None,
+    attestation_secret=ATTESTATION_SECRET,
 )
 ATTESTATION_NOW = 1_800_000_000
 ATTESTATION_TRANSACTION_ID = "signed-intent-value"
@@ -192,7 +191,7 @@ def _attestation(
     expires_at: int = ATTESTATION_NOW + 60,
     nonce: str = "0123456789abcdef0123456789abcdef",
     secret: str = ATTESTATION_SECRET,
-    referrer_domain: str = ATTESTED_CONFIG.referrer_domain,
+    referrer_domain: str = CONFIG.referrer_domain,
 ) -> dict:
     intent_hash = hashlib.sha256(transaction_id.encode()).hexdigest()
     payload = "|".join(
@@ -220,7 +219,7 @@ def _worker_input(**overrides) -> dict:
         "body": {"intentHash": intent_hash},
         "env": {
             "ATTESTATION_SECRET": ATTESTATION_SECRET,
-            "REFERRER_DOMAIN": ATTESTED_CONFIG.referrer_domain,
+            "REFERRER_DOMAIN": CONFIG.referrer_domain,
         },
         "nowMs": ATTESTATION_NOW * 1000,
         "nonceHex": ATTESTATION_NONCE,
@@ -271,7 +270,7 @@ def test_worker_python_ip_attestation_conformance(observed_ip, canonical_ip) -> 
     payload = "|".join(
         (
             "v1",
-            ATTESTED_CONFIG.referrer_domain,
+            CONFIG.referrer_domain,
             intent_hash,
             claim["ip"],
             str(claim["iat"]),
@@ -292,7 +291,8 @@ def test_worker_python_ip_attestation_conformance(observed_ip, canonical_ip) -> 
             nonce=claim["nonce"],
             signature=claim["sig"],
             transaction_id=ATTESTATION_TRANSACTION_ID,
-            config=ATTESTED_CONFIG,
+            config=CONFIG,
+            session_ip_config=ATTESTED_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW,
         )
         == claim["ip"]
@@ -324,7 +324,7 @@ def test_worker_python_ip_attestation_conformance(observed_ip, canonical_ip) -> 
             {
                 "env": {
                     "ATTESTATION_SECRET": "a" * 31 + " ",
-                    "REFERRER_DOMAIN": ATTESTED_CONFIG.referrer_domain,
+                    "REFERRER_DOMAIN": CONFIG.referrer_domain,
                 }
             },
             503,
@@ -395,26 +395,15 @@ def test_worker_rejects_noncanonical_or_ambiguous_inputs(overrides, expected_sta
     assert result["status"] == expected_status, result
 
 
-def test_attested_mode_config_is_mode_aware_fail_closed(monkeypatch) -> None:
+def test_session_ip_config_is_mode_aware_fail_closed(monkeypatch) -> None:
     values = {
-        "transak_api_key": CONFIG.api_key,
-        "transak_api_secret": CONFIG.api_secret,
-        "transak_api_base_url": CONFIG.api_base_url,
-        "transak_gateway_base_url": CONFIG.gateway_base_url,
-        "transak_referrer_domain": CONFIG.referrer_domain,
         "transak_client_ip_mode": "attested",
         "transak_client_ip_header": None,
         "transak_ip_attestation_secret": ATTESTATION_SECRET,
-        "transak_crypto_currency_code": CONFIG.crypto_currency_code,
-        "transak_network": CONFIG.network,
-        "transak_chain_id": CONFIG.chain_id,
-        "transak_token_address": CONFIG.token_address,
     }
     monkeypatch.setattr(transak, "load_settings", lambda: SimpleNamespace(**values))
-    loaded = transak.load_transak_config()
-    assert loaded.client_ip_mode == "attested"
-    assert loaded.client_ip_header is None
-    assert loaded.ip_attestation_secret == ATTESTATION_SECRET
+    loaded = transak.load_transak_session_ip_config()
+    assert loaded == ATTESTED_SESSION_IP_CONFIG
     assert ATTESTATION_SECRET not in repr(loaded)
 
     for field, bad_value in [
@@ -428,7 +417,23 @@ def test_attested_mode_config_is_mode_aware_fail_closed(monkeypatch) -> None:
             transak, "load_settings", lambda invalid=invalid: SimpleNamespace(**invalid)
         )
         with pytest.raises(onramp_intent.OnRampNotConfiguredError):
-            transak.load_transak_config()
+            transak.load_transak_session_ip_config()
+
+    for field, bad_value in [
+        ("transak_client_ip_header", "bad header"),
+        ("transak_client_ip_mode", "bogus"),
+    ]:
+        invalid = {
+            **values,
+            "transak_client_ip_mode": None,
+            "transak_client_ip_header": HEADER_SESSION_IP_CONFIG.header,
+            field: bad_value,
+        }
+        monkeypatch.setattr(
+            transak, "load_settings", lambda invalid=invalid: SimpleNamespace(**invalid)
+        )
+        with pytest.raises(onramp_intent.OnRampNotConfiguredError):
+            transak.load_transak_session_ip_config()
 
 
 @pytest.mark.parametrize(
@@ -442,7 +447,8 @@ def test_ip_attestation_accepts_valid_global_claims(ip, expected) -> None:
     claim = _attestation(ip)
     attested = transak.verify_ip_attestation(
         transaction_id=ATTESTATION_TRANSACTION_ID,
-        config=ATTESTED_CONFIG,
+        config=CONFIG,
+        session_ip_config=ATTESTED_SESSION_IP_CONFIG,
         now=ATTESTATION_NOW + 1,
         **claim,
     )
@@ -459,7 +465,8 @@ def test_ip_attestation_binds_intent_domain_and_secret() -> None:
         with pytest.raises(onramp_intent.OnRampError, match="Invalid client IP attestation"):
             transak.verify_ip_attestation(
                 transaction_id=ATTESTATION_TRANSACTION_ID,
-                config=ATTESTED_CONFIG,
+                config=CONFIG,
+                session_ip_config=ATTESTED_SESSION_IP_CONFIG,
                 now=ATTESTATION_NOW + 1,
                 **claim,
             )
@@ -494,7 +501,8 @@ def test_ip_attestation_enforces_short_single_window(overrides, message) -> None
     with pytest.raises(onramp_intent.OnRampError, match=message):
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,
-            config=ATTESTED_CONFIG,
+            config=CONFIG,
+            session_ip_config=ATTESTED_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW,
             **claim,
         )
@@ -524,7 +532,8 @@ def test_ip_attestation_requires_direct_global_ip(ip, message) -> None:
     with pytest.raises(onramp_intent.OnRampError, match=message):
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,
-            config=ATTESTED_CONFIG,
+            config=CONFIG,
+            session_ip_config=ATTESTED_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW + 1,
             **claim,
         )
@@ -535,7 +544,8 @@ def test_ip_attestation_rejects_malformed_and_wrong_version_claims() -> None:
     with pytest.raises(onramp_intent.OnRampError, match="version"):
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,
-            config=ATTESTED_CONFIG,
+            config=CONFIG,
+            session_ip_config=ATTESTED_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW + 1,
             **{**base, "version": 2},
         )
@@ -551,7 +561,8 @@ def test_ip_attestation_rejects_malformed_and_wrong_version_claims() -> None:
         with pytest.raises(onramp_intent.OnRampError, match="Invalid client IP attestation"):
             transak.verify_ip_attestation(
                 transaction_id=ATTESTATION_TRANSACTION_ID,
-                config=ATTESTED_CONFIG,
+                config=CONFIG,
+                session_ip_config=ATTESTED_SESSION_IP_CONFIG,
                 now=ATTESTATION_NOW + 1,
                 **{**base, field: bad_value},
             )
@@ -561,7 +572,8 @@ def test_ip_attestation_is_single_use_and_bounded() -> None:
     claim = _attestation("8.8.8.8")
     first = transak.verify_ip_attestation(
         transaction_id=ATTESTATION_TRANSACTION_ID,
-        config=ATTESTED_CONFIG,
+        config=CONFIG,
+        session_ip_config=ATTESTED_SESSION_IP_CONFIG,
         now=ATTESTATION_NOW + 1,
         **claim,
     )
@@ -570,7 +582,8 @@ def test_ip_attestation_is_single_use_and_bounded() -> None:
     with pytest.raises(onramp_intent.OnRampError, match="already used"):
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,
-            config=ATTESTED_CONFIG,
+            config=CONFIG,
+            session_ip_config=ATTESTED_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW + 1,
             **replay,
         )
@@ -583,7 +596,8 @@ def test_ip_attestation_is_single_use_and_bounded() -> None:
     with pytest.raises(onramp_intent.OnRampError, match="could not be recorded"):
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,
-            config=ATTESTED_CONFIG,
+            config=CONFIG,
+            session_ip_config=ATTESTED_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW + 1,
             **fresh,
         )
@@ -592,7 +606,8 @@ def test_ip_attestation_is_single_use_and_bounded() -> None:
     transak._ip_attestation_nonces["stale" + "0" * 27] = ATTESTATION_NOW - 1
     transak.verify_ip_attestation(
         transaction_id=ATTESTATION_TRANSACTION_ID,
-        config=ATTESTED_CONFIG,
+        config=CONFIG,
+        session_ip_config=ATTESTED_SESSION_IP_CONFIG,
         now=ATTESTATION_NOW + 1,
         **fresh,
     )
@@ -605,6 +620,7 @@ def test_ip_attestation_requires_attested_mode() -> None:
         transak.verify_ip_attestation(
             transaction_id=ATTESTATION_TRANSACTION_ID,
             config=CONFIG,
+            session_ip_config=HEADER_SESSION_IP_CONFIG,
             now=ATTESTATION_NOW + 1,
             **claim,
         )

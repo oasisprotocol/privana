@@ -386,6 +386,7 @@ def test_attested_session_rejects_invalid_claim_fields(monkeypatch, tmp_path) ->
     intent = _create_intent(client)
     for mutation in (
         {"v": True},
+        {"v": 1.0},
         {"iat": str(int(time.time()))},
         {"exp": float(int(time.time()) + 60)},
         {"nonce": "AB" * 16},
@@ -400,13 +401,37 @@ def test_attested_session_rejects_invalid_claim_fields(monkeypatch, tmp_path) ->
     provider_service.create_widget_session.assert_not_awaited()
 
 
-def test_attested_mode_keeps_intent_and_pending_available(monkeypatch, tmp_path) -> None:
-    client, _accounting, provider_service = _make_attested_client(monkeypatch, tmp_path)
+def test_attested_mode_without_secret_keeps_intent_and_pending_available(
+    monkeypatch, tmp_path
+) -> None:
+    client, _accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRANSAK_CLIENT_IP_MODE", "attested")
+    monkeypatch.delenv("TRANSAK_CLIENT_IP_HEADER")
+    monkeypatch.delenv("TRANSAK_IP_ATTESTATION_SECRET", raising=False)
+    src.config._settings = None
+
     intent = _create_intent(client)
+    provider_service.get_orders_by_partner_order_id.return_value = [
+        _order(intent["transaction_id"])
+    ]
     provider_service.get_orders_by_wallet.return_value = []
-    pending = client.get("/v1/accounting/onramp/pending")
+    pending = client.get(
+        "/v1/accounting/onramp/pending",
+        params={"externalTransactionId": intent["transaction_id"]},
+    )
+    session = client.post(
+        "/v1/accounting/onramp/session",
+        json={
+            "transaction_id": intent["transaction_id"],
+            "ip_attestation": _ip_attestation(intent["transaction_id"]),
+        },
+    )
+
     assert pending.status_code == 200
-    assert intent["transaction_id"]
+    assert pending.json()["pending"][0]["provider"] == "transak"
+    assert session.status_code == 503
+    provider_service.get_orders_by_partner_order_id.assert_awaited_once()
+    provider_service.create_widget_session.assert_not_awaited()
 
 
 def test_header_mode_ignores_attestation_blob(monkeypatch, tmp_path) -> None:

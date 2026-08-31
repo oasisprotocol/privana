@@ -94,9 +94,6 @@ class TransakConfig:
     api_base_url: str
     gateway_base_url: str
     referrer_domain: str
-    client_ip_mode: str
-    client_ip_header: str | None
-    ip_attestation_secret: str | None
     crypto_currency_code: str
     network: str
     chain_id: int
@@ -112,13 +109,22 @@ class TransakConfig:
 
 
 @dataclass(frozen=True, repr=False)
+class TransakSessionIpConfig:
+    """Trusted client-IP source required only when creating a widget session."""
+
+    mode: str
+    header: str | None
+    attestation_secret: str | None
+
+
+@dataclass(frozen=True, repr=False)
 class _AccessToken:
     value: str
     expires_at: int
 
 
 def load_transak_config() -> TransakConfig:
-    """Return validated Transak settings without making application startup depend on them."""
+    """Return validated base provider settings without making startup depend on them."""
 
     settings = load_settings()
     api_key = _required_setting(settings.transak_api_key)
@@ -126,11 +132,6 @@ def load_transak_config() -> TransakConfig:
     api_base_url = _https_base_url(settings.transak_api_base_url)
     gateway_base_url = _https_base_url(settings.transak_gateway_base_url)
     referrer_domain = _referrer_domain(settings.transak_referrer_domain)
-    client_ip_mode, client_ip_header, ip_attestation_secret = _client_ip_source(
-        mode=settings.transak_client_ip_mode,
-        header=settings.transak_client_ip_header,
-        secret=settings.transak_ip_attestation_secret,
-    )
     crypto_currency_code = _provider_code(settings.transak_crypto_currency_code)
     network = _provider_code(settings.transak_network)
     chain_id = settings.transak_chain_id
@@ -150,13 +151,26 @@ def load_transak_config() -> TransakConfig:
         api_base_url=api_base_url,
         gateway_base_url=gateway_base_url,
         referrer_domain=referrer_domain,
-        client_ip_mode=client_ip_mode,
-        client_ip_header=client_ip_header,
-        ip_attestation_secret=ip_attestation_secret,
         crypto_currency_code=crypto_currency_code,
         network=network,
         chain_id=chain_id,
         token_address=Web3.to_checksum_address(token_address),
+    )
+
+
+def load_transak_session_ip_config() -> TransakSessionIpConfig:
+    """Return the trusted client-IP source required only for session creation."""
+
+    settings = load_settings()
+    mode, header, attestation_secret = _client_ip_source(
+        mode=settings.transak_client_ip_mode,
+        header=settings.transak_client_ip_header,
+        secret=settings.transak_ip_attestation_secret,
+    )
+    return TransakSessionIpConfig(
+        mode=mode,
+        header=header,
+        attestation_secret=attestation_secret,
     )
 
 
@@ -224,6 +238,7 @@ def verify_ip_attestation(
     signature: str,
     transaction_id: str,
     config: TransakConfig,
+    session_ip_config: TransakSessionIpConfig,
     now: float | None = None,
 ) -> str:
     """Verify one edge-signed client-IP claim and return the attested IP.
@@ -232,8 +247,8 @@ def verify_ip_attestation(
     edge-observed IP, and a short validity window. Every failure is fail-closed.
     """
 
-    secret = config.ip_attestation_secret
-    if config.client_ip_mode != TRANSAK_CLIENT_IP_MODE_ATTESTED or not secret:
+    secret = session_ip_config.attestation_secret
+    if session_ip_config.mode != TRANSAK_CLIENT_IP_MODE_ATTESTED or not secret:
         raise OnRampNotConfiguredError("Transak on-ramp is not configured")
     if version != TRANSAK_IP_ATTESTATION_VERSION:
         raise OnRampError("Unsupported client IP attestation version")
@@ -828,11 +843,10 @@ def _client_ip_source(
     header: str | None,
     secret: str | None,
 ) -> tuple[str, str | None, str | None]:
-    """Resolve the session client-IP source without gating the rest of the config.
+    """Resolve session-only client-IP configuration.
 
-    An unset mode preserves the original header-only deployments. Each mode
-    requires only its own input, so intent creation and order recovery keep
-    working when the deployment switches modes.
+    An unset mode preserves the original header-only deployments. Provider
+    intent creation and order recovery deliberately do not call this loader.
     """
 
     resolved = mode.strip().lower() if isinstance(mode, str) and mode.strip() else None
@@ -1097,12 +1111,14 @@ __all__ = [
     "TransakAPIError",
     "TransakConfig",
     "TransakRateLimitError",
+    "TransakSessionIpConfig",
     "TransakService",
     "TransakWebhookVerificationError",
     "client_ip_from_values",
     "create_transak_intent",
     "get_transak_service",
     "load_transak_config",
+    "load_transak_session_ip_config",
     "pending_records_from_transak_orders",
     "transak_order_to_onramp_record",
     "transak_webhook_log_summary",
