@@ -82,6 +82,21 @@ async def test_process_native_deposit(processor, mock_verifier, mock_sweep_engin
 
 
 @pytest.mark.asyncio
+async def test_reject_unconfigured_chain(processor):
+    """A chain with no CHAIN_CONFIGS entry is rejected before any verify/sweep."""
+    with pytest.raises(ValueError, match="Unsupported chain_id"):
+        await processor.process_deposit(
+            chain_type="evm",
+            chain_id=1234567,
+            tx_hash="0x" + "cc" * 32,
+            amount=ONE_ETH,
+            log_index=0,
+            version=0,
+            auth=PRIVATE_READ_AUTH,
+        )
+
+
+@pytest.mark.asyncio
 async def test_reject_gas_funding_tx(processor, mock_verifier, mock_sweep_engine):
     """Gas funding txs must not be claimable as deposits."""
     gas_tx_hash = "0x" + "ff" * 32

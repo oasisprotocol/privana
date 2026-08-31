@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.clients.rofl import TransactionRevertedError
-from src.services.sweep_engine import SweepEngine, SweepRecord, SweepState
+from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI
+from src.services.sweep_engine import (
+    SweepEngine,
+    SweepRecord,
+    SweepState,
+)
 
 L2_FEE_PATCH = "src.services.sweep_engine.estimate_l1_data_fee"
 
@@ -406,9 +411,10 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
         )
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=False)
-    # gas_amount = static 200_000_000_000_000 + l1_fee 50_000_000_000_000
+    # gas_price = max(1.25 * 1 gwei base fee, 1 gwei rpc, floor) = 1.25 gwei;
+    # gas_amount = 21k gas * 1.25 gwei * 2 + l1_fee, under the 84532 cap
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
-    assert call_kwargs.kwargs["gas_amount"] == 200_000_000_000_000 + l1_fee
+    assert call_kwargs.kwargs["gas_amount"] == 21_000 * 1_250_000_000 * 2 + l1_fee
 
 
 @pytest.mark.asyncio
@@ -460,8 +466,29 @@ async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
         )
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=True)
+    # Derived amount (65k gas * 1.25 gwei * 2 + l1_fee = 242.5e12) exceeds the
+    # 84532 cap, so funding is clamped to GAS_FUNDING_AMOUNT_WEI.
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
-    assert call_kwargs.kwargs["gas_amount"] == 200_000_000_000_000 + l1_fee
+    assert call_kwargs.kwargs["gas_amount"] == 200_000_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_safe_gas_price_edge_signals(engine):
+    """Explicit-null baseFeePerGas is normalized; no signal at all raises."""
+    floor = MIN_SWEEP_GAS_PRICE_WEI[8453]
+    w3 = AsyncMock()
+
+    # Explicit null baseFeePerGas must not TypeError on None * 5 // 4.
+    w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": None})
+    w3.eth.gas_price = _AwaitableValue(1)
+    assert await engine._get_safe_gas_price(w3, 8453) == floor
+
+    # Base fee and RPC both zero: raise rather than broadcast a guessed price
+    # that may never mine and wedge the shared gas-tank lock.
+    w3.eth.get_block = AsyncMock(return_value={})
+    w3.eth.gas_price = _AwaitableValue(0)
+    with pytest.raises(ValueError, match="no gas price signal"):
+        await engine._get_safe_gas_price(w3, 8453)
 
 
 def test_persist_error_skips_record_with_broadcast_sweep_tx(engine):

@@ -224,10 +224,16 @@ ChainConfig(
     finality_depth=15,                            # block confirmations required
     min_deposit_native_wei=1_000_000_000_000_000, # 0.001 ETH
     min_deposit_erc20_wei=1_000_000,              # 1 USDC (6 decimals)
-    gas_funding_amount_wei=200_000_000_000_000,   # ~65k gas * 3 gwei
+    gas_funding_amount_wei=200_000_000_000_000,   # cap on per-sweep gas funding
+    min_sweep_gas_price_wei=100_000_000,          # gas-price floor (bad-RPC backstop)
     l2_type=L2Type.OP_STACK,                      # for L1-data-fee estimation
 )
 ```
+
+The amount actually transferred per sweep is derived from the live gas price
+(sweep gas limit × price × `GAS_FUNDING_HEADROOM` + measured L1 data fee) and
+clamped to `gas_funding_amount_wei`. The sweep gas price itself is
+`max(1.25 × base fee, eth_gasPrice, min_sweep_gas_price_wei)`.
 
 Adding a new chain is a single `CHAIN_CONFIGS` entry — no parallel dicts to keep in sync.
 

@@ -11,6 +11,17 @@ class L2Type(StrEnum):
     ARBITRUM = "arbitrum"
 
 
+# Sweep tx gas limits, matching gasLimitNativeSweep/gasLimitERC20Sweep in
+# EVMSignerAndVerifier.sol
+SWEEP_GAS_LIMIT_NATIVE = 21_000
+SWEEP_GAS_LIMIT_ERC20 = 65_000
+GAS_FUNDING_GAS_LIMIT = 21_000
+
+# Gas funding covers this multiple of the expected sweep cost; the sweep
+# re-prices after funding confirms, so 1x has no room for an upward move.
+GAS_FUNDING_HEADROOM = 2
+
+
 @dataclass(frozen=True)
 class ChainConfig:
     """All per-chain deposit and sweep settings in one place.
@@ -22,7 +33,11 @@ class ChainConfig:
     finality_depth: int
     min_deposit_native_wei: int
     min_deposit_erc20_wei: int
+    # Cap on per-sweep gas funding; the actual amount is derived from the live
+    # gas price in SweepEngine.
     gas_funding_amount_wei: int
+    # Gas-price floor, set per chain: backstop for a bad RPC, not a pricing knob.
+    min_sweep_gas_price_wei: int
     l2_type: L2Type = L2Type.NONE
     # Deposit discovery (GET /deposits/pending) scan bounds, in blocks.
     # Defaults suit ~12s blocks; override per chain for faster block times.
@@ -46,6 +61,19 @@ class ChainConfig:
             )
         if self.discovery_scan_chunk_blocks <= 0:
             raise ValueError(f"chain {self.chain_id}: discovery_scan_chunk_blocks must be positive")
+        if self.min_sweep_gas_price_wei <= 0:
+            raise ValueError(f"chain {self.chain_id}: min_sweep_gas_price_wei must be positive")
+        # Cap must cover a floor-priced ERC-20 sweep at the funding headroom the
+        # sweep engine uses (the L1 fee is added on top at runtime).
+        floor_sweep_cost = (
+            SWEEP_GAS_LIMIT_ERC20 * self.min_sweep_gas_price_wei * GAS_FUNDING_HEADROOM
+        )
+        if self.gas_funding_amount_wei < floor_sweep_cost:
+            raise ValueError(
+                f"chain {self.chain_id}: gas_funding_amount_wei "
+                f"({self.gas_funding_amount_wei}) must cover a floor-priced ERC-20 "
+                f"sweep ({floor_sweep_cost})"
+            )
 
 
 # ─── Chain definitions (single source of truth) ────────────────────────
@@ -56,7 +84,8 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         finality_depth=15,  # Base Sepolia (OP Stack)
         min_deposit_native_wei=1_000_000_000_000_000,  # 0.001 ETH
         min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
-        gas_funding_amount_wei=200_000_000_000_000,  # 0.0002 ETH (~65k gas * 3 gwei)
+        gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 ETH
+        min_sweep_gas_price_wei=100_000_000,  # 0.1 gwei
         l2_type=L2Type.OP_STACK,
         discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
         discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
@@ -66,16 +95,41 @@ CHAIN_CONFIGS: Dict[int, ChainConfig] = {
         finality_depth=2,  # Ethereum Sepolia Testnet/Localnet UX
         min_deposit_native_wei=50_000_000_000_000_000,  # 0.05 ETH
         min_deposit_erc20_wei=50_000_000,  # ERC-20 base-unit floor (token decimals vary)
-        gas_funding_amount_wei=2_000_000_000_000_000,  # 0.002 ETH (~65k gas * 30 gwei)
+        gas_funding_amount_wei=2_000_000_000_000_000,  # cap: 0.002 ETH
+        min_sweep_gas_price_wei=100_000_000,  # 0.1 gwei
+    ),
+    8453: ChainConfig(
+        chain_id=8453,
+        finality_depth=15,  # Base (OP Stack), ~30s at 2s blocks
+        min_deposit_native_wei=2_000_000_000_000_000,  # 0.002 ETH
+        min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
+        gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 ETH
+        min_sweep_gas_price_wei=5_000_000,  # Base's pinned minimum base fee
+        l2_type=L2Type.OP_STACK,
+        discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
+        discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
+    ),
+    1: ChainConfig(
+        chain_id=1,
+        finality_depth=32,  # one epoch, ~6.4min at 12s blocks
+        min_deposit_native_wei=2_000_000_000_000_000,  # 0.002 ETH
+        min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
+        gas_funding_amount_wei=1_000_000_000_000_000,  # cap: 0.001 ETH, funds an ERC-20 sweep up to ~7.7 gwei
+        min_sweep_gas_price_wei=100_000_000,  # 0.1 gwei
+    ),
+    999: ChainConfig(
+        chain_id=999,
+        finality_depth=10,  # HyperBFT finality is sub-second; margin for RPC lag
+        min_deposit_native_wei=50_000_000_000_000_000,  # 0.05 HYPE
+        min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
+        gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 HYPE
+        min_sweep_gas_price_wei=100_000_000,  # 0.1 gwei
+        discovery_lookback_blocks=3_600,  # ~1h at 1s small blocks
+        discovery_max_lookback_blocks=86_400,  # ~24h at 1s small blocks
     ),
 }
 
 DEFAULT_FINALITY_DEPTH = 32
-
-# Gas limits for sweep transactions (chain-independent)
-SWEEP_GAS_LIMIT_NATIVE = 21_000
-SWEEP_GAS_LIMIT_ERC20 = 65_000
-GAS_FUNDING_GAS_LIMIT = 21_000
 
 # ERC20 Transfer event topic
 TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -91,6 +145,9 @@ MIN_DEPOSIT_ERC20_WEI: Dict[int, int] = {
 }
 GAS_FUNDING_AMOUNT_WEI: Dict[int, int] = {
     c.chain_id: c.gas_funding_amount_wei for c in CHAIN_CONFIGS.values()
+}
+MIN_SWEEP_GAS_PRICE_WEI: Dict[int, int] = {
+    c.chain_id: c.min_sweep_gas_price_wei for c in CHAIN_CONFIGS.values()
 }
 
 
