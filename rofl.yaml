@@ -1,5 +1,5 @@
 name: privana
-version: 1.0.3
+version: 1.0.4
 tee: tdx
 kind: container
 resources:
@@ -35,8 +35,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: mZnMZ5kOmpu4a8HdS59y+02CWj3S7NkEQx5Nq/Ze/1cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: sSqjZ8YsyLAw8Aul6YexGw4jPidU6SZKUO54ckvIFP4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: pf1C/ExGqAxy3FefhNArHTvK5iH6+inSGfz1j7rdFQMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 4rycmB0oYjNsd7yXDKluSm1cx94WqIXyodcK6VTwAhIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -73,8 +73,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: Dvc/wfBV0FLSliS9a3Qv09YhjSWsq0g/cghZX1vTc6YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: xVXzODm4vnTja9yz3loGoKcJ05voNwkYVmLQAl0MUO0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: KnopR4SDqXC4L/iGrhaL9rrZQI2hU3H7WtMJ8jdkaRgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: yUsIMzsFJd4E/SxhyTE40lFVLfuSW0JGj0+nvfpyG3oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -108,4 +108,4 @@ deployments:
           log.view:
             - oasis1qrrvz7pw8eysww22qzutnaufppam0avuduuxnq2f
 tooling:
-  version: 0.19.1
+  version: 0.20.0
