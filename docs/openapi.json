@@ -187,6 +187,16 @@
       "CreateOnRampSessionRequest": {
         "description": "Request a short-lived session for a signed on-ramp intent.",
         "properties": {
+          "ip_attestation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OnRampIpAttestation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "transaction_id": {
             "maxLength": 512,
             "minLength": 1,
@@ -797,6 +807,53 @@
           "signature"
         ],
         "title": "ModifyLockRequest",
+        "type": "object"
+      },
+      "OnRampIpAttestation": {
+        "additionalProperties": false,
+        "description": "Edge-signed client-IP claim for deployments using attested IP mode.",
+        "properties": {
+          "exp": {
+            "exclusiveMinimum": 0.0,
+            "title": "Exp",
+            "type": "integer"
+          },
+          "iat": {
+            "exclusiveMinimum": 0.0,
+            "title": "Iat",
+            "type": "integer"
+          },
+          "ip": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Ip",
+            "type": "string"
+          },
+          "nonce": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Nonce",
+            "type": "string"
+          },
+          "sig": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sig",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "title": "V",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "v",
+          "ip",
+          "iat",
+          "exp",
+          "nonce",
+          "sig"
+        ],
+        "title": "OnRampIpAttestation",
         "type": "object"
       },
       "OnRampRecord": {

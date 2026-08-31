@@ -57,6 +57,8 @@ class Settings:
     transak_gateway_base_url: str | None
     transak_referrer_domain: str | None
     transak_client_ip_header: str | None
+    transak_client_ip_mode: str | None
+    transak_ip_attestation_secret: str | None
     transak_crypto_currency_code: str | None
     transak_network: str | None
     transak_chain_id: int | None

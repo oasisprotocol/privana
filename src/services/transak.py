@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -40,12 +42,31 @@ TRANSAK_MAX_RESPONSE_BYTES = 1024 * 1024
 TRANSAK_MAX_WIDGET_URL_BYTES = 8192
 TRANSAK_MAX_WEBHOOK_JWT_BYTES = 256 * 1024
 
+TRANSAK_CLIENT_IP_MODE_HEADER = "header"
+TRANSAK_CLIENT_IP_MODE_ATTESTED = "attested"
+TRANSAK_IP_ATTESTATION_VERSION = 1
+TRANSAK_IP_ATTESTATION_MAX_WINDOW_SECONDS = 90
+TRANSAK_IP_ATTESTATION_MAX_CLOCK_SKEW_SECONDS = 30
+TRANSAK_IP_ATTESTATION_MIN_SECRET_LENGTH = 32
+# Best-effort in-memory replay bound for the one-machine/one-worker deployment.
+TRANSAK_IP_ATTESTATION_MAX_NONCES = 10_000
+
+# Cloudflare rewrites CF-Connecting-IP to this range for cross-zone Worker
+# subrequests; a claim carrying it was not minted for a direct browser request.
+_CF_WORKER_SOURCE_NETWORK = ipaddress.ip_network("2a06:98c0::/29")
+_IP_ATTESTATION_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+_IP_ATTESTATION_SIG_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 _MAX_PROVIDER_TEXT_BYTES = 16 * 1024
 _MAX_DISPLAY_VALUE_BYTES = 256
 _MAX_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z
 _HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _PROVIDER_CODE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,31}\Z")
+_REFERRER_DOMAIN_PATTERN = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z"
+)
 _TX_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}\Z")
 _EXACT_ORDER_NOT_FOUND_MESSAGE = "Invalid partnerOrderId or order not found"
 
@@ -73,7 +94,6 @@ class TransakConfig:
     api_base_url: str
     gateway_base_url: str
     referrer_domain: str
-    client_ip_header: str
     crypto_currency_code: str
     network: str
     chain_id: int
@@ -89,13 +109,22 @@ class TransakConfig:
 
 
 @dataclass(frozen=True, repr=False)
+class TransakSessionIpConfig:
+    """Trusted client-IP source required only when creating a widget session."""
+
+    mode: str
+    header: str | None
+    attestation_secret: str | None
+
+
+@dataclass(frozen=True, repr=False)
 class _AccessToken:
     value: str
     expires_at: int
 
 
 def load_transak_config() -> TransakConfig:
-    """Return validated Transak settings without making application startup depend on them."""
+    """Return validated base provider settings without making startup depend on them."""
 
     settings = load_settings()
     api_key = _required_setting(settings.transak_api_key)
@@ -103,7 +132,6 @@ def load_transak_config() -> TransakConfig:
     api_base_url = _https_base_url(settings.transak_api_base_url)
     gateway_base_url = _https_base_url(settings.transak_gateway_base_url)
     referrer_domain = _referrer_domain(settings.transak_referrer_domain)
-    client_ip_header = _header_name(settings.transak_client_ip_header)
     crypto_currency_code = _provider_code(settings.transak_crypto_currency_code)
     network = _provider_code(settings.transak_network)
     chain_id = settings.transak_chain_id
@@ -123,11 +151,26 @@ def load_transak_config() -> TransakConfig:
         api_base_url=api_base_url,
         gateway_base_url=gateway_base_url,
         referrer_domain=referrer_domain,
-        client_ip_header=client_ip_header,
         crypto_currency_code=crypto_currency_code,
         network=network,
         chain_id=chain_id,
         token_address=Web3.to_checksum_address(token_address),
+    )
+
+
+def load_transak_session_ip_config() -> TransakSessionIpConfig:
+    """Return the trusted client-IP source required only for session creation."""
+
+    settings = load_settings()
+    mode, header, attestation_secret = _client_ip_source(
+        mode=settings.transak_client_ip_mode,
+        header=settings.transak_client_ip_header,
+        secret=settings.transak_ip_attestation_secret,
+    )
+    return TransakSessionIpConfig(
+        mode=mode,
+        header=header,
+        attestation_secret=attestation_secret,
     )
 
 
@@ -166,6 +209,103 @@ def client_ip_from_values(values: Iterable[str], *, header_name: str) -> str:
         return ipaddress.ip_address(value).compressed
     except ValueError as exc:
         raise OnRampError(f"Invalid trusted client IP header {header_name}") from exc
+
+
+# nonce -> attestation expiry; pruned on insert. Replay protection is a
+# best-effort bound for the one-machine/one-worker deployment; the short
+# expiry, intent binding, and per-user rate limit are the primary controls.
+_ip_attestation_nonces: dict[str, int] = {}
+
+
+def _reserve_ip_attestation_nonce(nonce: str, expires_at: int, now: float) -> None:
+    expired = [key for key, value in _ip_attestation_nonces.items() if value <= now]
+    for key in expired:
+        del _ip_attestation_nonces[key]
+    if nonce in _ip_attestation_nonces:
+        raise OnRampError("Client IP attestation was already used")
+    if len(_ip_attestation_nonces) >= TRANSAK_IP_ATTESTATION_MAX_NONCES:
+        raise OnRampError("Client IP attestation could not be recorded")
+    _ip_attestation_nonces[nonce] = expires_at
+
+
+def verify_ip_attestation(
+    *,
+    version: int,
+    ip: str,
+    issued_at: int,
+    expires_at: int,
+    nonce: str,
+    signature: str,
+    transaction_id: str,
+    config: TransakConfig,
+    session_ip_config: TransakSessionIpConfig,
+    now: float | None = None,
+) -> str:
+    """Verify one edge-signed client-IP claim and return the attested IP.
+
+    The claim binds the referrer domain, the SHA-256 of the signed intent, the
+    edge-observed IP, and a short validity window. Every failure is fail-closed.
+    """
+
+    secret = session_ip_config.attestation_secret
+    if session_ip_config.mode != TRANSAK_CLIENT_IP_MODE_ATTESTED or not secret:
+        raise OnRampNotConfiguredError("Transak on-ramp is not configured")
+    if version != TRANSAK_IP_ATTESTATION_VERSION:
+        raise OnRampError("Unsupported client IP attestation version")
+    if not _IP_ATTESTATION_NONCE_PATTERN.fullmatch(nonce):
+        raise OnRampError("Invalid client IP attestation")
+    if not _IP_ATTESTATION_SIG_PATTERN.fullmatch(signature):
+        raise OnRampError("Invalid client IP attestation")
+    if not isinstance(ip, str) or not ip or len(ip.encode()) > 64 or "%" in ip or "|" in ip:
+        raise OnRampError("Invalid client IP attestation")
+
+    current = time.time() if now is None else now
+    if issued_at <= 0 or expires_at <= 0 or expires_at > _MAX_TIMESTAMP:
+        raise OnRampError("Invalid client IP attestation")
+    if issued_at > current + TRANSAK_IP_ATTESTATION_MAX_CLOCK_SKEW_SECONDS:
+        raise OnRampError("Client IP attestation is not yet valid")
+    if expires_at <= current:
+        raise OnRampError("Client IP attestation has expired")
+    if expires_at <= issued_at:
+        raise OnRampError("Invalid client IP attestation")
+    if expires_at - issued_at > TRANSAK_IP_ATTESTATION_MAX_WINDOW_SECONDS:
+        raise OnRampError("Client IP attestation window is too long")
+
+    intent_hash = hashlib.sha256(transaction_id.encode()).hexdigest()
+    payload = "|".join(
+        (
+            f"v{TRANSAK_IP_ATTESTATION_VERSION}",
+            config.referrer_domain,
+            intent_hash,
+            ip,
+            str(issued_at),
+            str(expires_at),
+            nonce,
+        )
+    )
+    expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise OnRampError("Invalid client IP attestation")
+
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise OnRampError("Invalid client IP attestation") from exc
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        raise OnRampError("Client IP attestation must carry a public IP")
+    canonical_ip = parsed.compressed.lower()
+    if ip != canonical_ip:
+        raise OnRampError("Client IP attestation must carry a canonical IP")
+    if not parsed.is_global or parsed.is_multicast or parsed.is_reserved:
+        raise OnRampError("Client IP attestation must carry a public IP")
+    if isinstance(parsed, ipaddress.IPv6Address):
+        if parsed.is_site_local:
+            raise OnRampError("Client IP attestation must carry a public IP")
+        if parsed in _CF_WORKER_SOURCE_NETWORK:
+            raise OnRampError("Client IP attestation must come from a direct request")
+
+    _reserve_ip_attestation_nonce(nonce, expires_at, current)
+    return canonical_ip
 
 
 class TransakService:
@@ -681,22 +821,10 @@ def _https_base_url(value: str | None) -> str:
 
 def _referrer_domain(value: str | None) -> str:
     candidate = _required_setting(value)
-    try:
-        parsed = urlparse(f"//{candidate}")
-        parsed_port = parsed.port
-        normalized = httpx.URL(f"https://{candidate}")
-    except (ValueError, UnicodeError, httpx.InvalidURL) as exc:
-        raise OnRampNotConfiguredError("Transak on-ramp is not configured") from exc
-    if (
-        not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or normalized.scheme != "https"
-        or not normalized.host
-        or (parsed_port is not None and parsed_port <= 0)
+    # Privana is a web integration. Transak requires the exact approved domain,
+    # so accept one lowercase ASCII DNS hostname with no scheme, port, or path.
+    if not _REFERRER_DOMAIN_PATTERN.fullmatch(candidate) or not any(
+        character.isalpha() for character in candidate.rsplit(".", 1)[-1]
     ):
         raise OnRampNotConfiguredError("Transak on-ramp is not configured")
     return candidate
@@ -707,6 +835,31 @@ def _header_name(value: str | None) -> str:
     if not _HEADER_NAME_PATTERN.fullmatch(candidate):
         raise OnRampNotConfiguredError("Transak on-ramp is not configured")
     return candidate.lower()
+
+
+def _client_ip_source(
+    *,
+    mode: str | None,
+    header: str | None,
+    secret: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Resolve session-only client-IP configuration.
+
+    An unset mode preserves the original header-only deployments. Provider
+    intent creation and order recovery deliberately do not call this loader.
+    """
+
+    resolved = mode.strip().lower() if isinstance(mode, str) and mode.strip() else None
+    if resolved is None:
+        resolved = TRANSAK_CLIENT_IP_MODE_HEADER
+    if resolved == TRANSAK_CLIENT_IP_MODE_HEADER:
+        return resolved, _header_name(header), None
+    if resolved == TRANSAK_CLIENT_IP_MODE_ATTESTED:
+        candidate = _required_setting(secret)
+        if len(candidate) < TRANSAK_IP_ATTESTATION_MIN_SECRET_LENGTH:
+            raise OnRampNotConfiguredError("Transak on-ramp is not configured")
+        return resolved, None, candidate
+    raise OnRampNotConfiguredError("Transak on-ramp is not configured")
 
 
 def _provider_code(value: str | None) -> str:
@@ -958,12 +1111,14 @@ __all__ = [
     "TransakAPIError",
     "TransakConfig",
     "TransakRateLimitError",
+    "TransakSessionIpConfig",
     "TransakService",
     "TransakWebhookVerificationError",
     "client_ip_from_values",
     "create_transak_intent",
     "get_transak_service",
     "load_transak_config",
+    "load_transak_session_ip_config",
     "pending_records_from_transak_orders",
     "transak_order_to_onramp_record",
     "transak_webhook_log_summary",
