@@ -23,26 +23,46 @@ _settings: Optional[Settings] = None
 DEFAULT_ONRAMP_INTENT_SIGNING_KEY_ID = "onramp_intent_signing_key.v1.key"
 
 ALCHEMY_CHAIN_SUBDOMAINS: Dict[int, str] = {
+    1: "eth-mainnet",
+    998: "hyperliquid-testnet",
+    999: "hyperliquid-mainnet",
+    8453: "base-mainnet",
     84532: "base-sepolia",
     11155111: "eth-sepolia",
 }
 
 CHAIN_NAMES: Dict[int, str] = {
+    1: "Ethereum",
+    998: "HyperEVM Testnet",
+    999: "HyperEVM",
+    8453: "Base",
     84532: "Base Sepolia",
     11155111: "Ethereum Sepolia",
 }
 
 NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
+    1: "ETH",
+    998: "HYPE",
+    999: "HYPE",
+    8453: "ETH",
     84532: "ETH",
     11155111: "ETH",
 }
 
 NATIVE_TOKEN_NAMES: Dict[int, str] = {
+    1: "Ether",
+    998: "Hyperliquid",
+    999: "Hyperliquid",
+    8453: "Ether",
     84532: "Ether",
     11155111: "Ether",
 }
 
 NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
+    1: 18,
+    998: 18,
+    999: 18,
+    8453: 18,
     84532: 18,
     11155111: 18,
 }
