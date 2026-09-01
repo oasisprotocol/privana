@@ -43,7 +43,7 @@ deployments:
       max_expiration: 3
     secrets:
       - name: ALCHEMY_API_KEY
-        value: pGJwa1gglvAnRmfV9cpskvYdv4N6RYcC4cqE9TIANnXVYOzX5H1kbmFtZVgfHbcSGIXKp9jCATOAo3AQP6Pgjs1zWE85P7XO0mk9i2Vub25jZU/JaW26BCcpA75m6HMfXHpldmFsdWVYJcWF5tMCPmRvvLwrTZoZto0xaqr0uHecEN6zs2RPlBH9YQLDBsI=
+        value: pGJwa1ggWS9Olc66+8Kdwv/nIpq9PqOI4rTaCDInMrhXKQ2OOHhkbmFtZVgfWIxUl60LzRSRpDfuHGpORaWbelxLc5Ehf/msnZUM/WVub25jZU9Y4CnwA7bIw/C27KdeWPpldmFsdWVYKpBAboJCIPs3RvELpTIZzdkzn1xhEghcNUbQiLtXqv60gjlDHJcZxbCpIg==
       - name: TRANSAK_API_KEY
         value: pGJwa1gg2fXusZnijO9/RmOhI6TsVyOSTrLb1JPdvqsus7ho9hVkbmFtZVgf6/bbKxfjH9PyEFMdkgfhN12kx4HVGY89n4SbuSOLwWVub25jZU9aKHoySwVq2+QA7MK93f1ldmFsdWVYNChoMkGv6F/kyG09EUnMRCrEAb2G08Rce1xpqRVpPuT+ZknVa39w01t3FAi7qArII4LLjp4=
       - name: TRANSAK_API_SECRET
