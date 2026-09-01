@@ -1,5 +1,5 @@
 name: privana
-version: 1.0.4
+version: 1.0.5
 tee: tdx
 kind: container
 resources:
@@ -35,15 +35,15 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: pf1C/ExGqAxy3FefhNArHTvK5iH6+inSGfz1j7rdFQMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 4rycmB0oYjNsd7yXDKluSm1cx94WqIXyodcK6VTwAhIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: zsVLzd97owhhce76zBUc+aecjlEgWEhowso4atfryQ0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: +zJEMQIeo61rdsxIKkmaL+pUPx8ewVhbv2OOreU6uCIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: ALCHEMY_API_KEY
-        value: pGJwa1gglvAnRmfV9cpskvYdv4N6RYcC4cqE9TIANnXVYOzX5H1kbmFtZVgfHbcSGIXKp9jCATOAo3AQP6Pgjs1zWE85P7XO0mk9i2Vub25jZU/JaW26BCcpA75m6HMfXHpldmFsdWVYJcWF5tMCPmRvvLwrTZoZto0xaqr0uHecEN6zs2RPlBH9YQLDBsI=
+        value: pGJwa1ggWS9Olc66+8Kdwv/nIpq9PqOI4rTaCDInMrhXKQ2OOHhkbmFtZVgfWIxUl60LzRSRpDfuHGpORaWbelxLc5Ehf/msnZUM/WVub25jZU9Y4CnwA7bIw/C27KdeWPpldmFsdWVYKpBAboJCIPs3RvELpTIZzdkzn1xhEghcNUbQiLtXqv60gjlDHJcZxbCpIg==
       - name: TRANSAK_API_KEY
         value: pGJwa1gg2fXusZnijO9/RmOhI6TsVyOSTrLb1JPdvqsus7ho9hVkbmFtZVgf6/bbKxfjH9PyEFMdkgfhN12kx4HVGY89n4SbuSOLwWVub25jZU9aKHoySwVq2+QA7MK93f1ldmFsdWVYNChoMkGv6F/kyG09EUnMRCrEAb2G08Rce1xpqRVpPuT+ZknVa39w01t3FAi7qArII4LLjp4=
       - name: TRANSAK_API_SECRET
@@ -73,8 +73,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: KnopR4SDqXC4L/iGrhaL9rrZQI2hU3H7WtMJ8jdkaRgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: yUsIMzsFJd4E/SxhyTE40lFVLfuSW0JGj0+nvfpyG3oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: OPkAVqddR63+inHWe+nJefP8hwTT9MfjVI3ifg0KmGYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: gaJk8uSEe7fnT4/p8Wbb4GWfgg8umd1iG7XJboXwKIsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
