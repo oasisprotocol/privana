@@ -1,5 +1,9 @@
 # test/py/test_chain_config.py
+import json
+from pathlib import Path
+
 import pytest
+from dotenv import dotenv_values
 
 from src.config import (
     ALCHEMY_CHAIN_SUBDOMAINS,
@@ -11,6 +15,7 @@ from src.config import (
     _build_token_infos,
 )
 from src.config.chain_config import (
+    CHAIN_CONFIGS,
     MIN_DEPOSIT_ERC20_WEI,
     MIN_DEPOSIT_NATIVE_WEI,
     ChainConfig,
@@ -25,7 +30,8 @@ def _make_config(**overrides) -> ChainConfig:
         finality_depth=2,
         min_deposit_native_wei=1_000_000,
         min_deposit_erc20_wei=1_000_000,
-        gas_funding_amount_wei=100_000,
+        gas_funding_amount_wei=200_000,
+        min_sweep_gas_price_wei=1,  # keep gas_limit * floor * headroom under the cap
     )
     params.update(overrides)
     return ChainConfig(**params)
@@ -34,6 +40,32 @@ def _make_config(**overrides) -> ChainConfig:
 def test_known_chain_finality():
     assert get_finality_depth(84532) == 15  # Base Sepolia
     assert get_finality_depth(11155111) == 2  # Eth Sepolia Testnet/Localnet
+
+
+@pytest.mark.parametrize("env_file", [".env.mainnet", ".env.testnet"])
+def test_deployed_chains_are_configured(env_file):
+    """Every chain a deployment env registers tokens for needs deposit/sweep settings."""
+    repo_root = Path(__file__).parents[2]
+    raw = dotenv_values(repo_root / env_file).get("ACCOUNTING_TOKEN_INFO")
+    assert raw, f"{env_file} has no ACCOUNTING_TOKEN_INFO"
+    chain_ids = {entry["chain_id"] for entry in json.loads(raw)}
+    missing = chain_ids - CHAIN_CONFIGS.keys()
+    assert not missing, f"{env_file} chains missing from CHAIN_CONFIGS: {missing}"
+
+
+def test_zero_gas_price_floor_rejected():
+    with pytest.raises(ValueError, match="min_sweep_gas_price_wei"):
+        _make_config(min_sweep_gas_price_wei=0)
+
+
+def test_cap_below_floor_priced_sweep_rejected():
+    # floor 1 gwei * 65_000 gas * 2 headroom = 1.3e14 > 1e13 cap
+    with pytest.raises(ValueError, match="floor-priced ERC-20 sweep"):
+        _make_config(
+            min_deposit_native_wei=10**15,
+            gas_funding_amount_wei=10**13,
+            min_sweep_gas_price_wei=10**9,
+        )
 
 
 def test_unknown_chain_uses_default():

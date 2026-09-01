@@ -385,4 +385,4 @@ async def test_provider_error_raises_discovery_error():
 async def test_unsupported_chain_rejected():
     service = _make_service()
     with pytest.raises(ValueError, match="Unsupported chain_id"):
-        await _discover(service, chain_id=999)
+        await _discover(service, chain_id=999_999)

@@ -14,7 +14,11 @@ from typing import Dict
 from web3 import Web3
 
 from src.config import load_settings
-from src.config.chain_config import MIN_DEPOSIT_ERC20_WEI, MIN_DEPOSIT_NATIVE_WEI
+from src.config.chain_config import (
+    CHAIN_CONFIGS,
+    MIN_DEPOSIT_ERC20_WEI,
+    MIN_DEPOSIT_NATIVE_WEI,
+)
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import get_accounting_contract_service
 from src.services.deposit_verifier import DepositVerifier
@@ -143,6 +147,9 @@ class DepositProcessor:
             ValueError: If verification fails or tx is a gas funding tx.
         """
         tx_hash_lower = tx_hash.lower()
+
+        if chain_id not in CHAIN_CONFIGS:
+            raise ValueError(f"Unsupported chain_id {chain_id}")
 
         if tx_hash_lower in self._sweep.gas_funding_tx_hashes:
             raise ValueError(

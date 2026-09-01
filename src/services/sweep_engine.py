@@ -33,7 +33,13 @@ from web3.exceptions import TransactionNotFound
 from web3.providers import AsyncHTTPProvider
 
 from src.clients.rofl import TransactionRevertedError
-from src.config.chain_config import GAS_FUNDING_AMOUNT_WEI
+from src.config.chain_config import (
+    GAS_FUNDING_AMOUNT_WEI,
+    GAS_FUNDING_HEADROOM,
+    MIN_SWEEP_GAS_PRICE_WEI,
+    SWEEP_GAS_LIMIT_ERC20,
+    SWEEP_GAS_LIMIT_NATIVE,
+)
 from src.services.l2_fee_estimator import estimate_l1_data_fee
 
 logger = logging.getLogger(__name__)
@@ -228,15 +234,20 @@ class SweepEngine:
         return self._web3_cache[chain_id]
 
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:
-        """Return a gas price that is safe from underpricing on L2s.
+        """Gas price safe from underpricing: max of 1.25x baseFeePerGas,
+        eth_gasPrice (stale/low on L2s), and a per-chain floor.
 
-        Takes the max of baseFeePerGas (from latest block), eth_gasPrice (RPC),
-        and a 1 gwei floor. eth_gasPrice alone can return stale/low values on L2s.
+        Legacy txs have no fee-bump path, so 1.25x buys one max-full block of
+        base-fee drift before inclusion. The floor covers a partial signal;
+        with none at all we raise rather than broadcast a price that may never
+        mine and wedge the shared gas-tank lock.
         """
         latest_block = await w3.eth.get_block("latest")
-        base_fee = latest_block.get("baseFeePerGas", 0)
+        base_fee = latest_block.get("baseFeePerGas") or 0  # explicit null on some RPCs
         rpc_gas_price = await w3.eth.gas_price
-        gas_price = max(base_fee, rpc_gas_price, 1_000_000_000)
+        if base_fee == 0 and rpc_gas_price == 0:
+            raise ValueError(f"chain {chain_id}: RPC returned no gas price signal")
+        gas_price = max(base_fee * 5 // 4, rpc_gas_price, MIN_SWEEP_GAS_PRICE_WEI[chain_id])
         logger.debug(
             "Gas price: chain=%d base_fee=%d rpc=%d chosen=%d",
             chain_id,
@@ -370,11 +381,15 @@ class SweepEngine:
                 )
                 self._save_record(record)
 
-                # Step 1: Fund gas to deposit address (same pattern as ERC20)
-                # Base gas covers L2 execution; L1 data fee covers calldata posting
-                gas_amount = GAS_FUNDING_AMOUNT_WEI.get(chain_id, 200_000_000_000_000)
+                # Step 1: Fund gas to deposit address (same pattern as ERC20).
+                # Over-fund the expected sweep cost: the sweep re-prices after
+                # funding confirms, so exact funding could fall short and cost a
+                # second round; excess is dust. Capped per chain.
                 l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=False)
-                gas_amount += l1_data_fee
+                gas_amount = min(
+                    SWEEP_GAS_LIMIT_NATIVE * gas_price * GAS_FUNDING_HEADROOM + l1_data_fee,
+                    GAS_FUNDING_AMOUNT_WEI[chain_id],
+                )
 
                 # Hold the gas tank lock through receipt confirmation.
                 # Releasing after broadcast would let a concurrent sweep read
@@ -534,11 +549,15 @@ class SweepEngine:
                 )
                 self._save_record(record)
 
-                # Step 1: Fund gas to deposit address
-                # Base gas covers L2 execution; L1 data fee covers calldata posting
-                gas_amount = GAS_FUNDING_AMOUNT_WEI.get(chain_id, 200_000_000_000_000)
+                # Step 1: Fund gas to deposit address.
+                # Over-fund the expected sweep cost: the sweep re-prices after
+                # funding confirms, so exact funding could fall short and cost a
+                # second round; excess is dust. Capped per chain.
                 l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=True)
-                gas_amount += l1_data_fee
+                gas_amount = min(
+                    SWEEP_GAS_LIMIT_ERC20 * gas_price * GAS_FUNDING_HEADROOM + l1_data_fee,
+                    GAS_FUNDING_AMOUNT_WEI[chain_id],
+                )
 
                 # Hold the gas tank lock through receipt confirmation.
                 # Releasing after broadcast would let a concurrent sweep read

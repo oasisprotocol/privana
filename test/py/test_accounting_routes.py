@@ -613,7 +613,7 @@ def test_pending_deposits_returns_candidates(monkeypatch) -> None:
 
 def test_pending_deposits_rejects_unsupported_chain(monkeypatch) -> None:
     client, _, discovery, _ = _make_discovery_client(monkeypatch)
-    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 999})
+    response = client.get("/v1/accounting/deposits/pending", params={"chain_id": 999999})
     assert response.status_code == 400
     assert "Unsupported chain_id" in response.json()["detail"]
     discovery.discover_pending_deposits.assert_not_called()
