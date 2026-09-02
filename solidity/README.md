@@ -270,21 +270,21 @@ Run `npx hardhat <task> --help` for parameter details.
 
 ## Contract Addresses
 
-### Staging (Sapphire Testnet)
-
-| Contract | Address |
-|----------|---------|
-| Accounting (Proxy) | `0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f` |
-
-**ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
-
 ### Production (Sapphire Mainnet)
 
-| Contract | Address |
-|----------|---------|
+| Contract           | Address                                      |
+|--------------------|----------------------------------------------|
 | Accounting (Proxy) | `0x5f16C90a0F410AE4Cdb76d9964f5FFDDeE305876` |
 
 **ROFL App ID:** `rofl1qpzsmmpdl68spwd5y37s5m8znafahna9hc28retn`
+
+### Staging (Sapphire Testnet)
+
+| Contract           | Address                                      |
+|--------------------|----------------------------------------------|
+| Accounting (Proxy) | `0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f` |
+
+**ROFL App ID:** `rofl1qrmnjkx47f4tcfvfclnrtj2rad82akeum5jcpe8y`
 
 ## Security Considerations
 
