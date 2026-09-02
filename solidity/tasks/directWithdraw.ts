@@ -8,14 +8,25 @@
 import { task } from "hardhat/config";
 import { JsonRpcProvider } from "ethers";
 
-const SOURCE_CHAIN_RPC: Record<number, () => string> = {
+/**
+ * Known source-chain RPC URLs. Env vars take precedence.
+ * Extend this map when adding new source chains.
+ */
+export const SOURCE_CHAIN_RPC: Record<number, () => string> = {
+  1: () => process.env.ETH_RPC_URL || "https://ethereum-rpc.publicnode.com",
+  11155111: () => process.env.ETH_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
+  8453: () => process.env.BASE_RPC_URL || "https://mainnet.base.org",
   84532: () => process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",
-  11155111: () => process.env.ETH_SEPOLIA_RPC_URL || "https://eth-sepolia.public.blastapi.io",
+  999: () => process.env.HYPEREVM_RPC_URL || "https://rpc.hyperliquid.xyz/evm",
+  998: () => process.env.HYPEREVM_TESTNET_RPC_URL || "https://rpc.hyperliquid-testnet.xyz/evm",
 };
 
-const CHAIN_EXPLORERS: Record<number, string> = {
-  84532: "https://sepolia.basescan.org",
+export const CHAIN_EXPLORERS: Record<number, string> = {
+  1: "https://etherscan.io",
   11155111: "https://sepolia.etherscan.io",
+  8453: "https://basescan.org",
+  84532: "https://sepolia.basescan.org",
+  999: "https://hyperevmscan.io",
 };
 
 function getSourceRpcUrl(chainId: number): string {
