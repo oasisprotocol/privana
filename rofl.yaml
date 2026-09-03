@@ -92,6 +92,8 @@ deployments:
         value: pGJwa1gg7N4XxCsCIzfNipitqBguQ4CJ67oSTsU1UYmJ0hy4Wl1kbmFtZVgfgKjVd+y3xAJf4Y9TUIEYolk1poogXOHMs722/WswQGVub25jZU/J2GW//DonhJXEWj6tGvZldmFsdWVYNAhjXj0ZaTDZli/udkBqxBYYaEV/wFyzG4SRyU0ksn5CjKG90Zc+N469ZphXqtNDRaycUeQ=
       - name: TRANSAK_API_SECRET
         value: pGJwa1ggSDDcn6jHs7IHIjLb2TfKFoIdTVKHdPMe75NqFriPWwxkbmFtZVgie5rbz70ju1y1WAH5GMCt+MM4WlLgTfajRKtotGY1WvYfPmVub25jZU+7VRI4Ovf0Hi4MozHnKg9ldmFsdWVYKGvklACVb1w79pEIA15xRJ0tDA7sq3JsV9uxFoSWN6PhTge0cgvt7aQ=
+      - name: TRANSAK_IP_ATTESTATION_SECRET
+        value: pGJwa1gg0k5AUrosqGpFyxgSSmoPcDUUh//rgJbxZyYfGaf5HgFkbmFtZVgtCcjyUi+CeSCNuFjY1gMUt4KSrsOSqrCwuOhQcWJ6AbW0ROQxlHIipVoxzPXkZW5vbmNlTyLQd8t7oGeAFiwHS+CMTGV2YWx1ZVhAaGxkTkBzKQRjG1AQP5nspfGuzYhkcpLP53bldrW6Wf0jXyHMBmE8j3PGWopyOX9fhQ/+pREio450IXB92Q3bgA==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
