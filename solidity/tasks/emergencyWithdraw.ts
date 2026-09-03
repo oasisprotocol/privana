@@ -1,23 +1,11 @@
 import { task } from "hardhat/config";
 import { Contract, JsonRpcProvider, Wallet } from "ethers";
 
+import { SOURCE_CHAIN_RPC, CHAIN_EXPLORERS } from "./directWithdraw";
+
 // Mirror of the Solidity TokenType enum in contracts/Types.sol — typechain exposes
 // enum values as uint8 at the TS boundary, so we use ordinals.
 const TokenType = { NativeEVM: 0, ERC20: 1 } as const;
-
-/**
- * Known source-chain RPC URLs. Env vars take precedence.
- * Extend this map when adding new source chains.
- */
-const SOURCE_CHAIN_RPC: Record<number, () => string> = {
-  84532: () => process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",
-  11155111: () => process.env.ETH_SEPOLIA_RPC_URL || "https://eth-sepolia.public.blastapi.io",
-};
-
-const CHAIN_EXPLORERS: Record<number, string> = {
-  84532: "https://sepolia.basescan.org",
-  11155111: "https://sepolia.etherscan.io",
-};
 
 function getSourceRpcUrl(chainId: number): string {
   const factory = SOURCE_CHAIN_RPC[chainId];
