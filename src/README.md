@@ -249,7 +249,7 @@ Environment variables: see `.env.localnet`, `.env.testnet`, and `.env.localnet.s
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
 - `DISABLE_ROFL_KEYS` (local dev only) — use non-TEE AuthToken/JWT keys and publicly derivable on-ramp intent keys; never enable in production
 - `SWEEP_STATE_DIR` (default `/data/sweep-engine`) — sweep state directory
-- `ONRAMP_PROVIDER` — required deployment-owned provider selection; shipped environments select `moonpay`
+- `ONRAMP_PROVIDER` — Credit card on-ramp provider: `transak` or `moonpay`
 - `TRANSAK_API_KEY`, `TRANSAK_API_SECRET` — backend-only partner credentials
 - `TRANSAK_API_BASE_URL`, `TRANSAK_GATEWAY_BASE_URL`, `TRANSAK_REFERRER_DOMAIN` — approved Transak environment/domain
 - `TRANSAK_CLIENT_IP_MODE` — client-IP sourcing for widget sessions: `header` (default) or `attested`
