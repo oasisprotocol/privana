@@ -35,7 +35,7 @@ so promptly.
 
 :::info[A note on these integrations]
 
-Privana connects to the services below through their public interfaces and
+Privana connects to the services above through their public interfaces and
 published documentation, the same way any developer can. **None of them has
 endorsed, reviewed, sponsored or approved Privana**, and no commercial
 relationship, affiliation or joint venture is implied by their appearance here.
