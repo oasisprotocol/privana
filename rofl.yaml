@@ -1,5 +1,5 @@
 name: privana
-version: 1.0.6
+version: 1.0.7
 tee: tdx
 kind: container
 resources:
@@ -38,7 +38,7 @@ deployments:
         - id: zsVLzd97owhhce76zBUc+aecjlEgWEhowso4atfryQ0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
         - id: +zJEMQIeo61rdsxIKkmaL+pUPx8ewVhbv2OOreU6uCIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
-        - any: {}
+        - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
       max_expiration: 3
     secrets:
@@ -76,7 +76,7 @@ deployments:
         - id: HrRMQvcGCEMbyffUtT+IDutRjf39HAMX1U4gKYrmUTEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
         - id: BiKY34eJvyTzknpuRxe4hzVzNrEQEoO9rWYiy4x22LkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
-        - any: {}
+        - provider_instance_admin: oasis1qzql9cw9ly746jren7j66jscd36h5c3mfq6d6mct
       fees: endorsing_node
       max_expiration: 3
     secrets:
