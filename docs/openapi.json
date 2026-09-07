@@ -1308,15 +1308,20 @@
         "type": "object"
       },
       "SiweDomainResponse": {
-        "description": "Response containing the SIWE domain configured in the contract.",
+        "description": "Response containing the configured SIWE domains.",
         "properties": {
-          "domain": {
-            "title": "Domain",
-            "type": "string"
+          "domains": {
+            "description": "SIWE domain allow-list; clients may sign with any entry, first is primary",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Domains",
+            "type": "array"
           }
         },
         "required": [
-          "domain"
+          "domains"
         ],
         "title": "SiweDomainResponse",
         "type": "object"
@@ -2368,10 +2373,10 @@
         ]
       }
     },
-    "/v1/accounting/auth/domain": {
+    "/v1/accounting/auth/domains": {
       "get": {
-        "description": "Get the configured SIWE domain for this service.",
-        "operationId": "get_siwe_domain_v1_accounting_auth_domain_get",
+        "description": "Get the configured SIWE domain allow-list for this service.\n\nA client should sign with its own host when listed, and may fall back to\nthe first (primary) entry otherwise.",
+        "operationId": "get_siwe_domain_v1_accounting_auth_domains_get",
         "responses": {
           "200": {
             "content": {

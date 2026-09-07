@@ -1472,12 +1472,17 @@ async def get_total_locked_balance(
         ) from exc
 
 
-@router.get("/auth/domain", response_model=SiweDomainResponse)
+@router.get("/auth/domains", response_model=SiweDomainResponse)
 async def get_siwe_domain() -> SiweDomainResponse:
-    """Get the configured SIWE domain for this service."""
+    """Get the configured SIWE domain allow-list for this service.
+
+    A client should sign with its own host when listed, and may fall back to
+    the first (primary) entry otherwise.
+    """
     settings = load_settings()
     try:
-        return SiweDomainResponse(domain=get_siwe_config(settings).domain)
+        configs = get_siwe_configs(settings)
+        return SiweDomainResponse(domains=[cfg.domain for cfg in configs])
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

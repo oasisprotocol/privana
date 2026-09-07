@@ -477,9 +477,13 @@ class JwtSiweTokenResponse(BaseModel):
 
 
 class SiweDomainResponse(BaseModel):
-    """Response containing the SIWE domain configured in the contract."""
+    """Response containing the configured SIWE domains."""
 
-    domain: str
+    domains: list[str] = Field(
+        ...,
+        min_length=1,
+        description="SIWE domain allow-list; clients may sign with any entry, first is primary",
+    )
 
 
 class SiweNonceResponse(BaseModel):
