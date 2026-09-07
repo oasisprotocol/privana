@@ -1472,7 +1472,7 @@ async def get_total_locked_balance(
         ) from exc
 
 
-@router.get("/auth/domain", response_model=SiweDomainResponse)
+@router.get("/auth/domains", response_model=SiweDomainResponse)
 async def get_siwe_domain() -> SiweDomainResponse:
     """Get the configured SIWE domain allow-list for this service.
 
