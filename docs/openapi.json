@@ -1310,23 +1310,18 @@
       "SiweDomainResponse": {
         "description": "Response containing the configured SIWE domains.",
         "properties": {
-          "domain": {
-            "deprecated": true,
-            "description": "Primary SIWE domain (first allow-list entry)",
-            "title": "Domain",
-            "type": "string"
-          },
           "domains": {
-            "description": "Full SIWE domain allow-list; clients may sign with any entry",
+            "description": "SIWE domain allow-list; clients may sign with any entry, first is primary",
             "items": {
               "type": "string"
             },
+            "minItems": 1,
             "title": "Domains",
             "type": "array"
           }
         },
         "required": [
-          "domain"
+          "domains"
         ],
         "title": "SiweDomainResponse",
         "type": "object"
@@ -2380,7 +2375,7 @@
     },
     "/v1/accounting/auth/domain": {
       "get": {
-        "description": "Get the configured SIWE domains for this service.\n\n``domain`` is the primary entry, kept for older clients; ``domains`` is the\nfull allow-list so a client can sign with its own host when listed.",
+        "description": "Get the configured SIWE domain allow-list for this service.\n\nA client should sign with its own host when listed, and may fall back to\nthe first (primary) entry otherwise.",
         "operationId": "get_siwe_domain_v1_accounting_auth_domain_get",
         "responses": {
           "200": {
