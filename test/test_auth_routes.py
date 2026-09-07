@@ -1533,3 +1533,29 @@ class TestAuthDependencies:
 
         assert exc.value.status_code == 401
         assert exc.value.detail == "Invalid token"
+
+
+class TestGetSiweDomain:
+    """Tests for the SIWE domain endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_returns_primary_domain_and_full_allow_list(
+        self, reset_auth_singletons, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "SIWE_DOMAINS", "https://api.example.com,https://app.example.com,localhost:3000"
+        )
+        src.config._settings = None
+
+        response = await routes.get_siwe_domain()
+
+        assert response.domain == "api.example.com"
+        assert response.domains == ["api.example.com", "app.example.com", "localhost:3000"]
+
+    @pytest.mark.asyncio
+    async def test_single_domain_lists_itself(self, reset_auth_singletons):
+        # conftest configures SIWE_DOMAINS=localhost:5173
+        response = await routes.get_siwe_domain()
+
+        assert response.domain == "localhost:5173"
+        assert response.domains == ["localhost:5173"]
