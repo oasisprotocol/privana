@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Optional
 from aiohttp import ClientError
 from web3 import AsyncWeb3, Web3
 from web3.exceptions import Web3Exception
-from web3.providers import AsyncHTTPProvider
 
+from src.clients.web3_provider import make_async_web3
 from src.config.chain_config import (
     CHAIN_CONFIGS,
     TRANSFER_EVENT_TOPIC,
@@ -99,7 +99,7 @@ class DepositDiscoveryService:
             rpc_url = self._chain_rpc_urls.get(chain_id)
             if not rpc_url:
                 raise DiscoveryNotConfiguredError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            self._web3_cache[chain_id] = make_async_web3(rpc_url)
         return self._web3_cache[chain_id]
 
     async def discover_pending_deposits(

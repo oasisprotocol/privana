@@ -8,11 +8,11 @@ from typing import Dict, List, Optional, Set
 from eth_abi import decode
 from hexbytes import HexBytes
 from web3 import AsyncWeb3, Web3
-from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
+from src.clients.web3_provider import make_async_web3
 from src.config import CHAIN_NAMES, load_settings
-from src.services.accounting_contract import AccountingContractService
+from src.services.accounting_contract import get_accounting_contract_service
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,14 @@ class WithdrawalProcessor:
 
     def __init__(self):
         self.settings = load_settings()
-        self.accounting_service = AccountingContractService(self.settings)
+        # Reuse the singleton service so its sapphire providers, connection
+        # pools, and token caches are shared instead of duplicated per process.
+        self.accounting_service = get_accounting_contract_service()
         self._contract_address = Web3.to_checksum_address(self.settings.accounting_contract_address)
 
-        self._sapphire_web3 = AsyncWeb3(AsyncHTTPProvider(self.settings.sapphire_rpc_url))
+        if self.accounting_service.reader_w3 is None:
+            raise ValueError("SAPPHIRE_RPC_URL must be configured to process withdrawals")
+        self._sapphire_web3 = self.accounting_service.reader_w3
         self._contract = self._sapphire_web3.eth.contract(
             address=self._contract_address,
             abi=self.accounting_service.contract.abi,
@@ -98,7 +102,7 @@ class WithdrawalProcessor:
             rpc_url = self.settings.chain_rpc_urls.get(chain_id)
             if not rpc_url:
                 raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._destination_web3[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            self._destination_web3[chain_id] = make_async_web3(rpc_url)
         return self._destination_web3[chain_id]
 
     async def _get_evm_address(self) -> str:

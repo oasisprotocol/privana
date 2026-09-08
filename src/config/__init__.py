@@ -131,6 +131,30 @@ def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
     return rpc_urls
 
 
+def _build_sapphire_rpc_headers() -> Dict[str, str]:
+    """Parse extra Sapphire RPC headers from the SAPPHIRE_RPC_HEADERS env var.
+
+    Expects a JSON object mapping header name to value, e.g.
+    SAPPHIRE_RPC_HEADERS='{"Authorization": "Bearer <token>"}'. These are sent
+    only to the Sapphire RPC, never to third-party chain RPCs.
+    """
+    raw = os.getenv("SAPPHIRE_RPC_HEADERS")
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid SAPPHIRE_RPC_HEADERS JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+    ):
+        raise ValueError("SAPPHIRE_RPC_HEADERS must be a JSON object mapping header name to value")
+
+    return parsed
+
+
 def _build_gas_prices() -> Dict[int, int]:
     """Parse per-chain gas prices from the ACCOUNTING_GAS_PRICE env var.
 
@@ -225,6 +249,7 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_contract_address=os.getenv("ACCOUNTING_CONTRACT_ADDRESS"),
             sapphire_chain_id=_get_int("SAPPHIRE_CHAIN_ID"),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL"),
+            sapphire_rpc_headers=_build_sapphire_rpc_headers(),
             accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT"),
             chain_rpc_urls=chain_rpc_urls,
             gas_prices_wei=_build_gas_prices(),

@@ -17,6 +17,7 @@ class Settings:
     accounting_contract_address: str
     sapphire_chain_id: int
     sapphire_rpc_url: str
+    sapphire_rpc_headers: Dict[str, str]
     accounting_gas_limit: int
     chain_rpc_urls: Dict[int, str]
     gas_prices_wei: Dict[int, int]
