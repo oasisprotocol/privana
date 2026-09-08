@@ -24,16 +24,14 @@ def make_async_web3(rpc_url: str, headers: dict[str, str] | None = None) -> Asyn
     ``headers`` are sent with every RPC request; callers must only pass
     credentials to the endpoint they belong to.
     """
-    provider = AsyncHTTPProvider(
-        rpc_url,
-        cache_allowed_requests=True,
-        cacheable_requests=_CACHEABLE_REQUESTS,
+    request_kwargs = (
+        {"headers": {**AsyncHTTPProvider.get_request_headers(), **headers}} if headers else None
     )
-    if headers:
-        provider = AsyncHTTPProvider(
+    return AsyncWeb3(
+        AsyncHTTPProvider(
             rpc_url,
-            request_kwargs={"headers": {**provider.get_request_headers(), **headers}},
+            request_kwargs=request_kwargs,
             cache_allowed_requests=True,
             cacheable_requests=_CACHEABLE_REQUESTS,
         )
-    return AsyncWeb3(provider)
+    )
