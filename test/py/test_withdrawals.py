@@ -50,27 +50,23 @@ class TestWithdrawalProcessor:
                 chain_rpc_urls={TEST_CHAIN_ID: "https://example.com"},
             )
             with patch(
-                "src.services.withdrawal_processor.AccountingContractService",
+                "src.services.withdrawal_processor.get_accounting_contract_service",
                 return_value=mock_accounting_service,
             ):
-                with patch("src.services.withdrawal_processor.AsyncWeb3") as mock_async_web3:
-                    # Mock the AsyncWeb3 instance
-                    mock_w3_instance = MagicMock()
-                    mock_contract = MagicMock()
-                    mock_contract.functions.evmAddress.return_value.call = AsyncMock(
-                        return_value=TEST_USER_ADDRESS
-                    )
-                    mock_contract.functions.nonces.return_value.call = AsyncMock(return_value=0)
-                    mock_w3_instance.eth.contract.return_value = mock_contract
-                    mock_async_web3.return_value = mock_w3_instance
+                mock_contract = MagicMock()
+                mock_contract.functions.evmAddress.return_value.call = AsyncMock(
+                    return_value=TEST_USER_ADDRESS
+                )
+                mock_contract.functions.nonces.return_value.call = AsyncMock(return_value=0)
+                mock_accounting_service.reader_w3.eth.contract.return_value = mock_contract
 
-                    with patch("src.services.withdrawal_processor.Web3") as mock_web3:
-                        mock_web3.to_checksum_address.return_value = "0x" + "Ab" * 20
+                with patch("src.services.withdrawal_processor.Web3") as mock_web3:
+                    mock_web3.to_checksum_address.return_value = "0x" + "Ab" * 20
 
-                        proc = WithdrawalProcessor()
-                        proc.accounting_service = mock_accounting_service
-                        proc._contract = mock_contract
-                        return proc
+                    proc = WithdrawalProcessor()
+                    proc.accounting_service = mock_accounting_service
+                    proc._contract = mock_contract
+                    return proc
 
     @pytest.mark.asyncio
     async def test_get_pending_empty(self, processor):

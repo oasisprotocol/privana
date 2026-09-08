@@ -30,9 +30,9 @@ from typing import Any, Dict, Optional, Protocol, Set, runtime_checkable
 
 from web3 import AsyncWeb3
 from web3.exceptions import TransactionNotFound
-from web3.providers import AsyncHTTPProvider
 
 from src.clients.rofl import TransactionRevertedError
+from src.clients.web3_provider import make_async_web3
 from src.config.chain_config import (
     GAS_FUNDING_AMOUNT_WEI,
     GAS_FUNDING_HEADROOM,
@@ -230,7 +230,7 @@ class SweepEngine:
             rpc_url = self._chain_rpc_urls.get(chain_id)
             if not rpc_url:
                 raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            self._web3_cache[chain_id] = make_async_web3(rpc_url)
         return self._web3_cache[chain_id]
 
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:

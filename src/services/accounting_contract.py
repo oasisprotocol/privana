@@ -18,11 +18,11 @@ from web3 import AsyncWeb3, Web3
 from web3.constants import ADDRESS_ZERO
 from web3.contract import AsyncContract
 from web3.middleware import SignAndSendRawMiddlewareBuilder
-from web3.providers import AsyncHTTPProvider
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient
+from src.clients.web3_provider import make_async_web3
 from src.config import (
     CHAIN_NAMES,
     NATIVE_TOKEN_DECIMALS,
@@ -109,7 +109,9 @@ class AccountingContractService:
         self.sapphire_rpc_url = self.settings.sapphire_rpc_url
 
         self.reader_w3: Optional[AsyncWeb3] = (
-            AsyncWeb3(AsyncHTTPProvider(self.sapphire_rpc_url)) if self.sapphire_rpc_url else None
+            make_async_web3(self.sapphire_rpc_url, self.settings.sapphire_rpc_headers)
+            if self.sapphire_rpc_url
+            else None
         )
         self.contract_reader: Optional[AsyncContract] = (
             self.reader_w3.eth.contract(address=self.contract_address, abi=ACCOUNTING_ABI)
@@ -317,7 +319,7 @@ class AccountingContractService:
 
         account: LocalAccount = Account.from_key(private_key)
 
-        w3 = AsyncWeb3(AsyncHTTPProvider(self.sapphire_rpc_url))
+        w3 = make_async_web3(self.sapphire_rpc_url, self.settings.sapphire_rpc_headers)
         w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(account))
         wrapped_w3 = sapphire.wrap(w3, account)
         wrapped_w3.eth.default_account = account.address
@@ -358,7 +360,7 @@ class AccountingContractService:
         if not rpc_url:
             raise ValueError(f"No RPC endpoint configured for chain ID {chain_id}")
 
-        web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+        web3 = make_async_web3(rpc_url)
         connected = await web3.is_connected()
         if not connected:
             raise ValueError(f"Failed to connect to RPC endpoint for chain ID {chain_id}")
