@@ -1,5 +1,5 @@
 name: privana
-version: 2.0.0
+version: 2.0.1
 tee: tdx
 kind: container
 resources:
@@ -35,8 +35,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: dwICA+NrQBDC98IlWyN2bV/77pL1faV840tpYd58HZgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: xe0/Snsg6Re5HjUVUlRivt/RJUJjmKwu09P65Ia0NnwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 1aHbVC4k+pFnNGA1Rnptx/4P+LY17YqRDf7XwhjsMNsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: kbr84/FiWqYnAHmOd56+ParI4TLD0W5yEvE5dirRuM4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
@@ -48,6 +48,8 @@ deployments:
         value: pGJwa1gg2fXusZnijO9/RmOhI6TsVyOSTrLb1JPdvqsus7ho9hVkbmFtZVgf6/bbKxfjH9PyEFMdkgfhN12kx4HVGY89n4SbuSOLwWVub25jZU9aKHoySwVq2+QA7MK93f1ldmFsdWVYNChoMkGv6F/kyG09EUnMRCrEAb2G08Rce1xpqRVpPuT+ZknVa39w01t3FAi7qArII4LLjp4=
       - name: TRANSAK_API_SECRET
         value: pGJwa1ggZ9isc3vdD7ryyePluAXBuuTVfYJviJP0fVPWugrBLihkbmFtZVgiNU3dgATgeE1Q8pY7clnNvlJ94+Clc9aTAAmgfLNTNJQdW2Vub25jZU9DkZ4BJNp+Jiynr8Ej/3dldmFsdWVYKPMuIcEfW4iEXrpWwNkbARlf3qcdwArvc1zXcnHaW7lurJzcJKLJ8Q4=
+      - name: SAPPHIRE_RPC_HEADERS
+        value: pGJwa1gggHR93V1cw3KevzlX7RzMx2WvTKonHSQQAmvn73kmgl5kbmFtZVgkaMMpLtQk8K5lTkORI+Q+wjHxBOn33CVORR00hRFTJWgq2/ZBZW5vbmNlT+EBhx7mg1ABgUIqoE3/SmV2YWx1ZVheFiB+pZSoK0JbEQAu2XFlCM1VuCnaLLFzgFrMN0Jl5TnpfND2Z+n/LS3bIbfqenfY06P9mMQy0zvKoEFWXAjbylpKeNdyQ1FwZo78I5OtoqJCeH7r8VBMe2FDmm/TeA==
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
@@ -73,8 +75,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: Weutz1+wbtDvylY/a58BM4nc2PpIg3DiX5pbbAljV1sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: dI3UlmoNfgo14Uc1nhyAUaO9EbRozU8iqj71nTnaHtMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: p1vTYRdhiXwX0XsOzRFOPPjNQzaOihsobg6zJTHZY0sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: qjeH83eFYYwTIyT+6dj5Ty4DSCdyr8pl+5kXFjcQ8RwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qzql9cw9ly746jren7j66jscd36h5c3mfq6d6mct
       fees: endorsing_node
@@ -94,6 +96,8 @@ deployments:
         value: pGJwa1ggSDDcn6jHs7IHIjLb2TfKFoIdTVKHdPMe75NqFriPWwxkbmFtZVgie5rbz70ju1y1WAH5GMCt+MM4WlLgTfajRKtotGY1WvYfPmVub25jZU+7VRI4Ovf0Hi4MozHnKg9ldmFsdWVYKGvklACVb1w79pEIA15xRJ0tDA7sq3JsV9uxFoSWN6PhTge0cgvt7aQ=
       - name: TRANSAK_IP_ATTESTATION_SECRET
         value: pGJwa1gg0k5AUrosqGpFyxgSSmoPcDUUh//rgJbxZyYfGaf5HgFkbmFtZVgtCcjyUi+CeSCNuFjY1gMUt4KSrsOSqrCwuOhQcWJ6AbW0ROQxlHIipVoxzPXkZW5vbmNlTyLQd8t7oGeAFiwHS+CMTGV2YWx1ZVhAaGxkTkBzKQRjG1AQP5nspfGuzYhkcpLP53bldrW6Wf0jXyHMBmE8j3PGWopyOX9fhQ/+pREio450IXB92Q3bgA==
+      - name: SAPPHIRE_RPC_HEADERS
+        value: pGJwa1ggvNtW/U1384EReSlhAnkjaDHzmwhacV3gkoNBHcAnUnxkbmFtZVgkuxKsF7DNA/7d6qh1uUuOo/Sx7XH8IHSpXHz7IWdse0vJ4Be8ZW5vbmNlT+dOAAsyo7j5hqepQNLu8WV2YWx1ZVhezvY4llKCernTM7i2xZ1RAO0+h1cmUbT5kh3wgrxHOcy1MvZpZy0nkVpFZCurODl04tTuippz/kbKEEDmH0EMPEDoN2S9PsWQr3bZqpdUDK9MQTWj2Mcdqn8TBHL95Q==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
