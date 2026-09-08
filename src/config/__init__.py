@@ -135,7 +135,7 @@ def _build_sapphire_rpc_headers() -> Dict[str, str]:
     """Parse extra Sapphire RPC headers from the SAPPHIRE_RPC_HEADERS env var.
 
     Expects a JSON object mapping header name to value, e.g.
-    SAPPHIRE_RPC_HEADERS='{"x-oasis-client": "secret-token"}'. These are sent
+    SAPPHIRE_RPC_HEADERS='{"Authorization": "Bearer <token>"}'. These are sent
     only to the Sapphire RPC, never to third-party chain RPCs.
     """
     raw = os.getenv("SAPPHIRE_RPC_HEADERS")

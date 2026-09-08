@@ -20,9 +20,11 @@ class TestMakeAsyncWeb3:
         assert headers["Content-Type"] == "application/json"
 
     def test_extra_headers_are_merged_over_defaults(self):
-        provider = make_async_web3("http://localhost:1", {"x-oasis-client": "token"}).provider
+        provider = make_async_web3(
+            "http://localhost:1", {"Authorization": "Bearer secret-token"}
+        ).provider
         headers = provider.get_request_kwargs()["headers"]
-        assert headers["x-oasis-client"] == "token"
+        assert headers["Authorization"] == "Bearer secret-token"
         # Custom request_kwargs replace web3's defaults, so the helper must
         # merge Content-Type back in or JSON-RPC endpoints reject the request.
         assert headers["Content-Type"] == "application/json"
@@ -34,8 +36,10 @@ class TestBuildSapphireRpcHeaders:
         assert _build_sapphire_rpc_headers() == {}
 
     def test_parses_json_object(self, monkeypatch):
-        monkeypatch.setenv("SAPPHIRE_RPC_HEADERS", json.dumps({"x-oasis-client": "secret"}))
-        assert _build_sapphire_rpc_headers() == {"x-oasis-client": "secret"}
+        monkeypatch.setenv(
+            "SAPPHIRE_RPC_HEADERS", json.dumps({"Authorization": "Bearer secret-token"})
+        )
+        assert _build_sapphire_rpc_headers() == {"Authorization": "Bearer secret-token"}
 
     def test_rejects_invalid_json(self, monkeypatch):
         monkeypatch.setenv("SAPPHIRE_RPC_HEADERS", "not-json")
