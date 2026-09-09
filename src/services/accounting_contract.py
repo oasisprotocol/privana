@@ -97,7 +97,10 @@ async def _call_with_transient_retry(factory, op: str):
                 raise
             logger.warning(
                 "Transient %s read failure (attempt %d/%d), retrying: %s",
-                op, attempt, _TRANSIENT_READ_ATTEMPTS, exc,
+                op,
+                attempt,
+                _TRANSIENT_READ_ATTEMPTS,
+                exc,
             )
             await asyncio.sleep(_TRANSIENT_READ_BACKOFF_SEC * attempt)
 
