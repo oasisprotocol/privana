@@ -58,7 +58,9 @@ _TOKEN_DECIMALS_CACHE_TTL = 3600  # 1 hour - decimals never change
 _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 
 # Cache size limits
-_TOKEN_CACHE_MAXSIZE = 1000  # Token metadata cache (context + symbols)
+_TOKEN_CACHE_MAXSIZE = 1000
+
+_WITHDRAWAL_INDEX_SCAN_WINDOW = 16  # Token metadata cache (context + symbols)
 
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
@@ -116,6 +118,7 @@ class SubmissionResult:
     submission_id: str
     status: str
     detail: Optional[str] = None
+    index: Optional[int] = None
 
 
 @dataclass
@@ -956,9 +959,45 @@ class AccountingContractService:
             detail_parts.append(f"token_address={context.token_address}")
         detail = "; ".join(detail_parts)
 
+        index = await self._locate_withdrawal_index(user, token, amount)
+
         return SubmissionResult(
-            submission_id=rofl_result.submission_id, status="submitted", detail=detail
+            submission_id=rofl_result.submission_id,
+            status="submitted",
+            detail=detail,
+            index=index,
         )
+
+    async def _locate_withdrawal_index(
+        self, user: str, token: HexBytes, amount: int
+    ) -> Optional[int]:
+        """Find the index of the withdrawal the preceding submit created.
+
+        Newest match wins: per-user nonces order a user's withdrawals, so the
+        most recent (user, token, amount) entry is the one just submitted.
+        Best-effort — the response stays valid without an index.
+
+        Stopgap until the withdrawals revamp: the scan reads the public
+        ``withdrawals`` array, which goes away once withdrawals become
+        private. The clean replacement is ``requestWithdrawal`` returning the
+        index — the ROFL submit path already surfaces contract return values
+        (``ok_payload``), so this whole lookup then collapses into decoding it.
+        """
+        try:
+            contract_reader = self._get_reader_contract()
+            count = await contract_reader.functions.withdrawalCount().call()
+            floor = max(count - _WITHDRAWAL_INDEX_SCAN_WINDOW, 0)
+            for index in range(count - 1, floor - 1, -1):
+                result = await contract_reader.functions.withdrawals(index).call()
+                if (
+                    result[0].lower() == user.lower()
+                    and int(result[2]) == amount
+                    and bytes(result[4]) == bytes(token)
+                ):
+                    return index
+        except Exception:
+            logger.exception("Failed to locate withdrawal index after submission")
+        return None
 
     async def resolve_withdrawal(self, index: int) -> SubmissionResult:
         """Submit resolveWithdrawal transaction via ROFL."""

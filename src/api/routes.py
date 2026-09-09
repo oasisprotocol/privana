@@ -76,6 +76,7 @@ from src.models.accounting import (
     WithdrawalInfoResponse,
     WithdrawalNonceResponse,
     WithdrawalRequest,
+    WithdrawalSubmissionResponse,
     WithdrawFromLockRequest,
     _normalise_hex,
 )
@@ -1240,13 +1241,18 @@ async def unlock_funds(payload: UnlockFundsRequest) -> TransactionSubmissionResp
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 
-@router.post("/withdraw", response_model=TransactionSubmissionResponse)
-async def request_withdrawal(payload: WithdrawalRequest) -> TransactionSubmissionResponse:
+@router.post("/withdraw", response_model=WithdrawalSubmissionResponse)
+async def request_withdrawal(payload: WithdrawalRequest) -> WithdrawalSubmissionResponse:
     """Request a withdrawal by validating the user's signature. Must be resolved in a later block."""
 
     try:
         submission = await _service.request_withdrawal(payload.model_dump())
-        return _wrap_submission(submission)
+        return WithdrawalSubmissionResponse(
+            submission_id=submission.submission_id,
+            status=submission.status,
+            detail=submission.detail,
+            index=submission.index,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TransactionRevertedError as exc:

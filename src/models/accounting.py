@@ -309,6 +309,17 @@ class TransactionSubmissionResponse(BaseModel):
     detail: Optional[str] = None
 
 
+class WithdrawalSubmissionResponse(TransactionSubmissionResponse):
+    """Withdrawal submission with the created withdrawal's index when known.
+
+    ``index`` lets clients poll ``GET /withdraw/{index}`` for resolution
+    directly; ``null`` when the post-submit lookup failed (the withdrawal was
+    still created).
+    """
+
+    index: Optional[int] = None
+
+
 class UnlockAllExpiredLocksRequest(BaseModel):
     """Payload for unlocking all expired locks for a user."""
 
