@@ -2203,6 +2203,47 @@
         ],
         "title": "WithdrawalRequest",
         "type": "object"
+      },
+      "WithdrawalSubmissionResponse": {
+        "description": "Withdrawal submission with the created withdrawal's index when known.\n\n``index`` lets clients poll ``GET /withdraw/{index}`` for resolution\ndirectly; ``null`` when the post-submit lookup failed (the withdrawal was\nstill created).",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Index"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "submission_id",
+          "status"
+        ],
+        "title": "WithdrawalSubmissionResponse",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -4524,7 +4565,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TransactionSubmissionResponse"
+                  "$ref": "#/components/schemas/WithdrawalSubmissionResponse"
                 }
               }
             },
