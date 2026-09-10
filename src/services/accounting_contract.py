@@ -17,6 +17,7 @@ from sapphirepy import sapphire
 from web3 import AsyncWeb3, Web3
 from web3.constants import ADDRESS_ZERO
 from web3.contract import AsyncContract
+from web3.exceptions import ContractLogicError
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 
 from src.abi.accounting import ACCOUNTING_ABI
@@ -72,6 +73,36 @@ def _ensure_hex(value: str) -> str:
 
 def _to_checksum(address: str) -> ChecksumAddress:
     return Web3.to_checksum_address(address)
+
+
+_TRANSIENT_READ_ATTEMPTS = 10
+_TRANSIENT_READ_BACKOFF_SEC = 1.0
+
+
+async def _call_with_transient_retry(factory, op: str):
+    """Run an idempotent confidential read, retrying transient RPC failures.
+
+    The public Sapphire RPC intermittently drops or rate-limits reads, and a
+    single failed eth_call was surfacing as a raw 500 to clients polling
+    balances. Contract-level reverts (e.g. an expired SIWE token) are not
+    transient and re-raise immediately so callers keep mapping them to 401.
+    """
+    for attempt in range(1, _TRANSIENT_READ_ATTEMPTS + 1):
+        try:
+            return await factory()
+        except ContractLogicError:
+            raise
+        except Exception as exc:
+            if attempt == _TRANSIENT_READ_ATTEMPTS:
+                raise
+            logger.warning(
+                "Transient %s read failure (attempt %d/%d), retrying: %s",
+                op,
+                attempt,
+                _TRANSIENT_READ_ATTEMPTS,
+                exc,
+            )
+            await asyncio.sleep(_TRANSIENT_READ_BACKOFF_SEC * attempt)
 
 
 def _to_prefixed_hex(value: Any) -> str:
@@ -349,7 +380,10 @@ class AccountingContractService:
     async def _get_chain_timestamp(self) -> int:
         if self._confidential_reader_w3 is None:
             raise ValueError("Confidential reader is not initialized")
-        block = await self._confidential_reader_w3.eth.get_block("latest")
+        block = await _call_with_transient_retry(
+            lambda: self._confidential_reader_w3.eth.get_block("latest"),
+            op="get_block",
+        )
         return int(block["timestamp"])
 
     async def _get_chain_web3(self, chain_id: int) -> AsyncWeb3:
@@ -1324,9 +1358,10 @@ class AccountingContractService:
             raise ValueError("limit must be >= 0")
 
         contract_reader = await self._get_confidential_reader_contract()
-        entries, total = await contract_reader.functions.getHistory(
-            offset, limit, siwe_token
-        ).call()
+        entries, total = await _call_with_transient_retry(
+            lambda: contract_reader.functions.getHistory(offset, limit, siwe_token).call(),
+            op="getHistory",
+        )
 
         history = await asyncio.gather(*(self._history_entry_to_dict(entry) for entry in entries))
         return {
@@ -1336,7 +1371,10 @@ class AccountingContractService:
 
     async def _fetch_balance(self, token: HexBytes, siwe_token: bytes) -> int:
         contract_reader = await self._get_confidential_reader_contract()
-        return await contract_reader.functions.balanceOf(bytes(token), siwe_token).call()
+        return await _call_with_transient_retry(
+            lambda: contract_reader.functions.balanceOf(bytes(token), siwe_token).call(),
+            op="balanceOf",
+        )
 
     async def get_batch_balances(
         self, siwe_token: bytes, token_ids_raw: list[str]
@@ -1376,7 +1414,10 @@ class AccountingContractService:
 
     async def _fetch_user_locks(self, siwe_token: bytes) -> list[Any]:
         contract_reader = await self._get_confidential_reader_contract()
-        return await contract_reader.functions.getUserLocks(siwe_token).call()
+        return await _call_with_transient_retry(
+            lambda: contract_reader.functions.getUserLocks(siwe_token).call(),
+            op="getUserLocks",
+        )
 
     async def get_locked_funds(
         self,
