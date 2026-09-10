@@ -4,10 +4,11 @@ services:
       context: .
       args:
         - ENV_FILE=.env.mainnet
-    image: "ghcr.io/oasisprotocol/privana@sha256:aefff53de23ea38e83e782f2b9cc6fe41a5c1a4de0b5a9e0ea495153f817b784"
+    image: "ghcr.io/oasisprotocol/privana@sha256:5e026f431575afd43a759950e23e16d18d3e15afa31e60e2309332dc30e953af"
     platform: linux/amd64
     environment:
       - SWEEP_STATE_DIR=/data/sweep-engine
+      - SAPPHIRE_RPC_HEADERS
       - ONRAMP_PROVIDER
       - TRANSAK_CLIENT_IP_HEADER
       - TRANSAK_IP_ATTESTATION_SECRET
