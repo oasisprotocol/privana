@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from web3.exceptions import ContractLogicError
 
@@ -14,7 +16,8 @@ async def test_retries_transient_failures_then_succeeds():
             raise ConnectionError("rpc dropped")
         return 42
 
-    assert await _call_with_transient_retry(factory, op="balanceOf") == 42
+    with patch("src.services.accounting_contract.asyncio.sleep", AsyncMock()):
+        assert await _call_with_transient_retry(factory, op="balanceOf") == 42
     assert calls["n"] == 3
 
 
@@ -23,7 +26,10 @@ async def test_raises_after_exhausting_attempts():
     async def factory():
         raise ConnectionError("rpc dropped")
 
-    with pytest.raises(ConnectionError):
+    with (
+        patch("src.services.accounting_contract.asyncio.sleep", AsyncMock()),
+        pytest.raises(ConnectionError),
+    ):
         await _call_with_transient_retry(factory, op="balanceOf")
 
 
