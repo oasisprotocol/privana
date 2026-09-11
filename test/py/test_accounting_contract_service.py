@@ -736,3 +736,77 @@ async def test_generate_gas_funding_tx_calls_view_function() -> None:
     contract.functions.generateGasFundingTx.assert_called_once_with(
         Web3.to_checksum_address(to_addr), 84532, 10_000, 42, 1_000_000_000
     )
+
+
+def _domain_tuple(fields: bytes, chain_id: int = 0, salt: bytes = b"\x00" * 32) -> tuple:
+    return (
+        fields,
+        "AccountingModule",
+        "1",
+        chain_id,
+        "0x" + "11" * 20,
+        salt,
+        [],
+    )
+
+
+def _make_domain_service(domain_tuple: tuple) -> AccountingContractService:
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._eip712_domain = None
+    reader = MagicMock()
+    reader.functions.eip712Domain.return_value.call = AsyncMock(return_value=domain_tuple)
+    service._get_reader_contract = MagicMock(return_value=reader)
+    return service
+
+
+@pytest.mark.asyncio
+async def test_eip712_domain_honors_fields_bitmap() -> None:
+    salt = (23294).to_bytes(32, "big")
+    service = _make_domain_service(_domain_tuple(b"\x1b", salt=salt))
+
+    domain = await service._get_eip712_domain()
+
+    assert domain == {
+        "name": "AccountingModule",
+        "version": "1",
+        "verifyingContract": Web3.to_checksum_address("0x" + "11" * 20),
+        "salt": salt,
+    }
+
+
+@pytest.mark.asyncio
+async def test_eip712_domain_keeps_chain_id_for_legacy_contract() -> None:
+    service = _make_domain_service(_domain_tuple(b"\x0f", chain_id=23295))
+
+    domain = await service._get_eip712_domain()
+
+    assert domain["chainId"] == 23295
+    assert "salt" not in domain
+
+
+@pytest.mark.asyncio
+async def test_recover_signer_roundtrips_the_salted_domain() -> None:
+    from eth_account import Account
+    from eth_account.messages import encode_typed_data
+
+    salt = (23294).to_bytes(32, "big")
+    service = _make_domain_service(_domain_tuple(b"\x1b", salt=salt))
+    domain = await service._get_eip712_domain()
+
+    account = Account.create()
+    message_types = [
+        {"name": "tokenId", "type": "bytes32"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "nonce", "type": "uint256"},
+    ]
+    message = {"tokenId": "0x" + "22" * 32, "amount": 100, "nonce": 0}
+    signable = encode_typed_data(
+        domain_data=domain, message_types={"Withdraw": message_types}, message_data=message
+    )
+    signature = account.sign_message(signable).signature
+
+    recovered = await service._recover_eip712_signer(
+        "Withdraw", message_types, message, HexBytes(signature)
+    )
+
+    assert recovered == account.address

@@ -258,17 +258,32 @@ class AccountingContractService:
         return self.contract_reader
 
     async def _get_eip712_domain(self) -> Dict[str, Any]:
+        """Build the signing domain from the contract's ERC-5267 report.
+
+        Only the fields the contract's bitmap declares are included: a field
+        the contract omits (chainId, whose place the salt takes so wallets
+        stop demanding a network switch) must not appear here at all, or the
+        recovered digest diverges. Honoring the bitmap keeps this code
+        correct against both the pre- and post-change contract.
+        """
         if self._eip712_domain is not None:
             return self._eip712_domain
 
         contract_reader = self._get_reader_contract()
         domain = await contract_reader.functions.eip712Domain().call()
-        self._eip712_domain = {
-            "name": domain[1],
-            "version": domain[2],
-            "chainId": int(domain[3]),
-            "verifyingContract": _to_checksum(domain[4]),
-        }
+        fields = int.from_bytes(HexBytes(domain[0]), "big")
+        built: Dict[str, Any] = {}
+        if fields & 0x01:
+            built["name"] = domain[1]
+        if fields & 0x02:
+            built["version"] = domain[2]
+        if fields & 0x04:
+            built["chainId"] = int(domain[3])
+        if fields & 0x08:
+            built["verifyingContract"] = _to_checksum(domain[4])
+        if fields & 0x10:
+            built["salt"] = bytes(HexBytes(domain[5]))
+        self._eip712_domain = built
         return self._eip712_domain
 
     async def _recover_eip712_signer(
