@@ -1,10 +1,10 @@
 import { expect } from 'chai';
 import { ethers, config, upgrades } from 'hardhat';
-import { keccak256, Wallet } from 'ethers';
+import { keccak256, TypedDataDomain, Wallet } from 'ethers';
 import { MockAccounting, MockAccountingV2, MockSiweAuth } from '../typechain-types';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { deployMockAccounting, getDeployer, mockAuthToken } from './utils';
+import { deployMockAccounting, eip712DomainOf, getDeployer, mockAuthToken } from './utils';
 
 // Mirrors of the Solidity enums in contracts/Types.sol. Typechain exposes enum
 // parameters as uint8 at the TS boundary, so we use ordinals — kept in sync with
@@ -85,7 +85,7 @@ describe('Accounting', function () {
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
   let user1: HardhatEthersSigner;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: TypedDataDomain;
   let userWallet1: Wallet;
   let userWallet2: Wallet;
   let tokenId: string;
@@ -111,13 +111,7 @@ describe('Accounting', function () {
     userWallet2 = hdNodeWallet.derivePath("44'/60'/0'/0/0").connect(ethers.provider) as any;
     const userLocks = await accounting.getUserLocks(mockAuthToken(userWallet1.address));
 
-    const domainTuple = await accounting.eip712Domain();
-    domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    }
+    domain = await eip712DomainOf(accounting);
 
     // Set up token info for tests
     const data = ethers.concat([
@@ -774,7 +768,7 @@ describe('Accounting', function () {
 
 describe('WithdrawFromLock', function () {
   let accounting: MockAccounting;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: TypedDataDomain;
   let userWallet1: Wallet;
   let userWallet2: Wallet;
   let userWallet3: Wallet;
@@ -805,13 +799,7 @@ describe('WithdrawFromLock', function () {
 
     accounting = await deployMockAccounting(await mockSiweAuth.getAddress());
 
-    const domainTuple = await accounting.eip712Domain();
-    domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    };
+    domain = await eip712DomainOf(accounting);;
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
@@ -989,7 +977,7 @@ describe('ModifyLock', function () {
   let mockSiweAuth: MockSiweAuth;
   let accountingUser1: MockAccounting;
   let accountingUser2: MockAccounting;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: TypedDataDomain;
   let userWallet1: Wallet;
   let userWallet2: Wallet;
 
@@ -1020,13 +1008,7 @@ describe('ModifyLock', function () {
     accountingUser1 = accounting.connect(userWallet1) as MockAccounting;
     accountingUser2 = accounting.connect(userWallet2) as MockAccounting;
 
-    const domainTuple = await accounting.eip712Domain();
-    domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    }
+    domain = await eip712DomainOf(accounting);
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),

@@ -2,7 +2,7 @@ import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HttpNetworkConfig } from "hardhat/types/config";
 import { config, ethers, network, upgrades } from 'hardhat';
-import { JsonRpcProvider } from 'ethers';
+import { JsonRpcProvider, TypedDataDomain } from 'ethers';
 import { MockAccounting } from "../typechain-types";
 
 /** Equivalent of bytes21(0) in Solidity. Disables onlyROFL checks in Accounting. */
@@ -34,6 +34,25 @@ export function getDeployer(index?: number): HardhatEthersSigner {
  */
 export function mockAuthToken(address: string) {
 	return ethers.hexlify(ethers.zeroPadValue(address, 32))
+}
+
+/**
+ * Builds the EIP-712 signing domain from the contract's ERC-5267 report,
+ * including only the fields its bitmap declares. ethers derives the
+ * EIP712Domain type from the keys present on the object, so a field the
+ * contract omits (chainId) must not appear here at all — an explicit
+ * `chainId: 0` would hash a different domain separator.
+ */
+export async function eip712DomainOf(contract: MockAccounting): Promise<TypedDataDomain> {
+	const [fields, name, version, chainId, verifyingContract, salt] = await contract.eip712Domain();
+	const bitmap = Number(fields);
+	const domain: TypedDataDomain = {};
+	if (bitmap & 0x01) domain.name = name;
+	if (bitmap & 0x02) domain.version = version;
+	if (bitmap & 0x04) domain.chainId = chainId;
+	if (bitmap & 0x08) domain.verifyingContract = verifyingContract;
+	if (bitmap & 0x10) domain.salt = salt;
+	return domain;
 }
 
 /**

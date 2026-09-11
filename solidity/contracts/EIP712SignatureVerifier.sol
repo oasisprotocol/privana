@@ -3,6 +3,7 @@
 pragma solidity ^0.8.20;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
@@ -20,6 +21,15 @@ import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/crypt
  * - Support for withdraw, lock, transfer, locked transfer, lock modification,
  *   and locked-fund withdrawal operations
  * - Domain separation with name "AccountingModule" and version "1"
+ *
+ * The domain deliberately omits `chainId` so wallets sign these messages
+ * regardless of which network they are connected to (MetaMask and Rabby
+ * refuse eth_signTypedData_v4 when domain.chainId differs from the active
+ * chain, which forced users to add and switch to Sapphire for every
+ * signature). Cross-deployment replay protection rests on `verifyingContract`
+ * instead: deployments on different chains MUST NOT share an address, so
+ * these contracts must never be deployed through a public deterministic
+ * factory (same-address CREATE2 on another chain would break the guarantee).
  *
  * The contract prevents signature replay attacks via per-operation nonces and ensures
  * that only the rightful user can authorize operations on their funds.
@@ -55,6 +65,67 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     error InvalidSignature();
     /// @notice Thrown when the provided nonce doesn't match the expected nonce
     error InvalidNonce();
+
+    /// @notice EIP-712 domain typehash without the chainId field (see contract docs)
+    bytes32 private constant CHAINLESS_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,address verifyingContract)");
+
+    /// @notice keccak256 of the domain name; must stay in sync with __EIP712_init above
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("AccountingModule"));
+
+    /// @notice keccak256 of the domain version; must stay in sync with __EIP712_init above
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
+    function _chainlessDomainSeparator() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                CHAINLESS_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                address(this)
+            )
+        );
+    }
+
+    /**
+     * @dev Replaces OZ's domain separator, which bakes `block.chainid` into the
+     *      digest and would force signers onto the Sapphire network.
+     */
+    function _hashTypedDataV4(bytes32 structHash) internal view override returns (bytes32) {
+        return MessageHashUtils.toTypedDataHash(_chainlessDomainSeparator(), structHash);
+    }
+
+    /**
+     * @notice ERC-5267 domain introspection, reporting the chainless domain.
+     * @dev Wallets and libraries build the signing domain from this, so it must
+     *      describe exactly what `_hashTypedDataV4` verifies: the fields bitmap
+     *      0x0b sets name (0x01), version (0x02) and verifyingContract (0x08)
+     *      but not chainId (0x04).
+     */
+    function eip712Domain()
+        public
+        view
+        override
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (
+            hex"0b",
+            "AccountingModule",
+            "1",
+            0,
+            address(this),
+            bytes32(0),
+            new uint256[](0)
+        );
+    }
 
     /// @notice EIP-712 type hash for withdraw operations
     bytes32 private constant WITHDRAW_TYPEHASH =
