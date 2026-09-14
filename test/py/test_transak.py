@@ -626,7 +626,8 @@ def test_ip_attestation_requires_attested_mode() -> None:
         )
 
 
-async def test_token_cache_and_session_request_are_exact() -> None:
+@pytest.mark.parametrize("default_crypto_amount", [None, 12.5])
+async def test_token_cache_and_session_request_are_exact(default_crypto_amount) -> None:
     now = [1_800_000_000.0]
     requests: list[httpx.Request] = []
 
@@ -646,6 +647,7 @@ async def test_token_cache_and_session_request_are_exact() -> None:
         transaction_id=intent["transaction_id"],
         wallet_address=WALLET,
         user_ip="8.8.8.8",
+        default_crypto_amount=default_crypto_amount,
         config=CONFIG,
     )
     await service.create_widget_session(
@@ -675,6 +677,11 @@ async def test_token_cache_and_session_request_are_exact() -> None:
             "walletAddress": WALLET,
             "disableWalletAddressForm": True,
             "partnerOrderId": intent["transaction_id"],
+            **(
+                {"defaultCryptoAmount": default_crypto_amount}
+                if default_crypto_amount is not None
+                else {}
+            ),
         }
     }
 

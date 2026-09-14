@@ -330,6 +330,7 @@ class TransakService:
         transaction_id: str,
         wallet_address: str,
         user_ip: str,
+        default_crypto_amount: float | None = None,
         config: TransakConfig | None = None,
     ) -> dict[str, Any]:
         """Create one backend-only, locked-address widget session."""
@@ -346,6 +347,8 @@ class TransakService:
             "disableWalletAddressForm": True,
             "partnerOrderId": transaction_id,
         }
+        if default_crypto_amount is not None:
+            widget_params["defaultCryptoAmount"] = default_crypto_amount
         payload = await self._authenticated_json_request(
             "POST",
             f"{config.gateway_base_url}/api/v2/auth/session",

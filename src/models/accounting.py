@@ -700,6 +700,13 @@ class CreateOnRampSessionRequest(BaseModel):
 
     transaction_id: str = Field(..., min_length=1, max_length=INTENT_MAX_LENGTH)
     ip_attestation: OnRampIpAttestation | None = None
+    default_crypto_amount: float | None = Field(
+        default=None,
+        strict=True,
+        gt=0,
+        allow_inf_nan=False,
+        description="Editable Transak quote amount in token units; not a delivery guarantee.",
+    )
 
 
 class OnRampSessionResponse(BaseModel):

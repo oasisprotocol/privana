@@ -187,6 +187,19 @@
       "CreateOnRampSessionRequest": {
         "description": "Request a short-lived session for a signed on-ramp intent.",
         "properties": {
+          "default_crypto_amount": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Editable Transak quote amount in token units; not a delivery guarantee.",
+            "title": "Default Crypto Amount"
+          },
           "ip_attestation": {
             "anyOf": [
               {

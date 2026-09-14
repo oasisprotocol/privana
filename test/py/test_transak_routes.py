@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from web3 import Web3
@@ -264,7 +265,40 @@ def test_session_uses_trusted_ip_and_returns_only_opaque_state(monkeypatch, tmp_
     assert kwargs["transaction_id"] == intent["transaction_id"]
     assert kwargs["wallet_address"] == DEPOSIT_ADDRESS
     assert kwargs["user_ip"] == "203.0.113.4"
+    assert kwargs["default_crypto_amount"] is None
     assert accounting.get_deposit_address.await_count == 2
+
+
+def test_session_forwards_editable_quote_default(monkeypatch, tmp_path) -> None:
+    client, _accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    response = client.post(
+        "/v1/accounting/onramp/session",
+        json={"transaction_id": intent["transaction_id"], "default_crypto_amount": 12.5},
+        headers={"x-original-user-ip": "203.0.113.4"},
+    )
+
+    assert response.status_code == 200
+    kwargs = provider_service.create_widget_session.await_args.kwargs
+    assert kwargs["default_crypto_amount"] == 12.5
+    assert kwargs["transaction_id"] == intent["transaction_id"]
+    assert kwargs["wallet_address"] == DEPOSIT_ADDRESS
+
+
+@pytest.mark.parametrize("amount", [True, "12.5", 0, -1])
+def test_session_rejects_invalid_quote_default_before_provider_call(
+    monkeypatch, tmp_path, amount
+) -> None:
+    client, _accounting, provider_service = _make_client(monkeypatch, tmp_path)
+    intent = _create_intent(client)
+    response = client.post(
+        "/v1/accounting/onramp/session",
+        json={"transaction_id": intent["transaction_id"], "default_crypto_amount": amount},
+        headers={"x-original-user-ip": "203.0.113.4"},
+    )
+
+    assert response.status_code == 422
+    provider_service.create_widget_session.assert_not_awaited()
 
 
 def test_session_rejects_missing_or_ambiguous_trusted_ip(monkeypatch, tmp_path) -> None:
