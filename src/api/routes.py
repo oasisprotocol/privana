@@ -760,6 +760,7 @@ async def create_onramp_session(
             transaction_id=payload.transaction_id,
             wallet_address=deposit_address,
             user_ip=user_ip,
+            default_crypto_amount=payload.default_crypto_amount,
             config=config,
         )
         logger.info(
