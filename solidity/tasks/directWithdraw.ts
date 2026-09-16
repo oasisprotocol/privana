@@ -7,6 +7,7 @@
  */
 import { task } from "hardhat/config";
 import { JsonRpcProvider } from "ethers";
+import { eip712DomainOf } from "./utils/eip712";
 
 /**
  * Known source-chain RPC URLs. Env vars take precedence.
@@ -56,13 +57,7 @@ task("directWithdraw", "Withdraw directly on-chain without ROFL/API")
     console.log("Withdrawal nonce:", nonce.toString());
 
     // 2. Get EIP-712 domain
-    const domainTuple = await accounting.eip712Domain();
-    const domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    };
+    const domain = await eip712DomainOf(accounting);
 
     // 3. Sign EIP-712 withdrawal
     const types = {
