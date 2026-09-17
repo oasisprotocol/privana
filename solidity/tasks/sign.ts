@@ -1,4 +1,5 @@
 import { task } from "hardhat/config";
+import { eip712DomainOf } from "./utils/eip712";
 
 task("sign")
   .addParam("contract", "The address of the Accounting contract")
@@ -14,13 +15,7 @@ task("sign")
     const [signer] = await hre.ethers.getSigners();
     const accounting = await hre.ethers.getContractAt("Accounting", args.contract);
 
-    const domainTuple = await accounting.eip712Domain();
-    const domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    };
+    const domain = await eip712DomainOf(accounting);
 
     const amountWei = hre.ethers.parseEther(args.amount);
     const signatureType = args.type.toLowerCase();

@@ -6,6 +6,7 @@ import {
   isJsonObject,
   normalizeApiBaseUrl,
 } from "./utils/siwe";
+import { eip712DomainOf } from "./utils/eip712";
 
 async function tryFetchBalance(
   siweToken: string | null,
@@ -71,13 +72,7 @@ task("transfer")
     );
 
     // Get EIP-712 domain from contract
-    const domainTuple = await accounting.eip712Domain();
-    const domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    };
+    const domain = await eip712DomainOf(accounting);
 
     console.log("\nEIP-712 Domain:", domain);
 

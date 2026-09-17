@@ -36,6 +36,8 @@ export function mockAuthToken(address: string) {
 	return ethers.hexlify(ethers.zeroPadValue(address, 32))
 }
 
+export { eip712DomainOf } from '../tasks/utils/eip712';
+
 /**
  * Advances chain time until `block.timestamp` exceeds `targetTimestamp`.
  * Sapphire nodes do not support evm_increaseTime/evm_mine, so there we wait

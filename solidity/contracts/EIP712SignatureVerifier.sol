@@ -3,6 +3,7 @@
 pragma solidity ^0.8.20;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
@@ -20,6 +21,15 @@ import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/crypt
  * - Support for withdraw, lock, transfer, locked transfer, lock modification,
  *   and locked-fund withdrawal operations
  * - Domain separation with name "AccountingModule" and version "1"
+ *
+ * The domain deliberately omits `chainId` so wallets sign these messages
+ * regardless of which network they are connected to (MetaMask and Rabby
+ * refuse eth_signTypedData_v4 when domain.chainId differs from the active
+ * chain, which forced users to add and switch to Sapphire for every
+ * signature). The chain binding moves into the standard `salt` field as
+ * bytes32(block.chainid): wallets do not validate salt against the connected
+ * network, but the domain separator still differs per chain, so signatures
+ * cannot replay across deployments even if contract addresses collide.
  *
  * The contract prevents signature replay attacks via per-operation nonces and ensures
  * that only the rightful user can authorize operations on their funds.
@@ -55,6 +65,69 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     error InvalidSignature();
     /// @notice Thrown when the provided nonce doesn't match the expected nonce
     error InvalidNonce();
+
+    /// @notice EIP-712 domain typehash carrying the chain in `salt` instead of `chainId`
+    bytes32 private constant SALTED_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,address verifyingContract,bytes32 salt)");
+
+    /// @notice keccak256 of the domain name; must stay in sync with __EIP712_init above
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("AccountingModule"));
+
+    /// @notice keccak256 of the domain version; must stay in sync with __EIP712_init above
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
+    function _saltedDomainSeparator() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                SALTED_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                address(this),
+                bytes32(block.chainid)
+            )
+        );
+    }
+
+    /**
+     * @dev Replaces OZ's domain separator, which puts `block.chainid` in the
+     *      `chainId` field wallets validate; ours carries it in `salt`, which
+     *      they do not.
+     */
+    function _hashTypedDataV4(bytes32 structHash) internal view override returns (bytes32) {
+        return MessageHashUtils.toTypedDataHash(_saltedDomainSeparator(), structHash);
+    }
+
+    /**
+     * @notice ERC-5267 domain introspection, reporting the chainless domain.
+     * @dev Wallets and libraries build the signing domain from this, so it must
+     *      describe exactly what `_hashTypedDataV4` verifies: the fields bitmap
+     *      0x1b sets name (0x01), version (0x02), verifyingContract (0x08) and
+     *      salt (0x10) but not chainId (0x04).
+     */
+    function eip712Domain()
+        public
+        view
+        override
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (
+            hex"1b",
+            "AccountingModule",
+            "1",
+            0,
+            address(this),
+            bytes32(block.chainid),
+            new uint256[](0)
+        );
+    }
 
     /// @notice EIP-712 type hash for withdraw operations
     bytes32 private constant WITHDRAW_TYPEHASH =

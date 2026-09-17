@@ -2,9 +2,9 @@ import { expect } from 'chai';
 import { config, ethers, upgrades } from 'hardhat';
 import { HardhatNetworkHDAccountsConfig } from 'hardhat/types';
 import { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
-import { Block, Wallet } from 'ethers';
+import { Block, TypedDataDomain, Wallet } from 'ethers';
 import { MockAccounting, MockSiweAuth } from '../typechain-types';
-import { advanceTimePast, deployMockAccounting, mockAuthToken } from './utils';
+import { advanceTimePast, deployMockAccounting, eip712DomainOf, mockAuthToken } from './utils';
 
 const types = {
   Lock: [
@@ -100,7 +100,7 @@ describe('Accounting history', function () {
   let userWallet2: Wallet;
   let userWallet3: Wallet;
   let user1Signer: HardhatEthersSigner;
-  let domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  let domain: TypedDataDomain;
 
   beforeEach(async function () {
     const [deployer] = await ethers.getSigners();
@@ -131,13 +131,7 @@ describe('Accounting history', function () {
     await accounting.setTokenInfo({ tokenType: TEST_TOKEN.tokenType, data });
     await accounting.setGasPrice(TEST_TOKEN.chainId, 1000000000n);
 
-    const domainTuple = await accounting.eip712Domain();
-    domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    };
+    domain = await eip712DomainOf(accounting);;
   });
 
   it('uses _authSender semantics for empty and non-empty tokens while isolating users', async function () {

@@ -2,6 +2,7 @@ import { task } from "hardhat/config";
 import * as cbor from "cbor";
 import { Interface } from "ethers";
 import { fetchJson, isJsonObject, normalizeApiBaseUrl } from "./utils/siwe";
+import { eip712DomainOf } from "./utils/eip712";
 
 // Build error selectors from the ABI (lazy loaded)
 let ERROR_SELECTORS: Record<string, string> | null = null;
@@ -124,13 +125,7 @@ task("withdraw")
     console.log("Amount (base units):", args.amount);
 
     // Get EIP-712 domain from contract
-    const domainTuple = await accounting.eip712Domain();
-    const domain = {
-      name: domainTuple[1],
-      version: domainTuple[2],
-      chainId: Number(domainTuple[3]),
-      verifyingContract: domainTuple[4],
-    };
+    const domain = await eip712DomainOf(accounting);
 
     console.log("\nEIP-712 Domain:", domain);
 
