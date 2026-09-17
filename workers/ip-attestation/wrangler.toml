@@ -16,7 +16,16 @@ routes = [
 [env.staging.vars]
 REFERRER_DOMAIN = "app.testnet.privana.finance"
 
-# Secrets (never in this file):
+[env.production]
+routes = [
+  { pattern = "app.privana.finance/__onramp-ip-attest", zone_name = "privana.finance" },
+]
+
+[env.production.vars]
+REFERRER_DOMAIN = "app.privana.finance"
+
+# Secrets (never in this file), one independent value per environment:
 #   wrangler secret put ATTESTATION_SECRET --env staging
-# The same value is provisioned to the backend as TRANSAK_IP_ATTESTATION_SECRET
-# via an encrypted ROFL secret. Minimum 32 characters.
+#   wrangler secret put ATTESTATION_SECRET --env production
+# The same value is provisioned to the matching backend deployment as
+# TRANSAK_IP_ATTESTATION_SECRET via an encrypted ROFL secret. Minimum 32 characters.

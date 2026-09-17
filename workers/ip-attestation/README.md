@@ -12,7 +12,8 @@ proxy.
 The browser SDK calls this same-origin Worker route directly; the Privana
 backend does not serve it.
 
-- `POST https://app.testnet.privana.finance/__onramp-ip-attest`
+- `POST https://app.privana.finance/__onramp-ip-attest` (production) or
+  `POST https://app.testnet.privana.finance/__onramp-ip-attest` (staging)
 - Request: `{"intentHash": "<sha256 hex of the signed intent value>"}` — the
   raw signed intent never reaches Cloudflare.
 - Response: `{"v": 1, "ip", "iat", "exp", "nonce", "sig"}` with a 60-second
@@ -25,11 +26,14 @@ backend does not serve it.
 ## Deploy
 
 ```shell
-# One-time secret; identical value goes to the backend as the encrypted ROFL
-# secret TRANSAK_IP_ATTESTATION_SECRET (>= 32 chars).
+# One-time secret per environment; identical value goes to the matching ROFL
+# deployment (staging: testnet, production: mainnet) as the encrypted secret
+# TRANSAK_IP_ATTESTATION_SECRET (>= 32 chars). Never reuse one across both.
 wrangler secret put ATTESTATION_SECRET --env staging
-
 wrangler deploy --env staging
+
+wrangler secret put ATTESTATION_SECRET --env production
+wrangler deploy --env production
 ```
 
 ## Zone preflight (required)
@@ -55,10 +59,12 @@ before deploying the Worker, then verify it before enabling attested mode:
 - initial limit: 5 requests per 10 seconds per characteristic;
 - action: block for 10 seconds.
 
-When supported, also match the frontend host and `POST` method. After deployment,
-verify mitigation in Cloudflare Security Events and normal access after the block
-window. The gate must run before Worker execution; a Worker-local counter is not
-a substitute.
+When supported, also match the frontend host and `POST` method. On a zone plan
+with a single rate limiting rule, match both frontend hosts in that one rule
+(`http.host in {"app.privana.finance" "app.testnet.privana.finance"}`). After
+deployment, verify mitigation in Cloudflare Security Events and normal access
+after the block window. The gate must run before Worker execution; a
+Worker-local counter is not a substitute.
 
 ## Security notes
 
