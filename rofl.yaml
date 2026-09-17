@@ -50,6 +50,8 @@ deployments:
         value: pGJwa1ggZ9isc3vdD7ryyePluAXBuuTVfYJviJP0fVPWugrBLihkbmFtZVgiNU3dgATgeE1Q8pY7clnNvlJ94+Clc9aTAAmgfLNTNJQdW2Vub25jZU9DkZ4BJNp+Jiynr8Ej/3dldmFsdWVYKPMuIcEfW4iEXrpWwNkbARlf3qcdwArvc1zXcnHaW7lurJzcJKLJ8Q4=
       - name: SAPPHIRE_RPC_HEADERS
         value: pGJwa1gggHR93V1cw3KevzlX7RzMx2WvTKonHSQQAmvn73kmgl5kbmFtZVgkaMMpLtQk8K5lTkORI+Q+wjHxBOn33CVORR00hRFTJWgq2/ZBZW5vbmNlT+EBhx7mg1ABgUIqoE3/SmV2YWx1ZVheFiB+pZSoK0JbEQAu2XFlCM1VuCnaLLFzgFrMN0Jl5TnpfND2Z+n/LS3bIbfqenfY06P9mMQy0zvKoEFWXAjbylpKeNdyQ1FwZo78I5OtoqJCeH7r8VBMe2FDmm/TeA==
+      - name: TRANSAK_IP_ATTESTATION_SECRET
+        value: pGJwa1ggjB1GeC5VRwh5HfPqMvhPt0YkssbuNiQ7rDG6WwPu5k9kbmFtZVgtvVP5U9AIF8Ay/nwl7ATOoKYmoJAWUCPSNEv9+P8VOhyhcHqveIkptUtD+0spZW5vbmNlT74w8zu8s1NT0vFiYh3QX2V2YWx1ZVhAgNZBPXISZRX7fi8NFtlu8p6Hj7bmTE+8fZwJ7Phb5uV7heFeJe9Zjg8cQhEtXk0vOMbHoPaGywAmeH/a+kGGIQ==
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
