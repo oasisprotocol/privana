@@ -8,6 +8,10 @@
  *
  * Signed payload (must match src/services/transak.py verify_ip_attestation):
  *   v1|{REFERRER_DOMAIN}|{intent_hash}|{ip}|{iat}|{exp}|{nonce}
+ *
+ * Requests from OFAC-sanctioned territories are refused before signing, so no
+ * claim exists for the backend to accept. The zone plan does not expose
+ * subdivisions to WAF custom rules, so the region check lives here.
  */
 
 const ATTESTATION_TTL_SECONDS = 60;
@@ -20,6 +24,16 @@ const REFERRER_DOMAIN_PATTERN =
 // bytes. Cap it so this unauthenticated endpoint cannot be made to buffer and
 // parse a large payload.
 const MAX_BODY_BYTES = 512;
+
+// Comprehensively sanctioned countries (ISO 3166-1 alpha-2).
+const SANCTIONED_COUNTRIES = new Set(["CU", "IR", "KP"]);
+// Occupied Ukrainian territories, by the subdivision part of their ISO 3166-2
+// code: Crimea, Sevastopol, Donetsk, Luhansk. Geolocation sources disagree on
+// whether these report under UA or RU, so both attributions are covered.
+const SANCTIONED_SUBDIVISIONS = {
+  UA: new Set(["43", "40", "14", "09"]),
+  RU: new Set(["CR", "SEV"]),
+};
 
 class RequestBodyTooLargeError extends Error {}
 
@@ -117,6 +131,29 @@ function isValidReferrerDomain(value) {
   return /[a-z]/.test(topLevelLabel);
 }
 
+// Fail closed: an absent or unrecognised origin is treated as sanctioned, so a
+// missing `cf` object can never widen access.
+function isSanctionedOrigin(cf) {
+  if (!cf || typeof cf.country !== "string" || cf.country === "") {
+    return true;
+  }
+  const country = cf.country.toUpperCase();
+  if (SANCTIONED_COUNTRIES.has(country)) {
+    return true;
+  }
+  const subdivisions = SANCTIONED_SUBDIVISIONS[country];
+  if (!subdivisions) {
+    return false;
+  }
+  // `regionCode` carries the subdivision part ("43"), but tolerate a full ISO
+  // 3166-2 code ("UA-43") so the check does not depend on that detail.
+  if (typeof cf.regionCode !== "string" || cf.regionCode === "") {
+    return true;
+  }
+  const code = cf.regionCode.toUpperCase().replace(new RegExp(`^${country}-`), "");
+  return subdivisions.has(code);
+}
+
 function isRejectedIp(ip) {
   if (ip.includes(":")) {
     const lower = ip.toLowerCase();
@@ -171,6 +208,9 @@ export default {
     const ip = canonicalizeIp(request.headers.get("cf-connecting-ip"));
     if (!ip || isRejectedIp(ip)) {
       return json(400, { error: "client ip is not attestable" });
+    }
+    if (isSanctionedOrigin(request.cf)) {
+      return json(403, { error: "region is not attestable" });
     }
 
     const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
