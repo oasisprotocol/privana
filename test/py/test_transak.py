@@ -217,6 +217,7 @@ def _worker_input(**overrides) -> dict:
             "content-type": "application/json",
         },
         "body": {"intentHash": intent_hash},
+        "cf": {"country": "SI", "regionCode": "012"},
         "env": {
             "ATTESTATION_SECRET": ATTESTATION_SECRET,
             "REFERRER_DOMAIN": CONFIG.referrer_domain,
@@ -393,6 +394,73 @@ def test_worker_python_ip_attestation_conformance(observed_ip, canonical_ip) -> 
 def test_worker_rejects_noncanonical_or_ambiguous_inputs(overrides, expected_status) -> None:
     result = _run_worker(_worker_input(**overrides))
     assert result["status"] == expected_status, result
+
+
+@pytest.mark.parametrize(
+    "cf",
+    [
+        {"country": "CU", "regionCode": "14"},
+        {"country": "IR", "regionCode": "07"},
+        {"country": "KP", "regionCode": "01"},
+        # Occupied Ukrainian territories: Crimea, Sevastopol, Donetsk, Luhansk.
+        {"country": "UA", "regionCode": "43"},
+        {"country": "UA", "regionCode": "40"},
+        {"country": "UA", "regionCode": "14"},
+        {"country": "UA", "regionCode": "09"},
+        # Same territories with a full ISO 3166-2 code, or attributed to RU.
+        {"country": "UA", "regionCode": "UA-43"},
+        {"country": "RU", "regionCode": "CR"},
+        {"country": "RU", "regionCode": "RU-SEV"},
+        # Lowercase, as some sources report it.
+        {"country": "ua", "regionCode": "ua-43"},
+    ],
+)
+def test_worker_refuses_sanctioned_origins(cf) -> None:
+    result = _run_worker(_worker_input(cf=cf))
+    assert result["status"] == 403, result
+    assert result["body"] == {"error": "region is not attestable"}, result
+
+
+@pytest.mark.parametrize(
+    "cf",
+    [
+        None,
+        {},
+        {"country": ""},
+        {"regionCode": "43"},
+        # A sanctioned-subdivision country must carry a region to be cleared.
+        {"country": "UA"},
+        {"country": "UA", "regionCode": ""},
+    ],
+)
+def test_worker_fails_closed_without_usable_geolocation(cf) -> None:
+    worker_input = _worker_input()
+    if cf is None:
+        # No `cf` at all, as when the request never traversed the edge.
+        worker_input.pop("cf")
+    else:
+        worker_input["cf"] = cf
+    result = _run_worker(worker_input)
+    assert result["status"] == 403, result
+
+
+@pytest.mark.parametrize(
+    "cf",
+    [
+        {"country": "SI", "regionCode": "012"},
+        {"country": "US", "regionCode": "TX"},
+        # Unoccupied Ukrainian region.
+        {"country": "UA", "regionCode": "30"},
+        # A bare subdivision code that only matters under UA must not block
+        # an unrelated country that happens to reuse it.
+        {"country": "FR", "regionCode": "43"},
+        {"country": "RU", "regionCode": "MOW"},
+    ],
+)
+def test_worker_signs_for_permitted_origins(cf) -> None:
+    result = _run_worker(_worker_input(cf=cf))
+    assert result["status"] == 200, result
+    assert result["body"]["v"] == 1, result
 
 
 def test_session_ip_config_is_mode_aware_fail_closed(monkeypatch) -> None:

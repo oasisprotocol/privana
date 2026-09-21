@@ -31,14 +31,17 @@ if (input.nonceHex !== undefined) {
 const workerModule = await import("../../workers/ip-attestation/worker.js");
 
 const body = input.bodyText ?? (input.body === undefined ? undefined : JSON.stringify(input.body));
-const response = await workerModule.default.fetch(
-  new Request(input.url, {
-    method: input.method ?? "POST",
-    headers: input.headers ?? {},
-    body,
-  }),
-  input.env ?? {},
-);
+const request = new Request(input.url, {
+  method: input.method ?? "POST",
+  headers: input.headers ?? {},
+  body,
+});
+// Workers expose request geolocation on `cf`; Node's Request has no such
+// property, so tests inject it. Omitting it exercises the fail-closed path.
+if (input.cf !== undefined) {
+  Object.defineProperty(request, "cf", { value: input.cf });
+}
+const response = await workerModule.default.fetch(request, input.env ?? {});
 const responseText = await response.text();
 let responseBody;
 try {
