@@ -47,6 +47,27 @@ enabling attested mode:
 - The route stays on the frontend zone; never proxy or CDN-front the API host,
   because bearer tokens are replayable.
 
+### Geographic restrictions
+
+The Worker refuses to sign for OFAC-sanctioned territories, so no claim exists
+for the backend to accept:
+
+- Cuba (`CU`), Iran (`IR`), North Korea (`KP`);
+- occupied Ukrainian territories by ISO 3166-2 subdivision — Crimea (`UA-43`),
+  Sevastopol (`UA-40`), Donetsk (`UA-14`), Luhansk (`UA-09`) — also matched
+  when a source attributes them to `RU`.
+
+The check reads `request.cf` and fails closed: an absent or unplaceable origin
+is refused, including Cloudflare's reserved `XX` (no country data) and `T1`
+(Tor exit node). `ip.src.subdivision_1_iso_code` needs a Business or Enterprise
+plan, so the subdivision half of this control cannot be a WAF rule on lower
+plans.
+
+Mirror the country half in a WAF custom rule so that traffic is dropped before
+the Worker runs (`ip.src.country in {"CU" "IR" "KP" "T1" "XX"}`, action Block).
+Being IP-based, this does not defeat a VPN or proxy that exits outside the
+refused set.
+
 ### Edge rate-limit gate
 
 Create a Cloudflare zone
