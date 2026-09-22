@@ -34,6 +34,9 @@ const SANCTIONED_SUBDIVISIONS = {
   UA: new Set(["43", "40", "14", "09"]),
   RU: new Set(["CR", "SEV"]),
 };
+// Cloudflare reports `XX` when it has no country data and `T1` for Tor exit
+// nodes. Neither origin can be placed, so neither is attestable.
+const UNPLACEABLE_COUNTRIES = new Set(["XX", "T1"]);
 
 class RequestBodyTooLargeError extends Error {}
 
@@ -131,14 +134,14 @@ function isValidReferrerDomain(value) {
   return /[a-z]/.test(topLevelLabel);
 }
 
-// Fail closed: an absent or unrecognised origin is treated as sanctioned, so a
-// missing `cf` object can never widen access.
-function isSanctionedOrigin(cf) {
+// Fail closed: an absent or unplaceable origin is refused, so missing or
+// anonymised geolocation can never widen access.
+function isNonAttestableOrigin(cf) {
   if (!cf || typeof cf.country !== "string" || cf.country === "") {
     return true;
   }
   const country = cf.country.toUpperCase();
-  if (SANCTIONED_COUNTRIES.has(country)) {
+  if (SANCTIONED_COUNTRIES.has(country) || UNPLACEABLE_COUNTRIES.has(country)) {
     return true;
   }
   const subdivisions = SANCTIONED_SUBDIVISIONS[country];
@@ -209,7 +212,7 @@ export default {
     if (!ip || isRejectedIp(ip)) {
       return json(400, { error: "client ip is not attestable" });
     }
-    if (isSanctionedOrigin(request.cf)) {
+    if (isNonAttestableOrigin(request.cf)) {
       return json(403, { error: "region is not attestable" });
     }
 

@@ -428,6 +428,12 @@ def test_worker_refuses_sanctioned_origins(cf) -> None:
         {},
         {"country": ""},
         {"regionCode": "43"},
+        # Cloudflare's reserved codes: no country data, and Tor exit nodes.
+        {"country": "XX"},
+        {"country": "T1"},
+        {"country": "t1"},
+        # A known region must not rescue an unplaceable country.
+        {"country": "XX", "regionCode": "43"},
         # A sanctioned-subdivision country must carry a region to be cleared.
         {"country": "UA"},
         {"country": "UA", "regionCode": ""},
