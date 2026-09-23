@@ -60,7 +60,8 @@ _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000
 
-_WITHDRAWAL_INDEX_SCAN_WINDOW = 16  # Token metadata cache (context + symbols)
+_WITHDRAWAL_INDEX_SCAN_WINDOW = 16
+_WITHDRAWAL_READ_BATCH_SIZE = 50  # withdrawals(i) reads per JSON-RPC batch
 
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
@@ -109,6 +110,20 @@ async def _call_with_transient_retry(factory, op: str):
 
 def _to_prefixed_hex(value: Any) -> str:
     return HexBytes(value).to_0x_hex().lower()
+
+
+def _parse_withdrawal(index: int, result: Any) -> Dict[str, Any]:
+    """Map a `withdrawals(index)` tuple to the API's WithdrawalInfo shape."""
+    return {
+        "index": index,
+        "user_address": result[0],
+        "to_address": result[1],
+        "amount": str(result[2]),
+        "block_number": result[3],
+        "token_id": "0x" + result[4].hex(),
+        "resolved": result[5],
+        "tx_identifier": "0x" + result[6].hex() if result[6] else "0x",
+    }
 
 
 @dataclass
@@ -161,6 +176,15 @@ class AccountingContractService:
         self._siwe_auth_reader: Optional[AsyncContract] = None
         self._confidential_siwe_auth_reader: Optional[AsyncContract] = None
         self._eip712_domain: Optional[Dict[str, Any]] = None
+
+        # Incremental index over the append-only `withdrawals` array. Every
+        # index below `_withdrawals_scanned` has been read once; only the
+        # unresolved entries are kept. `resolved` is the only field that ever
+        # changes (false -> true, once), so cached entries stay valid until
+        # they resolve.
+        self._withdrawals_scanned = 0
+        self._unresolved_withdrawals: Dict[int, Dict[str, Any]] = {}
+        self._withdrawals_lock = asyncio.Lock()
 
         self.rofl_client = RoflAppdClient()
         self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
@@ -1022,121 +1046,136 @@ class AccountingContractService:
     async def get_withdrawal(self, index: int) -> Dict[str, Any]:
         contract_reader = self._get_reader_contract()
         result = await contract_reader.functions.withdrawals(index).call()
+        return _parse_withdrawal(index, result)
 
-        return {
-            "index": index,
-            "user_address": result[0],
-            "to_address": result[1],
-            "amount": str(result[2]),
-            "block_number": result[3],
-            "token_id": "0x" + result[4].hex(),
-            "resolved": result[5],
-            "tx_identifier": "0x" + result[6].hex() if result[6] else "0x",
+    async def _read_withdrawals(self, indices: list[int]) -> list[Any]:
+        """Read ``withdrawals(i)`` for each index in JSON-RPC batches.
+
+        A failed read anywhere in a batch raises, so callers never act on a
+        partial view.
+        """
+        contract_reader = self._get_reader_contract()
+        results: list[Any] = []
+        for start in range(0, len(indices), _WITHDRAWAL_READ_BATCH_SIZE):
+            async with contract_reader.w3.batch_requests() as batch:
+                for index in indices[start : start + _WITHDRAWAL_READ_BATCH_SIZE]:
+                    batch.add(contract_reader.functions.withdrawals(index))
+                results.extend(await batch.async_execute())
+        if len(results) != len(indices):
+            raise RuntimeError(
+                f"withdrawals batch returned {len(results)} results for {len(indices)} reads"
+            )
+        return results
+
+    async def _refresh_withdrawal_index(self) -> int:
+        """Read withdrawals appended since the last refresh into the index.
+
+        Returns the ``withdrawalCount()`` observed by this refresh.
+        """
+        contract_reader = self._get_reader_contract()
+        count = await contract_reader.functions.withdrawalCount().call()
+        if count < self._withdrawals_scanned:
+            # The array never shrinks: a smaller count means the RPC node
+            # serving this read lags behind one that served an earlier read.
+            logger.warning(
+                "withdrawalCount() returned %d, below the %d already indexed; "
+                "serving the cached index",
+                count,
+                self._withdrawals_scanned,
+            )
+            return count
+        if count == self._withdrawals_scanned:
+            return count
+
+        async with self._withdrawals_lock:
+            # A concurrent refresh may have indexed some or all of these meanwhile.
+            first_new = self._withdrawals_scanned
+            # One batch per step keeps completed batches when a later one fails.
+            # A tail read that reverts on a lagging node raises rather than
+            # serving the cache, which would omit an entry the count proves exists.
+            for start in range(first_new, count, _WITHDRAWAL_READ_BATCH_SIZE):
+                indices = list(range(start, min(start + _WITHDRAWAL_READ_BATCH_SIZE, count)))
+                results = await self._read_withdrawals(indices)
+                for index, result in zip(indices, results):
+                    if not result[5]:
+                        self._unresolved_withdrawals[index] = _parse_withdrawal(index, result)
+                self._withdrawals_scanned = indices[-1] + 1
+
+            if count > first_new:
+                logger.info(
+                    "Indexed withdrawals %d..%d (%d unresolved)",
+                    first_new,
+                    count - 1,
+                    len(self._unresolved_withdrawals),
+                )
+            return count
+
+    async def _unresolved_withdrawal_entries(
+        self, user: Optional[ChecksumAddress] = None
+    ) -> list[Dict[str, Any]]:
+        """Return unresolved withdrawals, optionally for one user, by index.
+
+        Cached candidates are re-read so entries resolved since they were
+        indexed drop out (and leave the index) on this call. Candidates at or
+        past a lagging node's count revert there, so they are served as cached.
+        """
+        count = await self._refresh_withdrawal_index()
+        candidates = sorted(
+            index
+            for index, entry in self._unresolved_withdrawals.items()
+            if user is None or entry["user_address"].lower() == user.lower()
+        )
+        readable = [index for index in candidates if index < count]
+        resolved = {
+            index
+            for index, result in zip(readable, await self._read_withdrawals(readable))
+            if result[5]
         }
+
+        pending = []
+        for index in candidates:
+            if index in resolved:
+                self._unresolved_withdrawals.pop(index, None)
+                continue
+            entry = self._unresolved_withdrawals.get(index)
+            if entry is not None:
+                pending.append(dict(entry))
+        return pending
 
     async def get_pending_withdrawals(self, user_address: str) -> Dict[str, Any]:
         checksum_user = self._require_address(user_address, "user_address")
-        contract_reader = self._get_reader_contract()
-
-        pending = []
-        index = 0
-        max_iterations = 10000
-
-        while index < max_iterations:
-            try:
-                result = await contract_reader.functions.withdrawals(index).call()
-                withdrawal_user = result[0]
-                resolved = result[5]
-
-                if withdrawal_user.lower() == checksum_user.lower() and not resolved:
-                    pending.append(
-                        {
-                            "index": index,
-                            "user_address": result[0],
-                            "to_address": result[1],
-                            "amount": str(result[2]),
-                            "block_number": result[3],
-                            "token_id": "0x" + result[4].hex(),
-                            "resolved": result[5],
-                            "tx_identifier": "0x" + result[6].hex() if result[6] else "0x",
-                        }
-                    )
-                index += 1
-            except Exception:
-                break
-
         return {
             "user_address": checksum_user,
-            "pending_withdrawals": pending,
+            "pending_withdrawals": await self._unresolved_withdrawal_entries(checksum_user),
         }
 
-    async def get_all_pending_withdrawals(
-        self, user_address: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Get all pending (unresolved) withdrawals.
-
-        Args:
-            user_address: Optional filter by user address
-        """
-        contract_reader = self._get_reader_contract()
+    async def get_all_pending_withdrawals(self) -> Dict[str, Any]:
+        """Get all pending (unresolved) withdrawals with their destination chain."""
         current_block = await self.reader_w3.eth.block_number if self.reader_w3 else 0
 
-        checksum_user = None
-        if user_address:
-            checksum_user = self._require_address(user_address, "user_address")
-
         pending = []
-
-        # Get total withdrawal count from contract
-        try:
-            total_withdrawals = await contract_reader.functions.withdrawalCount().call()
-        except Exception as e:
-            logger.error(f"Failed to get withdrawal count: {e}")
-            return {"pending": [], "current_block": current_block}
-
-        for index in range(total_withdrawals):
+        for entry in await self._unresolved_withdrawal_entries():
+            index = entry["index"]
+            token_id = entry["token_id"]
             try:
-                result = await contract_reader.functions.withdrawals(index).call()
-
-                withdrawal_user = result[0]
-                resolved = result[5]
-
-                # Skip if already resolved
-                if resolved:
-                    continue
-
-                # Apply user filter
-                if checksum_user and withdrawal_user.lower() != checksum_user.lower():
-                    continue
-
-                block_number = result[3]
-                token_id_bytes = result[4]
-
-                # Get chain_id for this token
-                token_hex = HexBytes(token_id_bytes)
-                try:
-                    context = await self._get_token_context(token_hex)
-                    chain_id = context.chain_id
-                except Exception as e:
-                    logger.warning(
-                        f"Withdrawal #{index}: unknown/invalid token 0x{token_id_bytes.hex()} - {e}"
-                    )
-                    chain_id = None
-
-                pending.append(
-                    {
-                        "index": index,
-                        "user_address": withdrawal_user,
-                        "to_address": result[1],
-                        "amount": str(result[2]),
-                        "token_id": "0x" + token_id_bytes.hex(),
-                        "block_number": block_number,
-                        "can_resolve": current_block - block_number >= 1,
-                        "chain_id": chain_id,
-                    }
-                )
+                context = await self._get_token_context(HexBytes(token_id))
+                chain_id = context.chain_id
             except Exception as e:
-                logger.warning(f"Failed to read withdrawal {index}: {e}")
+                logger.warning(f"Withdrawal #{index}: unknown/invalid token {token_id} - {e}")
+                chain_id = None
+
+            pending.append(
+                {
+                    "index": index,
+                    "user_address": entry["user_address"],
+                    "to_address": entry["to_address"],
+                    "amount": entry["amount"],
+                    "token_id": token_id,
+                    "block_number": entry["block_number"],
+                    "can_resolve": current_block - entry["block_number"] >= 1,
+                    "chain_id": chain_id,
+                }
+            )
 
         return {
             "pending": pending,
