@@ -84,11 +84,13 @@ type SiweLoginParams = {
 
 async function siweLogin(params: SiweLoginParams): Promise<JsonObject> {
   const domainResp = await fetchJson(
-    `${params.apiBaseUrl}/v1/accounting/auth/domain`,
+    `${params.apiBaseUrl}/v1/accounting/auth/domains`,
   );
   const domain =
-    isJsonObject(domainResp) && typeof domainResp.domain === "string"
-      ? domainResp.domain
+    isJsonObject(domainResp) &&
+    Array.isArray(domainResp.domains) &&
+    typeof domainResp.domains[0] === "string"
+      ? domainResp.domains[0]
       : null;
   if (!domain || !domain.trim()) {
     throw new Error("API returned an invalid SIWE domain");
