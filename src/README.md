@@ -212,6 +212,7 @@ Key file: `services/token_info_bootstrap.py`.
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
 | On-ramp intent key ring | Derived in-memory from ROFL raw-256 key IDs at startup | Re-derived on each start; deterministic per ROFL app and key ID. |
 | Withdrawal high-water marks | In-memory only (`WithdrawalProcessor._chain_high_water_mark`) | Rebuilt on restart via the catch-up pass. |
+| Unresolved-withdrawal index | In-memory only (`AccountingContractService._unresolved_withdrawals`) | Rebuilt on restart by batched reads of the `withdrawals` array, then extended with each new entry. |
 | Transak Partner Access Token | In-memory only (`TransakService`) | Refreshed from `expiresAt`; the current value authenticates API reads, while current and bounded previous values verify webhooks. |
 
 ## Configuration

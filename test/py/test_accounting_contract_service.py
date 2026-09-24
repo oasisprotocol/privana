@@ -1,21 +1,32 @@
 """Tests for AccountingContractService parsing and request validation."""
 
+import asyncio
+import json
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from eth_abi import encode
 from hexbytes import HexBytes
-from web3 import Web3
+from web3 import AsyncWeb3, Web3
+from web3.exceptions import ContractLogicError
+from web3.providers import AsyncHTTPProvider
 
+from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflSubmissionResult
 from src.models.accounting import HistoryKind
 from src.models.private_read import PrivateReadAuth
+from src.services import accounting_contract as accounting_module
 from src.services.accounting_contract import AccountingContractService
 
 
 def _make_service_with_reader(reader: MagicMock) -> AccountingContractService:
     service = AccountingContractService.__new__(AccountingContractService)
     service.contract_reader = reader
+    service._withdrawals_scanned = 0
+    service._unresolved_withdrawals = {}
+    service._withdrawals_lock = asyncio.Lock()
     return service
 
 
@@ -52,45 +63,358 @@ async def test_get_withdrawal_parses_new_tuple_shape_with_to_address() -> None:
     assert parsed["tx_identifier"] == "0x1234"
 
 
+WD_USER = "0x1234567890123456789012345678901234567890"
+WD_OTHER = "0x2222222222222222222222222222222222222222"
+WD_TO = "0x9876543210987654321098765432109876543210"
+
+
+def _withdrawal(user: str, resolved: bool = False, amount: int = 99) -> list:
+    return [user, WD_TO, amount, 1234, bytes.fromhex("22" * 32), resolved, b"\x56\x78"]
+
+
+class _FakeWithdrawals:
+    """An in-memory `withdrawals` array behind the service's two RPC seams."""
+
+    def __init__(self, entries: list[list]) -> None:
+        self.entries = entries
+        self.reads: list[list[int]] = []
+        self.count_override: int | None = None
+        self.fail_at: int | None = None
+
+    async def read(self, indices: list[int]) -> list[list]:
+        if not indices:
+            return []  # the real batch reader sends no request
+        self.reads.append(list(indices))
+        await asyncio.sleep(0)
+        if self.fail_at is not None and self.fail_at in indices:
+            raise ConnectionError("rpc unavailable")
+        if any(i >= self.count() for i in indices):
+            raise ContractLogicError("execution reverted")
+        return [list(self.entries[i]) for i in indices]
+
+    def count(self) -> int:
+        return len(self.entries) if self.count_override is None else self.count_override
+
+
+def _make_indexed_service(fake: _FakeWithdrawals) -> AccountingContractService:
+    reader = MagicMock()
+    reader.functions.withdrawalCount.return_value.call = AsyncMock(side_effect=fake.count)
+    service = _make_service_with_reader(reader)
+    service._read_withdrawals = fake.read
+    return service
+
+
 @pytest.mark.asyncio
 async def test_get_pending_withdrawals_includes_to_address() -> None:
-    user = "0x1234567890123456789012345678901234567890"
-    to_address = "0x9876543210987654321098765432109876543210"
-    token = bytes.fromhex("22" * 32)
-    tx_identifier = b"\x56\x78"
+    service = _make_indexed_service(_FakeWithdrawals([_withdrawal(WD_USER)]))
 
-    reader = MagicMock()
+    parsed = await service.get_pending_withdrawals(WD_USER)
 
-    def _withdrawals(index: int):
-        result = MagicMock()
-        if index == 0:
-            result.call = AsyncMock(
-                return_value=(
-                    user,
-                    to_address,
-                    99,
-                    1234,
-                    token,
-                    False,
-                    tx_identifier,
-                )
-            )
-        else:
-            result.call = AsyncMock(side_effect=Exception("end"))
-        return result
-
-    reader.functions.withdrawals.side_effect = _withdrawals
-
-    service = _make_service_with_reader(reader)
-    parsed = await service.get_pending_withdrawals(user)
-
-    assert parsed["user_address"] == user
+    assert parsed["user_address"] == WD_USER
     assert len(parsed["pending_withdrawals"]) == 1
     pending = parsed["pending_withdrawals"][0]
-    assert pending["to_address"] == to_address
+    assert pending["index"] == 0
+    assert pending["to_address"] == WD_TO
     assert pending["amount"] == "99"
     assert pending["token_id"] == "0x" + ("22" * 32)
     assert pending["resolved"] is False
+    assert pending["tx_identifier"] == "0x5678"
+
+
+@pytest.mark.asyncio
+async def test_get_pending_withdrawals_filters_user_and_resolved() -> None:
+    fake = _FakeWithdrawals(
+        [
+            _withdrawal(WD_USER.lower()),
+            _withdrawal(WD_OTHER),
+            _withdrawal(WD_USER, resolved=True),
+        ]
+    )
+    service = _make_indexed_service(fake)
+
+    parsed = await service.get_pending_withdrawals(WD_USER)
+
+    assert [w["index"] for w in parsed["pending_withdrawals"]] == [0]
+
+
+@pytest.mark.asyncio
+async def test_get_pending_withdrawals_reads_only_new_entries() -> None:
+    fake = _FakeWithdrawals(
+        [
+            _withdrawal(WD_USER, resolved=True),
+            _withdrawal(WD_OTHER),
+            _withdrawal(WD_USER, resolved=True),
+        ]
+    )
+    service = _make_indexed_service(fake)
+
+    assert (await service.get_pending_withdrawals(WD_USER))["pending_withdrawals"] == []
+    assert fake.reads == [[0, 1, 2]]
+
+    fake.reads.clear()
+    fake.entries.append(_withdrawal(WD_USER))
+    parsed = await service.get_pending_withdrawals(WD_USER)
+
+    assert [w["index"] for w in parsed["pending_withdrawals"]] == [3]
+    # The new tail entry, then this user's cached candidate re-read.
+    assert fake.reads == [[3], [3]]
+
+
+@pytest.mark.asyncio
+async def test_resolved_withdrawal_leaves_index() -> None:
+    fake = _FakeWithdrawals([_withdrawal(WD_USER)])
+    service = _make_indexed_service(fake)
+    assert len((await service.get_pending_withdrawals(WD_USER))["pending_withdrawals"]) == 1
+
+    fake.entries[0][5] = True
+    assert (await service.get_pending_withdrawals(WD_USER))["pending_withdrawals"] == []
+    assert service._unresolved_withdrawals == {}
+
+    fake.reads.clear()
+    assert (await service.get_pending_withdrawals(WD_USER))["pending_withdrawals"] == []
+    assert fake.reads == []
+
+
+@pytest.mark.asyncio
+async def test_failed_read_raises_and_resumes_from_last_full_batch(monkeypatch) -> None:
+    monkeypatch.setattr(accounting_module, "_WITHDRAWAL_READ_BATCH_SIZE", 2)
+    fake = _FakeWithdrawals([_withdrawal(WD_USER) for _ in range(5)])
+    fake.fail_at = 3
+    service = _make_indexed_service(fake)
+
+    with pytest.raises(ConnectionError):
+        await service.get_pending_withdrawals(WD_USER)
+    assert service._withdrawals_scanned == 2
+
+    fake.fail_at = None
+    fake.reads.clear()
+    parsed = await service.get_pending_withdrawals(WD_USER)
+
+    assert [w["index"] for w in parsed["pending_withdrawals"]] == [0, 1, 2, 3, 4]
+    assert fake.reads[0] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_lagging_withdrawal_count_serves_cached_index(caplog) -> None:
+    fake = _FakeWithdrawals([_withdrawal(WD_USER), _withdrawal(WD_USER)])
+    service = _make_indexed_service(fake)
+    await service.get_pending_withdrawals(WD_USER)
+
+    fake.count_override = 1
+    fake.reads.clear()
+    parsed = await service.get_pending_withdrawals(WD_USER)
+
+    assert [w["index"] for w in parsed["pending_withdrawals"]] == [0, 1]
+    # Index 1 reverts on the lagging node, so only index 0 is re-read.
+    assert fake.reads == [[0]]
+    assert service._withdrawals_scanned == 2
+    assert "below the 2 already indexed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callers_read_new_entries_once() -> None:
+    fake = _FakeWithdrawals([_withdrawal(WD_OTHER), _withdrawal(WD_OTHER), _withdrawal(WD_USER)])
+    service = _make_indexed_service(fake)
+
+    first, second = await asyncio.gather(
+        service.get_pending_withdrawals(WD_USER),
+        service.get_pending_withdrawals(WD_USER),
+    )
+
+    assert [w["index"] for w in first["pending_withdrawals"]] == [2]
+    assert [w["index"] for w in second["pending_withdrawals"]] == [2]
+    assert fake.reads.count([0, 1, 2]) == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_new_entries_skips_lock() -> None:
+    service = _make_indexed_service(_FakeWithdrawals([_withdrawal(WD_USER)]))
+    await service.get_pending_withdrawals(WD_USER)
+
+    async with service._withdrawals_lock:
+        parsed = await asyncio.wait_for(service.get_pending_withdrawals(WD_USER), timeout=1)
+
+    assert [w["index"] for w in parsed["pending_withdrawals"]] == [0]
+
+
+@pytest.mark.asyncio
+async def test_failed_candidate_reread_raises_and_keeps_index() -> None:
+    fake = _FakeWithdrawals([_withdrawal(WD_USER)])
+    service = _make_indexed_service(fake)
+    await service.get_pending_withdrawals(WD_USER)
+
+    fake.entries[0][5] = True
+    fake.fail_at = 0
+    with pytest.raises(ConnectionError):
+        await service.get_pending_withdrawals(WD_USER)
+    assert list(service._unresolved_withdrawals) == [0]
+
+
+@pytest.mark.asyncio
+async def test_get_all_pending_withdrawals_adds_chain_and_can_resolve() -> None:
+    fake = _FakeWithdrawals([_withdrawal(WD_USER), _withdrawal(WD_OTHER, resolved=True)])
+    service = _make_indexed_service(fake)
+
+    async def _block_number() -> int:
+        return 1300
+
+    service.reader_w3 = SimpleNamespace(eth=SimpleNamespace(block_number=_block_number()))
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=8453))
+
+    result = await service.get_all_pending_withdrawals()
+
+    assert result["current_block"] == 1300
+    assert result["pending"] == [
+        {
+            "index": 0,
+            "user_address": WD_USER,
+            "to_address": WD_TO,
+            "amount": "99",
+            "token_id": "0x" + ("22" * 32),
+            "block_number": 1234,
+            "can_resolve": True,
+            "chain_id": 8453,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_all_pending_withdrawals_raises_when_count_fails() -> None:
+    service = _make_indexed_service(_FakeWithdrawals([]))
+    service.reader_w3 = None
+    service.contract_reader.functions.withdrawalCount.return_value.call = AsyncMock(
+        side_effect=ConnectionError("rpc unavailable")
+    )
+
+    with pytest.raises(ConnectionError):
+        await service.get_all_pending_withdrawals()
+
+
+_WITHDRAWAL_TYPES = ["address", "address", "uint256", "uint256", "bytes32", "bool", "bytes"]
+_WITHDRAWAL_COUNT_SELECTOR = Web3.keccak(text="withdrawalCount()")[:4].hex().removeprefix("0x")
+
+
+class _WithdrawalsNode:
+    """A JSON-RPC node serving an ABI-encoded `withdrawals` array over HTTP posts."""
+
+    def __init__(
+        self, entries: list[tuple], revert_at: int | None = None, drop_last: bool = False
+    ) -> None:
+        self.entries = entries
+        self.revert_at = revert_at
+        self.drop_last = drop_last
+        self.batch_sizes: list[int] = []
+
+    def _answer(self, request: dict) -> dict:
+        if request["method"] == "eth_chainId":
+            return {"jsonrpc": "2.0", "id": request["id"], "result": "0x5aff"}
+        data = request["params"][0]["data"].removeprefix("0x")
+        if data.startswith(_WITHDRAWAL_COUNT_SELECTOR):
+            result = encode(["uint256"], [len(self.entries)])
+        elif int(data[8:], 16) == self.revert_at:
+            error = {"code": 3, "message": "execution reverted"}
+            return {"jsonrpc": "2.0", "id": request["id"], "error": error}
+        else:
+            result = encode(_WITHDRAWAL_TYPES, list(self.entries[int(data[8:], 16)]))
+        return {"jsonrpc": "2.0", "id": request["id"], "result": "0x" + result.hex()}
+
+    async def post(self, endpoint_uri: Any, data: bytes, **kwargs: Any) -> bytes:
+        await asyncio.sleep(0)  # lets concurrent callers interleave mid-request
+        request = json.loads(data)
+        if isinstance(request, dict):
+            return json.dumps(self._answer(request)).encode()
+        self.batch_sizes.append(len(request))
+        responses = [self._answer(r) for r in request]
+        if self.drop_last:
+            responses.pop()
+        # Answered out of order, as a node may: the provider must match by id.
+        return json.dumps(responses[::-1]).encode()
+
+
+def _make_rpc_service(node: _WithdrawalsNode) -> AccountingContractService:
+    provider = AsyncHTTPProvider("http://sapphire.invalid")
+    provider._request_session_manager.async_make_post_request = node.post
+    contract = AsyncWeb3(provider).eth.contract(address="0x" + "11" * 20, abi=ACCOUNTING_ABI)
+    return _make_service_with_reader(contract)
+
+
+@pytest.mark.asyncio
+async def test_pending_withdrawals_decode_through_web3_batches(monkeypatch) -> None:
+    monkeypatch.setattr(accounting_module, "_WITHDRAWAL_READ_BATCH_SIZE", 2)
+    token = bytes.fromhex("22" * 32)
+    node = _WithdrawalsNode(
+        [
+            (WD_USER, WD_TO, 5, 100, token, False, b"\x56\x78"),
+            (WD_USER, WD_TO, 6, 101, token, True, b""),
+            (WD_OTHER, WD_TO, 7, 102, token, False, b""),
+        ]
+    )
+    service = _make_rpc_service(node)
+
+    parsed = await service.get_pending_withdrawals(WD_USER)
+
+    assert parsed["pending_withdrawals"] == [
+        {
+            "index": 0,
+            "user_address": WD_USER,
+            "to_address": WD_TO,
+            "amount": "5",
+            "block_number": 100,
+            "token_id": "0x" + "22" * 32,
+            "resolved": False,
+            "tx_identifier": "0x5678",
+        }
+    ]
+    # The tail in batches of two, then this user's one candidate re-read.
+    assert node.batch_sizes == [2, 1, 1]
+    assert await service._read_withdrawals([]) == []
+    assert node.batch_sizes == [2, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_reverted_batch_read_raises_through_web3(monkeypatch) -> None:
+    monkeypatch.setattr(accounting_module, "_WITHDRAWAL_READ_BATCH_SIZE", 2)
+    token = bytes.fromhex("22" * 32)
+    node = _WithdrawalsNode([(WD_USER, WD_TO, 5, 100, token, False, b"")] * 3, revert_at=2)
+    service = _make_rpc_service(node)
+
+    with pytest.raises(ContractLogicError):
+        await service.get_pending_withdrawals(WD_USER)
+    assert service._withdrawals_scanned == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reads_keep_web3_batches_separate(monkeypatch) -> None:
+    monkeypatch.setattr(accounting_module, "_WITHDRAWAL_READ_BATCH_SIZE", 2)
+    token = bytes.fromhex("22" * 32)
+    node = _WithdrawalsNode(
+        [
+            (WD_USER, WD_TO, 5, 100, token, False, b""),
+            (WD_OTHER, WD_TO, 6, 101, token, False, b""),
+            (WD_USER, WD_TO, 7, 102, token, False, b""),
+        ]
+    )
+    service = _make_rpc_service(node)
+
+    mine, theirs, single = await asyncio.gather(
+        service.get_pending_withdrawals(WD_USER),
+        service.get_pending_withdrawals(WD_OTHER),
+        service.get_withdrawal(1),
+    )
+
+    assert [w["amount"] for w in mine["pending_withdrawals"]] == ["5", "7"]
+    assert [w["amount"] for w in theirs["pending_withdrawals"]] == ["6"]
+    assert single["amount"] == "6"
+
+
+@pytest.mark.asyncio
+async def test_short_batch_response_raises_through_web3() -> None:
+    token = bytes.fromhex("22" * 32)
+    node = _WithdrawalsNode([(WD_USER, WD_TO, 5, 100, token, False, b"")] * 3, drop_last=True)
+    service = _make_rpc_service(node)
+
+    with pytest.raises(RuntimeError, match="2 results for 3 reads"):
+        await service._read_withdrawals([0, 1, 2])
 
 
 USER_A = "0x1234567890123456789012345678901234567890"
