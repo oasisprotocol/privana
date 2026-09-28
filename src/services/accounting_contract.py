@@ -1347,6 +1347,9 @@ class AccountingContractService:
 
     async def get_balance(self, siwe_token: bytes, token_id: str) -> Dict[str, Any]:
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
+        return await self._balance_entry(token_hex, siwe_token)
+
+    async def _balance_entry(self, token_hex: HexBytes, siwe_token: bytes) -> Dict[str, Any]:
         balance = await self._fetch_balance(token_hex, siwe_token)
         context = await self._get_token_context(token_hex)
         return {
@@ -1479,20 +1482,12 @@ class AccountingContractService:
             self._require_hex(token_id, "token_id", expected_len=32) for token_id in token_ids_raw
         ]
 
-        response_balances = []
-        for token_id in token_ids:
-            balance = await self._fetch_balance(token_id, siwe_token)
-            context = await self._get_token_context(token_id)
-            response_balances.append(
-                {
-                    "token_id": _to_prefixed_hex(token_id),
-                    "balance": str(balance),
-                    "token_symbol": await self._get_token_symbol(token_id),
-                    "chain_id": str(context.chain_id),
-                }
-            )
-
-        return {"balances": response_balances}
+        # Each balanceOf is a signed query costing several serial RPC round trips,
+        # so read all tokens concurrently instead of one after another.
+        balances = await asyncio.gather(
+            *(self._balance_entry(token_id, siwe_token) for token_id in token_ids)
+        )
+        return {"balances": list(balances)}
 
     def _lock_to_info(self, lock: Any, now: int) -> Dict[str, Any]:
         lock_id, service_id, token_id, amount, expiry = lock
