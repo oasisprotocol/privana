@@ -76,15 +76,10 @@ function printBalanceEntry(
   name: string,
   amount: string,
   rawBalance: bigint,
-  decimalsKnown: boolean,
 ): void {
   console.log(`Token ID: ${tokenId}`);
   console.log(`Name:     ${name}`);
-  console.log(
-    decimalsKnown
-      ? `Amount:   ${amount} (${rawBalance.toString()})`
-      : `Amount:   ${amount}`,
-  );
+  console.log(`Amount:   ${amount} (${rawBalance.toString()})`);
 }
 
 task("getBalance")
@@ -139,7 +134,6 @@ task("getBalance")
         tokenName(token),
         formatBalance(balance, token.decimals),
         balance,
-        token.decimals !== null,
       );
 
       return balance;
@@ -183,13 +177,7 @@ task("getBalance")
         console.warn(`Error:    ${result.error}`);
       } else {
         balances[result.token.tokenId] = result.amount;
-        printBalanceEntry(
-          result.token.tokenId,
-          name,
-          result.amount,
-          result.rawBalance,
-          result.token.decimals !== null,
-        );
+        printBalanceEntry(result.token.tokenId, name, result.amount, result.rawBalance);
       }
     }
 
