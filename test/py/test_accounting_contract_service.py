@@ -679,6 +679,38 @@ async def test_get_history_preserves_empty_pages_and_total() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_batch_balances_reads_tokens_concurrently_in_order() -> None:
+    tokens = [bytes([i]) * 32 for i in range(1, 4)]
+    in_flight = peak = 0
+
+    def balance_of(token: bytes, siwe_token: bytes) -> MagicMock:
+        async def call() -> int:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            # Later tokens yield fewer times, so reads finish in reverse input order.
+            for _ in range(len(tokens) - token[0] + 1):
+                await asyncio.sleep(0)
+            in_flight -= 1
+            return token[0]
+
+        return MagicMock(call=call)
+
+    reader = MagicMock()
+    reader.functions.balanceOf.side_effect = balance_of
+    service = AccountingContractService.__new__(AccountingContractService)
+    service._get_confidential_reader_contract = AsyncMock(return_value=reader)
+    service._get_token_context = AsyncMock(return_value=SimpleNamespace(chain_id=1))
+    service._get_token_symbol = AsyncMock(return_value="TKN")
+
+    result = await service.get_batch_balances(b"\x12", ["0x" + t.hex() for t in tokens])
+
+    assert [b["token_id"] for b in result["balances"]] == ["0x" + t.hex() for t in tokens]
+    assert [b["balance"] for b in result["balances"]] == ["1", "2", "3"]
+    assert peak == len(tokens)
+
+
+@pytest.mark.asyncio
 async def test_withdraw_from_lock_rejects_zero_to_address() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
 
