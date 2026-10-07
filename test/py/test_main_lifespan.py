@@ -27,6 +27,8 @@ def _lifespan_settings() -> SimpleNamespace:
     return SimpleNamespace(
         accounting_contract_address="0x" + "ab" * 20,
         chain_rpc_urls={LIFESPAN_CHAIN: LIFESPAN_RPC_URL},
+        sapphire_rpc_url="",
+        sapphire_rpc_headers={},
         token_infos=[{"chain_id": LIFESPAN_CHAIN, "token_address": None}],
         gas_prices_wei={LIFESPAN_CHAIN: 3_000_000_000},
     )
@@ -57,7 +59,7 @@ def _wire_lifespan(
     )
     onramp_intent_key_manager = SimpleNamespace(initialize=step("onramp_intent_keys"))
     accounting = MagicMock()
-    accounting.get_accounting_version = step("version_check", 2)
+    accounting.get_accounting_version = step("version_check", main.REQUIRED_ACCOUNTING_VERSION)
     withdrawal_processor = SimpleNamespace(
         start=step("withdrawal_start"), stop=step("withdrawal_stop")
     )
@@ -269,7 +271,7 @@ async def test_lifespan_aborts_when_auth_token_key_sync_fails(monkeypatch) -> No
     onramp_intent_key_manager = SimpleNamespace(initialize=AsyncMock())
     bootstrap_rofl_signer_address = AsyncMock()
     accounting = MagicMock()
-    accounting.get_accounting_version = AsyncMock(return_value=2)
+    accounting.get_accounting_version = AsyncMock(return_value=main.REQUIRED_ACCOUNTING_VERSION)
     monkeypatch.setattr(main, "get_accounting_contract_service", lambda: accounting)
 
     monkeypatch.setattr(main, "get_jwt_key_manager", lambda: jwt_key_manager)
@@ -419,7 +421,7 @@ async def test_lifespan_completes_when_a_registered_chain_has_no_gas_price(
 async def test_lifespan_aborts_when_contract_version_below_required(monkeypatch) -> None:
     steps: list[str] = []
     handles = _wire_lifespan(monkeypatch, _lifespan_settings(), steps)
-    version_read = AsyncMock(return_value=1)
+    version_read = AsyncMock(return_value=main.REQUIRED_ACCOUNTING_VERSION - 1)
     handles.accounting.get_accounting_version = version_read
 
     with pytest.raises(RuntimeError, match="upgrade the proxy before restarting"):

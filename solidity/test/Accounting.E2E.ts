@@ -1482,18 +1482,18 @@ describe('Upgradability', function () {
     expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
     expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");
 
-    expect(await upgraded.VERSION()).to.equal(2n, "VERSION should be 2 after upgrade");
+    expect(await upgraded.VERSION()).to.equal(3n, "VERSION should be 3 after upgrade");
     // Verify the proxy address is the same
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
   });
 
-  // Scope: the pre-upgrade mock compiles from current source (already VERSION 2), so this exercises proxy mechanics and state preservation, not a V1-layout migration; the live V1->V2 upgrade was rehearsed on testnet separately.
-  it("Should upgrade implementation, report VERSION == 2, and preserve prior state", async function () {
+  // Scope: the pre-upgrade mock compiles from current source (already VERSION 3), so this exercises proxy mechanics and state preservation, not a layout migration.
+  it("Should upgrade implementation, report VERSION == 3, and preserve prior state", async function () {
     const user = getDeployer(2);
     const freshProxy = await deployMockAccounting(await mockSiweAuth.getAddress());
     const freshProxyAddress = await freshProxy.getAddress();
 
-    expect(await freshProxy.VERSION()).to.equal(2n);
+    expect(await freshProxy.VERSION()).to.equal(3n);
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
@@ -1528,7 +1528,7 @@ describe('Upgradability', function () {
 
     const upgraded = (await ethers.getContractFactory('MockAccounting')).attach(freshProxyAddress) as unknown as MockAccounting;
 
-    expect(await upgraded.VERSION()).to.equal(2n, "VERSION must report 2");
+    expect(await upgraded.VERSION()).to.equal(3n, "VERSION must report 3");
     expect(await upgraded.getBalance(user.address, TEST_TOKEN.tokenId)).to.equal(balanceBefore, "User balance must be preserved");
     expect(await upgraded.owner()).to.equal(ownerBefore, "Contract owner must be preserved");
     expect(await upgraded.gasPrices(testChainId)).to.equal(gasPriceBefore, "Chain gas price must be preserved");

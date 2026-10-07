@@ -40,7 +40,7 @@ _LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read
 
 # Sapphire sweeps need the 25,000 gasLimitNativeSweep; a pre-upgrade proxy signs
 # them at 21,000 and strands every deposit. The lifespan refuses to start below this.
-REQUIRED_ACCOUNTING_VERSION = 2
+REQUIRED_ACCOUNTING_VERSION = 3
 
 settings = load_settings()
 
