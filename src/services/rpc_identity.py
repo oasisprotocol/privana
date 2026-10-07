@@ -28,7 +28,7 @@ from typing import Dict, Mapping, MutableMapping, Optional
 
 from web3 import AsyncWeb3
 
-from src.clients.web3_provider import make_async_web3
+from src.clients.web3_provider import make_async_web3, redact_urls
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ async def verify_chain_rpc_urls(
                 "chain unserved until a later probe gets an answer",
                 chain_id,
                 type(reported).__name__,
-                reported,
+                redact_urls(reported),
             )
             continue
         if reported != chain_id:

@@ -13,8 +13,11 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
+from multidict import CIMultiDict, CIMultiDictProxy
 from web3.providers import AsyncHTTPProvider
+from yarl import URL
 
 import src.services.rpc_identity as rpc_identity
 from src.services.deposit_discovery import DepositDiscoveryService, DiscoveryNotConfiguredError
@@ -166,6 +169,27 @@ async def test_no_configured_endpoints_does_not_abort_startup(monkeypatch):
     # refuses every chain at the call site, so startup is not the place to fail.
     assert await initialize_verified_chain_rpc_urls(_settings({})) == {}
     assert verified_web3(GOOD_CHAIN, {GOOD_CHAIN: GOOD_URL}) is None
+
+
+async def test_failed_probe_log_keeps_the_provider_key_out(monkeypatch, caplog):
+    """aiohttp HTTP errors embed the request URL, and provider URLs carry API keys."""
+    keyed_url = "https://base-sepolia.g.alchemy.com/v2/SECRETKEY"
+    request_info = aiohttp.RequestInfo(URL(keyed_url), "POST", CIMultiDictProxy(CIMultiDict()))
+    rate_limited = aiohttp.ClientResponseError(request_info, (), status=429, message="Too Many")
+    monkeypatch.setattr(
+        rpc_identity,
+        "_probe_chain_id",
+        _probe({keyed_url: rate_limited, SAPPHIRE_URL: SAPPHIRE_CHAIN}),
+    )
+
+    with caplog.at_level("ERROR", logger="src.services.rpc_identity"):
+        served = await initialize_verified_chain_rpc_urls(
+            _settings({GOOD_CHAIN: keyed_url, SAPPHIRE_CHAIN: SAPPHIRE_URL})
+        )
+
+    assert served == {SAPPHIRE_CHAIN: SAPPHIRE_URL}
+    assert "429" in caplog.text
+    assert "SECRETKEY" not in caplog.text
 
 
 async def test_verify_reports_without_committing(monkeypatch):

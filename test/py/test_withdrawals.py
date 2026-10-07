@@ -3,9 +3,12 @@
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from eth_abi import encode
+from multidict import CIMultiDict, CIMultiDictProxy
 from web3.exceptions import TransactionNotFound
+from yarl import URL
 
 from src.services.accounting_contract import AccountingContractService
 from src.services.cache import AsyncTTLCache
@@ -387,6 +390,40 @@ class TestWithdrawalProcessor:
 
         assert result is False
         assert TEST_CHAIN_ID not in processor._chain_high_water_mark
+
+    @pytest.mark.asyncio
+    async def test_rpc_errors_are_logged_without_the_provider_key(self, processor, caplog):
+        """aiohttp HTTP errors embed the request URL, and destination RPC URLs carry
+        API keys; the broadcast-failure and lookup logs must keep the key out."""
+        keyed_url = "https://base-sepolia.g.alchemy.com/v2/SECRETKEY"
+        request_info = aiohttp.RequestInfo(URL(keyed_url), "POST", CIMultiDictProxy(CIMultiDict()))
+
+        def rate_limited(*_args, **_kwargs):
+            raise aiohttp.ClientResponseError(request_info, (), status=429, message="Too Many")
+
+        contract_reader = processor.accounting_service._get_reader_contract()
+        contract_reader.functions.withdrawals.return_value.call.return_value = (
+            _resolved_withdrawal()
+        )
+        contract_reader.functions.resolveWithdrawal.return_value.call.return_value = TEST_SIGNED_TX
+        processor.accounting_service._send_raw_transaction.side_effect = rate_limited
+        mock_dest_web3 = MagicMock()
+        mock_dest_web3.eth.get_transaction_receipt = AsyncMock(side_effect=rate_limited)
+        mock_dest_web3.eth.get_transaction = AsyncMock(side_effect=rate_limited)
+        processor._destination_web3[TEST_CHAIN_ID] = mock_dest_web3
+
+        async def single_attempt(coro_factory):
+            # The retry wrapper's own log is outside this check.
+            return await coro_factory()
+
+        processor._rate_limited_call = single_attempt
+
+        with caplog.at_level(logging.WARNING, logger="src.services.withdrawal_processor"):
+            result = await processor._resolve_and_broadcast({"index": 0, "chain_id": TEST_CHAIN_ID})
+
+        assert result is False
+        assert "429" in caplog.text
+        assert "SECRETKEY" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_resolve_and_broadcast_invalid_chain_id(self, processor):

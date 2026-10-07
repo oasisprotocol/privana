@@ -11,6 +11,7 @@ from web3 import AsyncWeb3, Web3
 from web3.exceptions import TransactionNotFound
 
 from src.abi.accounting import ERROR_SELECTORS as _ERROR_SELECTORS_BYTES
+from src.clients.web3_provider import redact_urls
 from src.config import CHAIN_NAMES, load_settings
 from src.services.accounting_contract import (
     AccountingContractService,
@@ -230,7 +231,9 @@ class WithdrawalProcessor:
         try:
             return await self._rate_limited_call(fetch_receipt)
         except Exception as exc:
-            logger.warning(f"Could not look up receipt for {tx_hash} on chain {chain_id}: {exc}")
+            logger.warning(
+                f"Could not look up receipt for {tx_hash} on chain {chain_id}: {redact_urls(exc)}"
+            )
             return None
 
     def _remember_broadcast(self, chain_id: int, index: int, tx_hash: str) -> None:
@@ -301,7 +304,8 @@ class WithdrawalProcessor:
             pending_tx = await self._rate_limited_call(fetch_transaction)
         except Exception as exc:
             logger.warning(
-                f"Could not look up pending tx for {expected_hash} on chain {chain_id}: {exc}"
+                f"Could not look up pending tx for {expected_hash} on chain {chain_id}: "
+                f"{redact_urls(exc)}"
             )
             return None
 
@@ -440,12 +444,12 @@ class WithdrawalProcessor:
                     logger.info(f"Withdrawal #{index}: already mined, tx_hash={broadcast_hash}")
                     found_nonces.add(nonce)
                 else:
-                    logger.error(
-                        f"Withdrawal #{index}: broadcast failed and no successful transaction "
-                        f"matching the signed payload exists on {chain_name} - nonce {nonce} may "
-                        f"have been spent by a different transaction, leaving this withdrawal "
-                        f"unpayable: "
-                        f"{exc}"
+                    # Catch-up only targets nonces the chain has not mined yet, so a failed
+                    # rebroadcast proves nothing either way; the next cycle retries.
+                    logger.warning(
+                        f"Withdrawal #{index}: rebroadcast of nonce {nonce} on {chain_name} "
+                        f"failed and payment is unproven - retrying next cycle: "
+                        f"{redact_urls(exc)}"
                     )
 
             if index > 0 and index % 100 == 0:
@@ -569,7 +573,7 @@ class WithdrawalProcessor:
                         f"Withdrawal #{index}: broadcast to {chain_name} failed and no "
                         f"successful transaction matching the signed payload "
                         f"({self._expected_tx_hash(signed_tx)}) exists there - leaving it "
-                        f"unresolved rather than marking it paid: {exc}"
+                        f"unresolved rather than marking it paid: {redact_urls(exc)}"
                     )
                     return False
                 if tx_hash == self._expected_tx_hash(signed_tx):
@@ -610,7 +614,9 @@ class WithdrawalProcessor:
         try:
             nonce_state = await self._chain_nonce_state(chain_id)
         except Exception as exc:
-            logger.error(f"{chain_name}: nonce readiness check failed, skipping chain: {exc}")
+            logger.error(
+                f"{chain_name}: nonce readiness check failed, skipping chain: {redact_urls(exc)}"
+            )
             return
 
         if nonce_state is None:

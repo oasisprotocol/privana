@@ -1,8 +1,22 @@
 """Shared AsyncWeb3 construction with idempotent-request caching."""
 
+import re
+
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
 from web3.types import RPCEndpoint
+
+_URL_PATTERN = re.compile(r"https?://[^\s'\"]+")
+
+
+def redact_urls(error: BaseException) -> str:
+    """``str(error)`` with every URL masked, for logging.
+
+    aiohttp HTTP errors (429, 401, ...) embed the full request URL, and provider
+    RPC URLs carry API keys in their path.
+    """
+    return _URL_PATTERN.sub("<rpc-url>", str(error))
+
 
 # Only responses that can never change for a given endpoint. Deliberately NOT
 # web3's default cacheable set: block/transaction requests would drag in its
