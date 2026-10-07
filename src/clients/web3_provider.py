@@ -15,14 +15,17 @@ _CACHEABLE_REQUESTS: set[RPCEndpoint] = {
 }
 
 
-def make_async_web3(rpc_url: str, headers: dict[str, str] | None = None) -> AsyncWeb3:
+def make_async_web3(
+    rpc_url: str, headers: dict[str, str] | None = None, *, cache: bool = True
+) -> AsyncWeb3:
     """Build an AsyncWeb3 that caches immutable RPC responses per provider.
 
     Without this, every wrapped Sapphire call re-fetches eth_chainId several
     times, which dominates our RPC quota (the gateway rate-limits us).
 
     ``headers`` are sent with every RPC request; callers must only pass
-    credentials to the endpoint they belong to.
+    credentials to the endpoint they belong to. ``cache=False`` is for callers
+    that must observe the endpoint's live answer, such as an identity probe.
     """
     request_kwargs = (
         {"headers": {**AsyncHTTPProvider.get_request_headers(), **headers}} if headers else None
@@ -31,7 +34,7 @@ def make_async_web3(rpc_url: str, headers: dict[str, str] | None = None) -> Asyn
         AsyncHTTPProvider(
             rpc_url,
             request_kwargs=request_kwargs,
-            cache_allowed_requests=True,
+            cache_allowed_requests=cache,
             cacheable_requests=_CACHEABLE_REQUESTS,
         )
     )

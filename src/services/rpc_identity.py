@@ -27,7 +27,8 @@ import logging
 from typing import Dict, Mapping, MutableMapping, Optional
 
 from web3 import AsyncWeb3
-from web3.providers import AsyncHTTPProvider
+
+from src.clients.web3_provider import make_async_web3
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,19 @@ class NoVerifiedChainsError(RuntimeError):
     """No configured RPC endpoint proved its chain ID; the service can serve nothing."""
 
 
-# Shared per URL so consumers get the exact client whose identity was probed, and
-# so web3's per-provider connection pool is reused.
+# Shared per URL so web3's per-provider connection pool is reused and every
+# consumer of a chain holds the same client for the URL that passed the probe.
 _clients: Dict[str, AsyncWeb3] = {}
+
+# Served clients cache eth_chainId per provider (see `make_async_web3`), so the
+# probe runs on its own uncached client; a cached answer would let an endpoint
+# that drifted after startup pass every re-verification.
+_probe_clients: Dict[str, AsyncWeb3] = {}
+
+# Request headers per URL. Only the Sapphire RPC carries any (gateway
+# credentials from SAPPHIRE_RPC_HEADERS); keying them by that one URL keeps
+# them away from third-party chain RPCs.
+_url_headers: Dict[str, Dict[str, str]] = {}
 
 # Empty until `initialize_verified_chain_rpc_urls` runs: before the check nothing
 # has proved its identity, so nothing is served. Unit tests and one-off scripts
@@ -69,14 +80,22 @@ _reverification_task: Optional[asyncio.Task] = None
 def _client_for_url(url: str) -> AsyncWeb3:
     client = _clients.get(url)
     if client is None:
-        client = AsyncWeb3(AsyncHTTPProvider(url))
+        client = make_async_web3(url, _url_headers.get(url))
         _clients[url] = client
+    return client
+
+
+def _probe_client_for_url(url: str) -> AsyncWeb3:
+    client = _probe_clients.get(url)
+    if client is None:
+        client = make_async_web3(url, _url_headers.get(url), cache=False)
+        _probe_clients[url] = client
     return client
 
 
 async def _probe_chain_id(url: str, timeout: float) -> int:
     """Return the chain ID the endpoint at ``url`` claims for itself."""
-    client = _client_for_url(url)
+    client = _probe_client_for_url(url)
     return int(await asyncio.wait_for(client.eth.chain_id, timeout))
 
 
@@ -156,6 +175,12 @@ async def initialize_verified_chain_rpc_urls(
     were configured and none verified.
     """
     global _configured_urls
+
+    # Register before the probe so it, and every client built after it, carries
+    # the Sapphire gateway credentials.
+    _url_headers.clear()
+    if settings.sapphire_rpc_url and settings.sapphire_rpc_headers:
+        _url_headers[settings.sapphire_rpc_url] = dict(settings.sapphire_rpc_headers)
 
     configured = dict(settings.chain_rpc_urls)
     # Remembered for re-verification, which must probe the full configured set to
@@ -320,7 +345,7 @@ def allow_unverified_urls() -> None:
 
 
 def reset_verified_chain_rpc_urls() -> None:
-    """Drop the verified set, the opt-out, the loop and the clients. For tests."""
+    """Drop the verified set, the opt-out, the loop, the headers and the clients. For tests."""
     global _verified_urls, _allow_unverified, _configured_urls, _reverification_task
 
     task, _reverification_task = _reverification_task, None
@@ -333,4 +358,6 @@ def reset_verified_chain_rpc_urls() -> None:
     _verified_urls = {}
     _allow_unverified = False
     _configured_urls = {}
+    _url_headers.clear()
     _clients.clear()
+    _probe_clients.clear()

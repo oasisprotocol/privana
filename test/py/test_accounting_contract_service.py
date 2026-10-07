@@ -1186,6 +1186,7 @@ def _pre_init_service(chain_rpc_urls: dict[int, str]) -> AccountingContractServi
     settings = SimpleNamespace(
         accounting_contract_address="0x" + "11" * 20,
         sapphire_rpc_url="",
+        sapphire_rpc_headers={},
         sapphire_chain_id=23295,
         accounting_gas_limit=500_000,
         chain_rpc_urls=dict(chain_rpc_urls),

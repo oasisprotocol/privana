@@ -629,7 +629,9 @@ async def test_one_verified_endpoint_serves_deposits_sweeps_and_withdrawals(
 
     configured = {SAME_CHAIN_ID: SAME_CHAIN_RPC_URL, FOREIGN_CHAIN_ID: FOREIGN_RPC_URL}
     served = await initialize_verified_chain_rpc_urls(
-        SimpleNamespace(chain_rpc_urls=dict(configured))
+        SimpleNamespace(
+            chain_rpc_urls=dict(configured), sapphire_rpc_url="", sapphire_rpc_headers={}
+        )
     )
     assert served == {SAME_CHAIN_ID: SAME_CHAIN_RPC_URL}
 

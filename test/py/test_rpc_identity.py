@@ -9,10 +9,12 @@ reset it again themselves.
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from web3.providers import AsyncHTTPProvider
 
 import src.services.rpc_identity as rpc_identity
 from src.services.deposit_discovery import DepositDiscoveryService, DiscoveryNotConfiguredError
@@ -57,10 +59,19 @@ async def _wait_until(predicate, timeout: float = 1.0) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
-def _settings(chain_rpc_urls: dict[int, str]) -> SimpleNamespace:
+def _settings(
+    chain_rpc_urls: dict[int, str],
+    *,
+    sapphire_rpc_url: str = "",
+    sapphire_rpc_headers: dict[str, str] | None = None,
+) -> SimpleNamespace:
     # Never the real load_settings() singleton: initialization narrows the mapping
     # in place, and a narrowed singleton would leak into every later test.
-    return SimpleNamespace(chain_rpc_urls=dict(chain_rpc_urls))
+    return SimpleNamespace(
+        chain_rpc_urls=dict(chain_rpc_urls),
+        sapphire_rpc_url=sapphire_rpc_url,
+        sapphire_rpc_headers=sapphire_rpc_headers or {},
+    )
 
 
 async def test_matching_endpoints_are_verified_and_share_one_client(monkeypatch):
@@ -279,6 +290,37 @@ async def test_reverification_drops_a_drifted_endpoint(monkeypatch, caplog):
     assert verified_web3(GOOD_CHAIN, {}) is not None
     assert any("now unserved" in r.getMessage() for r in caplog.records)
     assert SAPPHIRE_URL not in caplog.text
+
+
+async def test_probe_sees_live_answers_and_sapphire_credentials(monkeypatch):
+    """The probe must reach the endpoint itself, not a served client's cached
+    eth_chainId, and must carry the Sapphire gateway credentials — but only there."""
+    answers = {GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: SAPPHIRE_CHAIN}
+    sent_headers: dict[str, dict] = {}
+
+    async def endpoint(self, method, request_data):
+        sent_headers[self.endpoint_uri] = self.get_request_kwargs()["headers"]
+        request_id = json.loads(request_data)["id"]
+        result = hex(answers[self.endpoint_uri])
+        return json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}).encode()
+
+    monkeypatch.setattr(AsyncHTTPProvider, "_make_request", endpoint)
+    settings = _settings(
+        {GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL},
+        sapphire_rpc_url=SAPPHIRE_URL,
+        sapphire_rpc_headers={"Authorization": "Bearer gateway"},
+    )
+    await initialize_verified_chain_rpc_urls(settings)
+
+    assert sent_headers[SAPPHIRE_URL]["Authorization"] == "Bearer gateway"
+    assert "Authorization" not in sent_headers[GOOD_URL]
+    # Served clients cache eth_chainId once they have asked for it.
+    assert await verified_web3(SAPPHIRE_CHAIN, {}).eth.chain_id == SAPPHIRE_CHAIN
+
+    answers[SAPPHIRE_URL] = 23294
+
+    assert await reverify_chain_rpc_urls(settings) == {GOOD_CHAIN: GOOD_URL}
+    assert verified_web3(SAPPHIRE_CHAIN, {}) is None
 
 
 async def test_memoized_client_is_evicted_when_its_chain_is_dropped(monkeypatch):
