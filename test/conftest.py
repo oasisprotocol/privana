@@ -1,9 +1,15 @@
 """Shared pytest fixtures for auth tests."""
 
 import asyncio
+import os
+
+# src.config runs load_dotenv() at import, which would pull in a developer's
+# untracked .env and make results depend on the machine. Block it so every run
+# sees what CI sees: the process environment plus .env.localnet.
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
 import pytest
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 import src.auth.auth_token_keys as auth_token_keys
 import src.auth.auth_token_service as auth_token_service
@@ -15,7 +21,10 @@ import src.config
 import src.services.onramp_intent as onramp_intent
 import src.services.rpc_identity as rpc_identity
 
-load_dotenv(".env.localnet")
+# load_dotenv is disabled above; dotenv_values is not. Process env still wins.
+for _key, _value in dotenv_values(".env.localnet").items():
+    if _value is not None:
+        os.environ.setdefault(_key, _value)
 
 
 def _run_async(coro):
