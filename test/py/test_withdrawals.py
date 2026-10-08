@@ -820,6 +820,8 @@ class TestWithdrawalAdmission:
             return_value=TestWithdrawalAdmission.NATIVE_GAS_LIMIT
         )
         service.contract_reader = reader
+        service.chain_id = 23295
+        service.sapphire_rpc_url = "https://testnet.sapphire.example.invalid"
         service._withdrawal_gas_limits = AsyncTTLCache(maxsize=2, ttl=300)
         service.settings = MagicMock(min_withdrawal_gas_balance=floor)
 

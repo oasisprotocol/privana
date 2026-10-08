@@ -24,6 +24,7 @@ from src.services.deposit_discovery import DepositDiscoveryService, DiscoveryNot
 from src.services.deposit_verifier import DepositVerifier
 from src.services.rpc_identity import (
     NoVerifiedChainsError,
+    SapphireEndpointUnverifiedError,
     allow_unverified_urls,
     initialize_verified_chain_rpc_urls,
     reset_verified_chain_rpc_urls,
@@ -74,6 +75,7 @@ def _settings(
         chain_rpc_urls=dict(chain_rpc_urls),
         sapphire_rpc_url=sapphire_rpc_url,
         sapphire_rpc_headers=sapphire_rpc_headers or {},
+        sapphire_chain_id=SAPPHIRE_CHAIN,
     )
 
 
@@ -157,6 +159,22 @@ async def test_startup_aborts_when_no_endpoint_verifies(monkeypatch):
     # Committed before the raise: swallowing the error still serves nothing.
     assert settings.chain_rpc_urls == {}
     assert verified_web3(GOOD_CHAIN, {GOOD_CHAIN: GOOD_URL}) is None
+
+
+async def test_startup_aborts_when_the_sapphire_endpoint_fails(monkeypatch):
+    # Base verifies, so the service could serve a chain; but every Accounting read
+    # goes through SAPPHIRE_RPC_URL, which here answers for mainnet.
+    monkeypatch.setattr(
+        rpc_identity,
+        "_probe_chain_id",
+        _probe({GOOD_URL: GOOD_CHAIN, SAPPHIRE_URL: 23294}),
+    )
+    settings = _settings(
+        {GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL}, sapphire_rpc_url=SAPPHIRE_URL
+    )
+
+    with pytest.raises(SapphireEndpointUnverifiedError, match="refusing to start"):
+        await initialize_verified_chain_rpc_urls(settings)
 
 
 async def test_no_configured_endpoints_does_not_abort_startup(monkeypatch):

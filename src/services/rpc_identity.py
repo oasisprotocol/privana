@@ -13,8 +13,10 @@ moves funds on the wrong chain. An unreachable endpoint is dropped identically,
 because it cannot be told apart from a mismatching one without trusting it; the
 re-verification loop readmits it once it answers.
 
-Startup aborts only when nothing verifies at all, since that deployment would
-otherwise accept deposits it can never verify. A partially verified deployment
+Startup aborts when nothing verifies at all, since that deployment would
+otherwise accept deposits it can never verify, and when the Sapphire endpoint
+fails, since every Accounting read goes through it (see
+`SapphireEndpointUnverifiedError`). Otherwise a partially verified deployment
 keeps serving the chains that passed. Nothing is served *before* the check runs:
 the verified set starts empty, so a process that skipped it (a one-off script)
 resolves no chain unless it opts out with `allow_unverified_urls`.
@@ -44,6 +46,15 @@ REVERIFICATION_INTERVAL_SECONDS = 300
 
 class NoVerifiedChainsError(RuntimeError):
     """No configured RPC endpoint proved its chain ID; the service can serve nothing."""
+
+
+class SapphireEndpointUnverifiedError(RuntimeError):
+    """The Accounting endpoint (`SAPPHIRE_RPC_URL`) did not prove its chain ID.
+
+    Neither Sapphire signed queries nor the contract's code fail closed on a wrong
+    Sapphire network: signed queries take their chain ID from the endpoint, and a
+    deployer reusing a key and nonce puts code at the same address on both networks.
+    """
 
 
 # Shared per URL so web3's per-provider connection pool is reused and every
@@ -172,7 +183,8 @@ async def initialize_verified_chain_rpc_urls(
     membership in it.
 
     Returns the verified mapping. Raises `NoVerifiedChainsError` when endpoints
-    were configured and none verified.
+    were configured and none verified, and `SapphireEndpointUnverifiedError` when
+    `SAPPHIRE_RPC_URL` is configured and failed.
     """
     global _configured_urls
 
@@ -207,6 +219,14 @@ async def initialize_verified_chain_rpc_urls(
         raise NoVerifiedChainsError(
             f"None of the {len(configured)} configured RPC endpoints reported the chain ID "
             f"they are filed under (chains {sorted(configured)}); refusing to start"
+        )
+
+    if settings.sapphire_rpc_url and not is_url_verified(
+        settings.sapphire_chain_id, settings.sapphire_rpc_url
+    ):
+        raise SapphireEndpointUnverifiedError(
+            f"SAPPHIRE_RPC_URL did not report chain {settings.sapphire_chain_id}; refusing "
+            "to start, since every Accounting read goes through it"
         )
 
     logger.info("RPC identity check complete; serving chains %s", sorted(verified))
@@ -331,6 +351,18 @@ def require_verified_web3(
         cache.pop(chain_id, None)
         raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
     return cache.setdefault(chain_id, w3)
+
+
+def is_url_verified(chain_id: int, url: str) -> bool:
+    """Whether ``url`` is the endpoint that passed the identity check for ``chain_id``.
+
+    For endpoints used without a per-chain client, such as the Accounting readers.
+    Follows `verified_web3`: before the check only the opt-out admits, and after it
+    a chain dropped by re-verification stops passing at once.
+    """
+    if _verified_urls:
+        return _verified_urls.get(chain_id) == url
+    return _allow_unverified
 
 
 def allow_unverified_urls() -> None:

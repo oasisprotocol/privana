@@ -233,6 +233,17 @@ class SweepEngine:
         """
         return require_verified_web3(chain_id, self._chain_rpc_urls, self._web3_cache)
 
+    def _recheck_served(self, chain_id: int) -> None:
+        """Raise if re-verification dropped ``chain_id`` while a sweep held its client.
+
+        A sweep keeps one client across the gas-tank lock and receipt waits. Checked
+        before each broadcast and before a receipt promotes the record to SWEPT: a
+        receipt from a dropped endpoint would otherwise credit the deposit and delete
+        the record. Raising leaves the record for recovery, which re-reads the
+        receipt through a client that passed the check.
+        """
+        self._get_web3(chain_id)
+
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:
         """Gas price safe from underpricing: max of 1.25x baseFeePerGas,
         eth_gasPrice (stale/low on L2s), and a per-chain floor.
@@ -410,6 +421,7 @@ class SweepEngine:
                         gas_price=gas_price,
                     )
 
+                    self._recheck_served(chain_id)
                     gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
 
                     gas_tx_hash_hex = _to_hex(gas_tx_hash)
@@ -441,6 +453,7 @@ class SweepEngine:
                     gas_price=gas_price,
                 )
 
+                self._recheck_served(chain_id)
                 tx_hash = await w3.eth.send_raw_transaction(signed_tx)
                 tx_hash_hex = _to_hex(tx_hash)
                 record.sweep_tx_hash = tx_hash_hex
@@ -452,6 +465,7 @@ class SweepEngine:
                 if receipt["status"] != 1:
                     raise ValueError(f"Sweep tx reverted: {tx_hash_hex}")
 
+                self._recheck_served(chain_id)
                 record.state = SweepState.SWEPT
                 self._save_record(record)
 
@@ -578,6 +592,7 @@ class SweepEngine:
                         gas_price=gas_price,
                     )
 
+                    self._recheck_served(chain_id)
                     gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
 
                     gas_tx_hash_hex = _to_hex(gas_tx_hash)
@@ -608,6 +623,7 @@ class SweepEngine:
                     gas_price=gas_price,
                 )
 
+                self._recheck_served(chain_id)
                 sweep_tx_hash = await w3.eth.send_raw_transaction(signed_tx)
                 sweep_hash_hex = _to_hex(sweep_tx_hash)
                 record.sweep_tx_hash = sweep_hash_hex
@@ -619,6 +635,7 @@ class SweepEngine:
                 if receipt["status"] != 1:
                     raise ValueError(f"ERC20 sweep tx reverted: {sweep_hash_hex}")
 
+                self._recheck_served(chain_id)
                 record.state = SweepState.SWEPT
                 self._save_record(record)
 

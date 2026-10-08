@@ -35,7 +35,7 @@ from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_ch
 from src.models.private_read import PrivateReadAuth
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
-from src.services.rpc_identity import require_verified_web3
+from src.services.rpc_identity import is_url_verified, require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -286,9 +286,23 @@ class AccountingContractService:
             self._deposit_address = await contract_reader.functions.evmAddress().call()
         return self._deposit_address
 
+    def require_verified_sapphire(self) -> None:
+        """Refuse Sapphire reads while `SAPPHIRE_RPC_URL` lacks a passing identity check.
+
+        Nothing else fails closed on a wrong Sapphire network: signed queries take
+        their chain ID from the endpoint, and the contract can have code at the same
+        address there. Checked per read, so a re-verification drop pauses reads at once.
+        """
+        if not is_url_verified(self.chain_id, self.sapphire_rpc_url):
+            raise ValueError(
+                f"Sapphire RPC endpoint is not verified for chain {self.chain_id}; "
+                "Accounting reads are paused until it passes the identity check"
+            )
+
     def _get_reader_contract(self) -> AsyncContract:
         if self.contract_reader is None:
             raise ValueError("SAPPHIRE_RPC_URL must be configured to perform withdrawal operations")
+        self.require_verified_sapphire()
         return self.contract_reader
 
     async def _get_eip712_domain(self) -> Dict[str, Any]:
@@ -366,6 +380,7 @@ class AccountingContractService:
         return self._siwe_auth_address
 
     async def _get_siwe_auth_reader_contract(self) -> AsyncContract:
+        self.require_verified_sapphire()
         if self._siwe_auth_reader is not None:
             return self._siwe_auth_reader
 
@@ -380,6 +395,7 @@ class AccountingContractService:
         return self._siwe_auth_reader
 
     async def _get_confidential_reader_contract(self) -> AsyncContract:
+        self.require_verified_sapphire()
         if self._confidential_contract_reader is not None:
             return self._confidential_contract_reader
 
@@ -414,6 +430,7 @@ class AccountingContractService:
         return self._confidential_contract_reader
 
     async def _get_confidential_siwe_auth_reader_contract(self) -> AsyncContract:
+        self.require_verified_sapphire()
         if self._confidential_siwe_auth_reader is not None:
             return self._confidential_siwe_auth_reader
 
@@ -432,6 +449,7 @@ class AccountingContractService:
     async def _get_chain_timestamp(self) -> int:
         if self._confidential_reader_w3 is None:
             raise ValueError("Confidential reader is not initialized")
+        self.require_verified_sapphire()
         block = await _call_with_transient_retry(
             lambda: self._confidential_reader_w3.eth.get_block("latest"),
             op="get_block",

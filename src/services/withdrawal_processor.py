@@ -123,11 +123,17 @@ class WithdrawalProcessor:
         """
         return require_verified_web3(chain_id, self.settings.chain_rpc_urls, self._destination_web3)
 
+    def _sapphire_contract(self):
+        """The Accounting reader, refused while Sapphire fails its identity check."""
+        self.accounting_service.require_verified_sapphire()
+        return self._contract
+
     async def _get_evm_address(self) -> str:
         """Get the EVM address used for withdrawals."""
         if self._evm_address is None:
+            contract = self._sapphire_contract()
             self._evm_address = await self._rate_limited_call(
-                lambda: self._contract.functions.evmAddress().call()
+                lambda: contract.functions.evmAddress().call()
             )
         return self._evm_address
 
@@ -149,8 +155,9 @@ class WithdrawalProcessor:
         ``latest`` is the nonce returned, because the two disagree exactly when a broadcast
         is stuck unmined, and that gap is what still needs re-broadcasting.
         """
+        contract = self._sapphire_contract()
         contract_next_nonce = await self._rate_limited_call(
-            lambda: self._contract.functions.nonces(chain_id).call()
+            lambda: contract.functions.nonces(chain_id).call()
         )
 
         evm_address = await self._get_evm_address()
