@@ -237,10 +237,10 @@ class SweepEngine:
         """Raise if re-verification dropped ``chain_id`` while a sweep held its client.
 
         A sweep keeps one client across the gas-tank lock and receipt waits. Checked
-        before each broadcast and before a receipt promotes the record to SWEPT: a
-        receipt from a dropped endpoint would otherwise credit the deposit and delete
-        the record. Raising leaves the record for recovery, which re-reads the
-        receipt through a client that passed the check.
+        before each broadcast and before a receipt promotes the record to SWEPT, in
+        the sweep and in reconciliation: a receipt from a dropped endpoint would
+        otherwise credit the deposit and delete the record. Raising leaves the record
+        for the next recovery pass.
         """
         self._get_web3(chain_id)
 
@@ -778,6 +778,7 @@ class SweepEngine:
         try:
             w3 = self._get_web3(record.chain_id)
             receipt = await w3.eth.get_transaction_receipt(record.sweep_tx_hash)
+            self._recheck_served(record.chain_id)
         except TransactionNotFound:
             return
         except Exception:
