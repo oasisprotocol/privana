@@ -1,19 +1,99 @@
 import { task } from "hardhat/config";
+import { formatUnits } from "ethers";
 import {
   fetchBalance,
+  fetchJson,
   getSiweToken,
+  isJsonObject,
   normalizeApiBaseUrl,
 } from "./utils/siwe";
+import { withRetry } from "./utils/retry";
+
+export type TokenInfo = {
+  tokenId: string;
+  tokenType: number;
+  tokenTypeName: string;
+  chainId: number | null;
+  chainName: string | null;
+  tokenAddress: string | null;
+  name: string | null;
+  symbol: string | null;
+  decimals: number | null;
+};
+
+function parseTokenInfo(token: unknown): TokenInfo {
+  if (!isJsonObject(token) || typeof token.token_id !== "string") {
+    throw new Error("Unexpected token entry in API response");
+  }
+  return {
+    tokenId: token.token_id,
+    tokenType: Number(token.token_type),
+    tokenTypeName: String(token.token_type_name),
+    chainId: typeof token.chain_id === "number" ? token.chain_id : null,
+    chainName: typeof token.chain_name === "string" ? token.chain_name : null,
+    tokenAddress:
+      typeof token.token_address === "string" ? token.token_address : null,
+    name: typeof token.name === "string" ? token.name : null,
+    symbol: typeof token.symbol === "string" ? token.symbol : null,
+    decimals: typeof token.decimals === "number" ? token.decimals : null,
+  };
+}
+
+export async function fetchTokens(params: { apiBaseUrl: string }): Promise<TokenInfo[]> {
+  const url = `${params.apiBaseUrl}/v1/accounting/tokens`;
+  const data = await fetchJson(url);
+
+  if (!isJsonObject(data) || !Array.isArray(data.tokens)) {
+    throw new Error("Unexpected token list response from API");
+  }
+
+  return data.tokens.map(parseTokenInfo);
+}
+
+async function fetchToken(params: {
+  apiBaseUrl: string;
+  tokenId: string;
+}): Promise<TokenInfo> {
+  const url = `${params.apiBaseUrl}/v1/accounting/tokens/${params.tokenId}`;
+  const data = await fetchJson(url);
+  return parseTokenInfo(data);
+}
+
+export function formatBalance(balance: bigint, decimals: number | null): string {
+  if (decimals === null) {
+    return balance.toString();
+  }
+  return formatUnits(balance, decimals);
+}
+
+export function tokenName(token: Pick<TokenInfo, "symbol" | "tokenTypeName" | "chainName">): string {
+  const symbol = token.symbol ?? token.tokenTypeName;
+  return token.chainName ? `${symbol} (${token.chainName})` : symbol;
+}
+
+function printBalanceEntry(
+  tokenId: string,
+  name: string,
+  amount: string,
+  rawBalance: bigint,
+): void {
+  console.log(`Token ID: ${tokenId}`);
+  console.log(`Name:     ${name}`);
+  console.log(`Amount:   ${amount} (${rawBalance.toString()})`);
+}
 
 task("getBalance")
-  .addParam("tokenid", "Token ID (32-byte hex)")
+  .addOptionalParam(
+    "tokenid",
+    "Token ID (32-byte hex). If omitted, reports the balance for every token returned by /v1/accounting/tokens",
+  )
   .addOptionalParam(
     "apiurl",
     "API base URL",
     "https://api.testnet.privana.finance",
   )
-  .addOptionalParam("chainid", "Chain ID for SIWE message", "84532")
-  .setDescription("Get user balance for a token (requires SIWE authentication)")
+  .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
+  .setDescription("Get user balance for a token, or all registered tokens (requires SIWE authentication)")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
@@ -21,32 +101,87 @@ task("getBalance")
     const chainId = parseInt(args.chainid);
 
     console.log("User address:", userAddress);
-    console.log("Token ID:", args.tokenid);
     console.log("API URL:", apiBaseUrl);
 
     console.log("\nAuthenticating with SIWE...");
-    const siweToken = await getSiweToken({
-      apiBaseUrl,
-      signer,
-      userAddress,
-      chainId,
-    });
+    const siweToken = await withRetry(() =>
+      getSiweToken({
+        apiBaseUrl,
+        signer,
+        userAddress,
+        chainId,
+      }),
+    );
     console.log("SIWE authentication successful");
 
-    console.log("\nFetching balance...");
-    const balance = await fetchBalance({
-      apiBaseUrl,
-      userAddress,
-      tokenId: args.tokenid,
-      siweToken,
-    });
+    if (args.tokenid) {
+      const token = await withRetry(() =>
+        fetchToken({ apiBaseUrl, tokenId: args.tokenid }),
+      );
 
-    console.log("\n=== Balance ===");
-    console.log("Raw (base units):", balance.toString());
-    // Assume 6 decimals for USDC-like tokens, can be parameterized
-    console.log("Formatted (6 decimals):", (Number(balance) / 1e6).toFixed(6));
+      const balance = await withRetry(() =>
+        fetchBalance({
+          apiBaseUrl,
+          userAddress,
+          tokenId: args.tokenid,
+          siweToken,
+        }),
+      );
 
-    return balance;
+      console.log("\n=== Balance ===");
+      printBalanceEntry(
+        token.tokenId,
+        tokenName(token),
+        formatBalance(balance, token.decimals),
+        balance,
+      );
+
+      return balance;
+    }
+
+    console.log("\nFetching token list...");
+    const tokens = await withRetry(() => fetchTokens({ apiBaseUrl }));
+    console.log(`Found ${tokens.length} registered token(s)`);
+
+    const results = await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          const balance = await withRetry(() =>
+            fetchBalance({
+              apiBaseUrl,
+              userAddress,
+              tokenId: token.tokenId,
+              siweToken,
+            }),
+          );
+          return {
+            token,
+            amount: formatBalance(balance, token.decimals),
+            rawBalance: balance,
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return { token, error: message };
+        }
+      }),
+    );
+
+    const balances: Record<string, string> = {};
+    console.log("\n=== Balances ===");
+    for (const result of results) {
+      const name = tokenName(result.token);
+      console.log("");
+      if ("error" in result) {
+        console.warn(`Token ID: ${result.token.tokenId}`);
+        console.warn(`Name:     ${name}`);
+        console.warn(`Error:    ${result.error}`);
+      } else {
+        balances[result.token.tokenId] = result.amount;
+        printBalanceEntry(result.token.tokenId, name, result.amount, result.rawBalance);
+      }
+    }
+
+    return balances;
   });
 
 task("transferERC20")
