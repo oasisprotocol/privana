@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkprivana_docs=self.webpackChunkprivana_docs||[]).push([[9104],{8155(t){t.exports=JSON.parse('{"categoryGeneratedIndex":{"title":"Getting Started","slug":"/getting-started","permalink":"/getting-started","sidebar":"docs","navigation":{"next":{"title":"Introduction","permalink":"/"}}}}')}}]);
