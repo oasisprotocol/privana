@@ -32,7 +32,6 @@ from web3 import AsyncWeb3
 from web3.exceptions import TransactionNotFound
 
 from src.clients.rofl import TransactionRevertedError
-from src.clients.web3_provider import make_async_web3
 from src.config.chain_config import (
     GAS_FUNDING_AMOUNT_WEI,
     GAS_FUNDING_HEADROOM,
@@ -41,6 +40,7 @@ from src.config.chain_config import (
     SWEEP_GAS_LIMIT_NATIVE,
 )
 from src.services.l2_fee_estimator import estimate_l1_data_fee
+from src.services.rpc_identity import require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -226,12 +226,23 @@ class SweepEngine:
         return self._gas_funding_tx_hashes
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
-        if chain_id not in self._web3_cache:
-            rpc_url = self._chain_rpc_urls.get(chain_id)
-            if not rpc_url:
-                raise ValueError(f"No RPC URL configured for chain {chain_id}")
-            self._web3_cache[chain_id] = make_async_web3(rpc_url)
-        return self._web3_cache[chain_id]
+        """Get the chain's startup-verified client (see `rpc_identity`).
+
+        Sweeps broadcast signed transactions, so serving an excluded chain would move
+        funds on a chain the signature was never meant for.
+        """
+        return require_verified_web3(chain_id, self._chain_rpc_urls, self._web3_cache)
+
+    def _recheck_served(self, chain_id: int) -> None:
+        """Raise if re-verification dropped ``chain_id`` while a sweep held its client.
+
+        A sweep keeps one client across the gas-tank lock and receipt waits. Checked
+        before each broadcast and before a receipt promotes the record to SWEPT, in
+        the sweep and in reconciliation: a receipt from a dropped endpoint would
+        otherwise credit the deposit and delete the record. Raising leaves the record
+        for the next recovery pass.
+        """
+        self._get_web3(chain_id)
 
     async def _get_safe_gas_price(self, w3: AsyncWeb3, chain_id: int) -> int:
         """Gas price safe from underpricing: max of 1.25x baseFeePerGas,
@@ -410,6 +421,7 @@ class SweepEngine:
                         gas_price=gas_price,
                     )
 
+                    self._recheck_served(chain_id)
                     gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
 
                     gas_tx_hash_hex = _to_hex(gas_tx_hash)
@@ -441,6 +453,7 @@ class SweepEngine:
                     gas_price=gas_price,
                 )
 
+                self._recheck_served(chain_id)
                 tx_hash = await w3.eth.send_raw_transaction(signed_tx)
                 tx_hash_hex = _to_hex(tx_hash)
                 record.sweep_tx_hash = tx_hash_hex
@@ -452,6 +465,7 @@ class SweepEngine:
                 if receipt["status"] != 1:
                     raise ValueError(f"Sweep tx reverted: {tx_hash_hex}")
 
+                self._recheck_served(chain_id)
                 record.state = SweepState.SWEPT
                 self._save_record(record)
 
@@ -578,6 +592,7 @@ class SweepEngine:
                         gas_price=gas_price,
                     )
 
+                    self._recheck_served(chain_id)
                     gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
 
                     gas_tx_hash_hex = _to_hex(gas_tx_hash)
@@ -608,6 +623,7 @@ class SweepEngine:
                     gas_price=gas_price,
                 )
 
+                self._recheck_served(chain_id)
                 sweep_tx_hash = await w3.eth.send_raw_transaction(signed_tx)
                 sweep_hash_hex = _to_hex(sweep_tx_hash)
                 record.sweep_tx_hash = sweep_hash_hex
@@ -619,6 +635,7 @@ class SweepEngine:
                 if receipt["status"] != 1:
                     raise ValueError(f"ERC20 sweep tx reverted: {sweep_hash_hex}")
 
+                self._recheck_served(chain_id)
                 record.state = SweepState.SWEPT
                 self._save_record(record)
 
@@ -761,6 +778,7 @@ class SweepEngine:
         try:
             w3 = self._get_web3(record.chain_id)
             receipt = await w3.eth.get_transaction_receipt(record.sweep_tx_hash)
+            self._recheck_served(record.chain_id)
         except TransactionNotFound:
             return
         except Exception:

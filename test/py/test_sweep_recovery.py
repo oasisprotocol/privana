@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from web3.exceptions import TransactionNotFound
 
+import src.services.rpc_identity as rpc_identity
 import src.services.sweep_engine as sweep_engine_module
 from src.clients.rofl import TransactionRevertedError
 from src.services.sweep_engine import SweepEngine, SweepRecord, SweepState
@@ -219,6 +220,64 @@ async def test_resume_gas_funded_with_mined_sweep_tx_is_promoted_and_credited(st
 
     mock_accounting.credit_deposit.assert_called_once()
     assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_credit_a_receipt_read_while_the_chain_was_dropped(
+    state_dir, monkeypatch
+):
+    """Reconciliation reads the receipt through a client that may lose its chain
+    mid-call. A success receipt from that endpoint must not promote, credit, or
+    delete the record; the next pass re-reads it once the chain is served again."""
+    url = "https://fake"
+    answers = {url: 84532}
+
+    async def probe(probed_url: str, _timeout: float) -> int:
+        return answers[probed_url]
+
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", probe)
+    settings = SimpleNamespace(
+        chain_rpc_urls={84532: url},
+        sapphire_rpc_url="",
+        sapphire_rpc_headers={},
+        sapphire_chain_id=23295,
+    )
+    await rpc_identity.initialize_verified_chain_rpc_urls(settings)
+
+    async def receipt(_tx_hash):
+        answers[url] = 1  # the endpoint drifts to another chain mid-call
+        await rpc_identity.reverify_chain_rpc_urls(settings)
+        return {"status": 1}
+
+    w3 = SimpleNamespace(eth=SimpleNamespace(get_transaction_receipt=receipt))
+    monkeypatch.setitem(rpc_identity._clients, url, w3)
+
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+    )
+    _write_record(state_dir, record)
+    mock_accounting = AsyncMock()
+    engine = SweepEngine(
+        accounting_service=mock_accounting,
+        chain_rpc_urls={84532: url},
+        state_dir=state_dir,
+    )
+
+    await engine.resume_incomplete_sweeps()
+
+    mock_accounting.credit_deposit.assert_not_called()
+    persisted = engine.get_record_by_deposit_id("0x" + "22" * 32)
+    assert persisted.state == SweepState.GAS_FUNDED
+    assert persisted.sweep_tx_hash == "0x" + "dd" * 32
 
 
 @pytest.mark.asyncio

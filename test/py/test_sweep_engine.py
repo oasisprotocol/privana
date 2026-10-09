@@ -4,12 +4,14 @@ Mocks AccountingContractService and web3 to test state transitions
 without hitting real chains.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import src.services.rpc_identity as rpc_identity
 from src.clients.rofl import TransactionRevertedError
-from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI
+from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI, SWEEP_GAS_LIMIT_NATIVE
 from src.services.sweep_engine import (
     SweepEngine,
     SweepRecord,
@@ -281,6 +283,71 @@ async def test_sweep_erc20_full_cycle(engine, mock_accounting):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("asset", ["native", "erc20"])
+async def test_receipt_after_chain_drop_keeps_the_record_for_recovery(
+    engine, mock_accounting, monkeypatch, asset
+):
+    """The sweep holds one client through its receipt wait. A success receipt that
+    arrives after re-verification dropped the chain must not credit the deposit or
+    delete the record: recovery re-reads it through an endpoint that passed."""
+    url = "https://fake-rpc.example.com"
+    answers = {url: 84532}
+
+    async def probe(probed_url: str, _timeout: float) -> int:
+        return answers[probed_url]
+
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", probe)
+    settings = SimpleNamespace(
+        chain_rpc_urls={84532: url},
+        sapphire_rpc_url="",
+        sapphire_rpc_headers={},
+        sapphire_chain_id=23295,
+    )
+    await rpc_identity.initialize_verified_chain_rpc_urls(settings)
+
+    w3 = AsyncMock()
+    w3.eth.get_balance = AsyncMock(return_value=10**18)
+    w3.eth.get_transaction_count = AsyncMock(return_value=0)
+    w3.eth.gas_price = _AwaitableValue(1_000_000_000)
+    w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+    w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
+    receipt_waits = iter(["gas funding", "sweep"])
+
+    async def receipt(_tx_hash):
+        if next(receipt_waits) == "sweep":
+            answers[url] = 1  # the endpoint drifts to another chain mid-wait
+            await rpc_identity.reverify_chain_rpc_urls(settings)
+        return {"status": 1, "blockNumber": 100}
+
+    w3.eth.get_transaction_receipt = receipt
+    monkeypatch.setitem(rpc_identity._clients, url, w3)
+    monkeypatch.setattr(engine, "_get_gas_tank_address", AsyncMock(return_value="0x" + "ff" * 20))
+    monkeypatch.setattr(engine, "_get_erc20_balance", AsyncMock(return_value=1000 * 10**6))
+
+    sweep_args = dict(
+        deposit_address="0x" + "aa" * 20,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        chain_id=84532,
+        token_id=b"\x11" * 32,
+        deposit_id=b"\x22" * 32,
+    )
+    with pytest.raises(ValueError, match="No verified RPC endpoint for chain 84532"):
+        if asset == "native":
+            await engine.sweep_native(amount=10**18, **sweep_args)
+        else:
+            await engine.sweep_erc20(
+                token_address="0x" + "cc" * 20, amount=1000 * 10**6, **sweep_args
+            )
+
+    mock_accounting.credit_deposit.assert_not_called()
+    record = engine.get_record_by_deposit_id("0x" + "22" * 32)
+    assert record.state == SweepState.GAS_FUNDED
+    assert record.sweep_tx_hash == "0x" + "bb" * 32
+
+
+@pytest.mark.asyncio
 async def test_sweep_erc20_zero_balance_already_processed(engine, mock_accounting):
     """When ERC20 balance=0 and deposit already processed (race), return success."""
     deposit_addr = "0x" + "aa" * 20
@@ -412,9 +479,9 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=False)
     # gas_price = max(1.25 * 1 gwei base fee, 1 gwei rpc, floor) = 1.25 gwei;
-    # gas_amount = 21k gas * 1.25 gwei * 2 + l1_fee, under the 84532 cap
+    # gas_amount = native sweep gas * 1.25 gwei * 2 + l1_fee, under the 84532 cap
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
-    assert call_kwargs.kwargs["gas_amount"] == 21_000 * 1_250_000_000 * 2 + l1_fee
+    assert call_kwargs.kwargs["gas_amount"] == SWEEP_GAS_LIMIT_NATIVE * 1_250_000_000 * 2 + l1_fee
 
 
 @pytest.mark.asyncio

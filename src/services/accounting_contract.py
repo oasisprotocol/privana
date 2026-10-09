@@ -35,6 +35,7 @@ from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_ch
 from src.models.private_read import PrivateReadAuth
 from src.models.types import Settings
 from src.services.cache import AsyncTTLCache
+from src.services.rpc_identity import is_url_verified, require_verified_web3
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +57,19 @@ _TOKEN_SYMBOL_CACHE_TTL = 3600  # 1 hour - symbols rarely change
 _TOKEN_NAME_CACHE_TTL = 3600  # 1 hour - names rarely change
 _TOKEN_DECIMALS_CACHE_TTL = 3600  # 1 hour - decimals never change
 _TOKEN_LIST_CACHE_TTL = 300  # 5 minutes - token list rarely changes
+# Contract constants are not immutable across upgrades (gasLimitNativeSweep changed
+# in this branch), so the withdrawal gas limits expire like any other cached read.
+_WITHDRAWAL_GAS_LIMIT_CACHE_TTL = 300  # 5 minutes
 
 # Cache size limits
 _TOKEN_CACHE_MAXSIZE = 1000
 
 _WITHDRAWAL_INDEX_SCAN_WINDOW = 16
 _WITHDRAWAL_READ_BATCH_SIZE = 50  # withdrawals(i) reads per JSON-RPC batch
+
+# Headroom over the exact gas cost the contract signs with, so a gas price update
+# between admission and broadcast does not strand the withdrawal.
+_WITHDRAWAL_GAS_BUFFER_PERCENT = 20
 
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
@@ -187,7 +195,6 @@ class AccountingContractService:
         self._withdrawals_lock = asyncio.Lock()
 
         self.rofl_client = RoflAppdClient()
-        self.chain_rpc_urls: Dict[int, str] = dict(self.settings.chain_rpc_urls)
         self._chain_web3: Dict[int, AsyncWeb3] = {}
         self.default_token_symbol = "ETH"
         self.chain_names = CHAIN_NAMES
@@ -207,6 +214,9 @@ class AccountingContractService:
         )
         self._token_list_cache: AsyncTTLCache[str, list[Dict[str, Any]]] = AsyncTTLCache(
             maxsize=1, ttl=_TOKEN_LIST_CACHE_TTL
+        )
+        self._withdrawal_gas_limits: AsyncTTLCache[str, int] = AsyncTTLCache(
+            maxsize=2, ttl=_WITHDRAWAL_GAS_LIMIT_CACHE_TTL
         )
 
     # ------------------------------------------------------------------
@@ -276,9 +286,23 @@ class AccountingContractService:
             self._deposit_address = await contract_reader.functions.evmAddress().call()
         return self._deposit_address
 
+    def require_verified_sapphire(self) -> None:
+        """Refuse Sapphire reads while `SAPPHIRE_RPC_URL` lacks a passing identity check.
+
+        Nothing else fails closed on a wrong Sapphire network: signed queries take
+        their chain ID from the endpoint, and the contract can have code at the same
+        address there. Checked per read, so a re-verification drop pauses reads at once.
+        """
+        if not is_url_verified(self.chain_id, self.sapphire_rpc_url):
+            raise ValueError(
+                f"Sapphire RPC endpoint is not verified for chain {self.chain_id}; "
+                "Accounting reads are paused until it passes the identity check"
+            )
+
     def _get_reader_contract(self) -> AsyncContract:
         if self.contract_reader is None:
             raise ValueError("SAPPHIRE_RPC_URL must be configured to perform withdrawal operations")
+        self.require_verified_sapphire()
         return self.contract_reader
 
     async def _get_eip712_domain(self) -> Dict[str, Any]:
@@ -356,6 +380,7 @@ class AccountingContractService:
         return self._siwe_auth_address
 
     async def _get_siwe_auth_reader_contract(self) -> AsyncContract:
+        self.require_verified_sapphire()
         if self._siwe_auth_reader is not None:
             return self._siwe_auth_reader
 
@@ -370,6 +395,7 @@ class AccountingContractService:
         return self._siwe_auth_reader
 
     async def _get_confidential_reader_contract(self) -> AsyncContract:
+        self.require_verified_sapphire()
         if self._confidential_contract_reader is not None:
             return self._confidential_contract_reader
 
@@ -404,6 +430,7 @@ class AccountingContractService:
         return self._confidential_contract_reader
 
     async def _get_confidential_siwe_auth_reader_contract(self) -> AsyncContract:
+        self.require_verified_sapphire()
         if self._confidential_siwe_auth_reader is not None:
             return self._confidential_siwe_auth_reader
 
@@ -422,6 +449,7 @@ class AccountingContractService:
     async def _get_chain_timestamp(self) -> int:
         if self._confidential_reader_w3 is None:
             raise ValueError("Confidential reader is not initialized")
+        self.require_verified_sapphire()
         block = await _call_with_transient_retry(
             lambda: self._confidential_reader_w3.eth.get_block("latest"),
             op="get_block",
@@ -429,20 +457,10 @@ class AccountingContractService:
         return int(block["timestamp"])
 
     async def _get_chain_web3(self, chain_id: int) -> AsyncWeb3:
-        if chain_id in self._chain_web3:
-            return self._chain_web3[chain_id]
-
-        rpc_url = self.chain_rpc_urls.get(chain_id)
-        if not rpc_url:
-            raise ValueError(f"No RPC endpoint configured for chain ID {chain_id}")
-
-        web3 = make_async_web3(rpc_url)
-        connected = await web3.is_connected()
-        if not connected:
-            raise ValueError(f"Failed to connect to RPC endpoint for chain ID {chain_id}")
-
-        self._chain_web3[chain_id] = web3
-        return web3
+        # Read `settings.chain_rpc_urls` live: this service is constructed at import,
+        # before the startup identity check narrows it, and only `verified_web3` knows
+        # which chains proved their ID.
+        return require_verified_web3(chain_id, self.settings.chain_rpc_urls, self._chain_web3)
 
     @staticmethod
     def _as_raw_tx_bytes(value: Any) -> bytes:
@@ -494,21 +512,67 @@ class AccountingContractService:
             is_native=is_native,
         )
 
+    async def _get_withdrawal_gas_limit(self, is_native: bool) -> int:
+        """Read the gas limit the contract signs withdrawals with (TTL-cached).
+
+        ``gasLimitNativeWithdraw``/``gasLimitERC20Withdraw`` are ``public constant`` on
+        ``EVMSignerAndVerifier``; reading the getters keeps admission in step with signing
+        instead of mirroring numbers that can silently drift apart. They move with an
+        implementation upgrade, so the value expires instead of being pinned for the
+        process lifetime.
+        """
+        fn_name = "gasLimitNativeWithdraw" if is_native else "gasLimitERC20Withdraw"
+
+        async def fetch() -> int:
+            contract_reader = self._get_reader_contract()
+            return int(await getattr(contract_reader.functions, fn_name)().call())
+
+        return await self._withdrawal_gas_limits.get_or_set_async(fn_name, fetch)
+
+    async def get_accounting_version(self) -> int:
+        """Read the deployed implementation's VERSION (startup gate input)."""
+        contract_reader = self._get_reader_contract()
+        return int(await contract_reader.functions.VERSION().call())
+
     async def _check_destination_balance(self, chain_id: int, is_native: bool, amount: int) -> None:
-        """Check that evmAddress has enough native balance on the destination chain for gas."""
+        """Check that evmAddress can pay for this withdrawal on the destination chain.
+
+        Derived from the two values the contract signs with — ``gasPrices[chainId]`` and
+        the withdrawal gas limit — because the EVM debits ``gasLimit * gasPrice`` upfront.
+        A single global floor cannot express that: at 1e13 wei it admitted ~1000x too
+        early on a 100 gwei chain, where an ERC-20 withdrawal needs
+        100_000 * 100 gwei = 1e16 wei.
+        """
+        chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+
+        gas_price = await self.get_gas_price(chain_id)
+        if gas_price <= 0:
+            raise ValueError(
+                f"No gas price published for {chain_name}. The contract cannot sign a "
+                f"withdrawal for chain {chain_id} until setGasPrice({chain_id}, ...) lands."
+            )
+
+        gas_limit = await self._get_withdrawal_gas_limit(is_native)
+        gas_cost = gas_price * gas_limit
+        required = gas_cost * (100 + _WITHDRAWAL_GAS_BUFFER_PERCENT) // 100
+        # MIN_WITHDRAWAL_GAS_BALANCE is kept as an additional floor for chains whose
+        # published gas price understates what the broadcaster actually needs.
+        required = max(required, self.settings.min_withdrawal_gas_balance)
+        if is_native:
+            required += amount
+
         chain_w3 = await self._get_chain_web3(chain_id)
         evm_address = await self._get_deposit_address()
         balance = await chain_w3.eth.get_balance(evm_address)
 
-        required = self.settings.min_withdrawal_gas_balance
-        if is_native:
-            required += amount
-
         if balance < required:
-            chain_name = CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+            detail = f"{gas_limit} gas x {gas_price} wei +{_WITHDRAWAL_GAS_BUFFER_PERCENT}% buffer"
+            if is_native:
+                detail += f" + {amount} wei withdrawn"
             raise ValueError(
                 f"Insufficient native balance on {chain_name}. "
-                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei."
+                f"EVM address {evm_address} has {balance} wei, needs at least {required} wei "
+                f"({detail})."
             )
 
     async def _get_token_symbol(self, token: HexBytes) -> Optional[str]:

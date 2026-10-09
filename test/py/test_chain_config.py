@@ -11,6 +11,7 @@ from src.config import (
     NATIVE_TOKEN_DECIMALS,
     NATIVE_TOKEN_NAMES,
     NATIVE_TOKEN_SYMBOLS,
+    _build_chain_rpc_urls,
     _build_gas_prices,
     _build_token_infos,
 )
@@ -19,6 +20,7 @@ from src.config.chain_config import (
     MIN_DEPOSIT_ERC20_WEI,
     MIN_DEPOSIT_NATIVE_WEI,
     ChainConfig,
+    _build_chain_configs,
     get_finality_depth,
 )
 
@@ -213,3 +215,67 @@ def test_build_token_infos_rejects_invalid_token_address(monkeypatch):
 
     with pytest.raises(ValueError, match="entry 0 token_address is not a valid address"):
         _build_token_infos()
+
+
+def test_sapphire_testnet_runtime_metadata():
+    assert CHAIN_NAMES[23295] == "Sapphire Testnet"
+    assert NATIVE_TOKEN_SYMBOLS[23295] == "ROSE"
+    assert NATIVE_TOKEN_NAMES[23295] == "Rose"
+    assert NATIVE_TOKEN_DECIMALS[23295] == 18
+
+
+def test_sapphire_testnet_chain_config_m6_1():
+    assert 23295 in CHAIN_CONFIGS
+    cfg = CHAIN_CONFIGS[23295]
+    assert cfg.discovery_scan_chunk_blocks <= 100
+    assert cfg.min_deposit_erc20_wei == 10**18
+    assert cfg.finality_depth == 2
+    assert cfg.discovery_lookback_blocks == 640
+    assert cfg.discovery_max_lookback_blocks == 1_000
+
+
+def test_sapphire_localnet_absent_on_testnet(monkeypatch):
+    """The localnet mirror must not be depositable on a testnet deployment."""
+    monkeypatch.setenv("SAPPHIRE_CHAIN_ID", "23295")
+
+    assert 23293 not in _build_chain_configs()
+
+
+def test_sapphire_localnet_chain_config(monkeypatch):
+    monkeypatch.setenv("SAPPHIRE_CHAIN_ID", "23293")
+    configs = _build_chain_configs()
+
+    assert 23293 in configs
+    cfg = configs[23293]
+    assert cfg.discovery_scan_chunk_blocks <= 100
+    assert cfg.min_deposit_erc20_wei == 10**18
+    assert cfg.finality_depth == 2
+
+
+def test_build_chain_rpc_urls_without_alchemy_key():
+    urls = _build_chain_rpc_urls(
+        alchemy_api_key=None,
+        sapphire_chain_id=23295,
+        sapphire_rpc_url="https://testnet.sapphire.oasis.io",
+    )
+    assert urls == {23295: "https://testnet.sapphire.oasis.io"}
+
+
+def test_build_chain_rpc_urls_with_placeholder_alchemy_key():
+    urls = _build_chain_rpc_urls(
+        alchemy_api_key="your-alchemy-api-key-here",
+        sapphire_chain_id=23295,
+        sapphire_rpc_url="https://testnet.sapphire.oasis.io",
+    )
+    assert urls == {23295: "https://testnet.sapphire.oasis.io"}
+
+
+def test_build_chain_rpc_urls_with_valid_alchemy_key():
+    urls = _build_chain_rpc_urls(
+        alchemy_api_key="secret-alchemy-key",
+        sapphire_chain_id=23295,
+        sapphire_rpc_url="https://testnet.sapphire.oasis.io",
+    )
+    assert urls[23295] == "https://testnet.sapphire.oasis.io"
+    assert urls[84532] == "https://base-sepolia.g.alchemy.com/v2/secret-alchemy-key"
+    assert urls[11155111] == "https://eth-sepolia.g.alchemy.com/v2/secret-alchemy-key"

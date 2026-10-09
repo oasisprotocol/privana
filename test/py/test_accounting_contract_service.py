@@ -4,7 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from eth_abi import encode
@@ -13,17 +13,22 @@ from web3 import AsyncWeb3, Web3
 from web3.exceptions import ContractLogicError
 from web3.providers import AsyncHTTPProvider
 
+import src.services.accounting_contract as accounting_contract
+import src.services.rpc_identity as rpc_identity
 from src.abi.accounting import ACCOUNTING_ABI
 from src.clients.rofl import RoflSubmissionResult
 from src.models.accounting import HistoryKind
 from src.models.private_read import PrivateReadAuth
 from src.services import accounting_contract as accounting_module
 from src.services.accounting_contract import AccountingContractService
+from src.services.rpc_identity import initialize_verified_chain_rpc_urls
 
 
 def _make_service_with_reader(reader: MagicMock) -> AccountingContractService:
     service = AccountingContractService.__new__(AccountingContractService)
     service.contract_reader = reader
+    service.chain_id = 23295
+    service.sapphire_rpc_url = "https://testnet.sapphire.example.invalid"
     service._withdrawals_scanned = 0
     service._unresolved_withdrawals = {}
     service._withdrawals_lock = asyncio.Lock()
@@ -1166,3 +1171,143 @@ async def test_recover_signer_roundtrips_the_salted_domain() -> None:
     )
 
     assert recovered == account.address
+
+
+# ---------------------------------------------------------------------------
+# RPC identity gate and cached contract constants
+# ---------------------------------------------------------------------------
+
+VERIFIED_CHAIN = 84532
+VERIFIED_URL = "https://base-sepolia.example.invalid/key"
+MIS_FILED_CHAIN = 11155111
+MIS_FILED_URL = "https://mis-filed.example.invalid"
+SAPPHIRE_CHAIN = 23295
+SAPPHIRE_URL = "https://testnet.sapphire.example.invalid"
+
+
+def _pre_init_service(
+    chain_rpc_urls: dict[int, str], *, sapphire_rpc_url: str = ""
+) -> AccountingContractService:
+    """Construct the service the way `routes.py` does: at import, before the gate runs."""
+    settings = SimpleNamespace(
+        accounting_contract_address="0x" + "11" * 20,
+        sapphire_rpc_url=sapphire_rpc_url,
+        sapphire_rpc_headers={},
+        sapphire_chain_id=SAPPHIRE_CHAIN,
+        accounting_gas_limit=500_000,
+        chain_rpc_urls=dict(chain_rpc_urls),
+        min_withdrawal_gas_balance=0,
+    )
+    with patch("src.services.accounting_contract.RoflAppdClient"):
+        return AccountingContractService(settings)
+
+
+@pytest.mark.asyncio
+async def test_chain_web3_reads_chain_rpc_urls_live() -> None:
+    """No constructor snapshot: narrowing the mapping after construction is honoured."""
+    service = _pre_init_service({VERIFIED_CHAIN: VERIFIED_URL, MIS_FILED_CHAIN: MIS_FILED_URL})
+
+    service.settings.chain_rpc_urls.pop(MIS_FILED_CHAIN)
+
+    with pytest.raises(ValueError, match=f"No verified RPC endpoint for chain {MIS_FILED_CHAIN}"):
+        await service._get_chain_web3(MIS_FILED_CHAIN)
+
+
+@pytest.mark.asyncio
+async def test_destination_balance_refuses_chain_excluded_by_identity_gate(monkeypatch) -> None:
+    """Admission reads the destination balance. On a chain whose endpoint failed the boot
+    probe it must refuse, not read a balance on whichever chain that endpoint serves."""
+    service = _pre_init_service(
+        {
+            VERIFIED_CHAIN: VERIFIED_URL,
+            MIS_FILED_CHAIN: MIS_FILED_URL,
+            SAPPHIRE_CHAIN: SAPPHIRE_URL,
+        },
+        sapphire_rpc_url=SAPPHIRE_URL,
+    )
+
+    reader = MagicMock()
+    reader.functions.gasPrices.return_value.call = AsyncMock(return_value=10**9)
+    reader.functions.gasLimitNativeWithdraw.return_value.call = AsyncMock(return_value=50_000)
+    service.contract_reader = reader
+
+    async def probe(url: str, _timeout: float) -> int:
+        # Both chain endpoints answer for VERIFIED_CHAIN, so MIS_FILED_CHAIN is excluded.
+        return SAPPHIRE_CHAIN if url == SAPPHIRE_URL else VERIFIED_CHAIN
+
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", probe)
+    await initialize_verified_chain_rpc_urls(service.settings)
+
+    with pytest.raises(ValueError, match=f"No verified RPC endpoint for chain {MIS_FILED_CHAIN}"):
+        await service._check_destination_balance(MIS_FILED_CHAIN, is_native=True, amount=1)
+
+    # The chain that proved its ID resolves to the very client the probe used.
+    assert await service._get_chain_web3(VERIFIED_CHAIN) is rpc_identity.verified_web3(
+        VERIFIED_CHAIN, {}
+    )
+
+
+@pytest.mark.asyncio
+async def test_accounting_reads_pause_while_sapphire_fails_its_identity_check(monkeypatch) -> None:
+    """Signed queries take their chain ID from the endpoint and the contract can sit at the
+    same address on another Sapphire network, so a drifted endpoint would answer every
+    Accounting read from the wrong network. Reads must stop until it re-verifies."""
+    service = _pre_init_service(
+        {VERIFIED_CHAIN: VERIFIED_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL}, sapphire_rpc_url=SAPPHIRE_URL
+    )
+    reader = MagicMock()
+    reader.functions.gasPrices.return_value.call = AsyncMock(return_value=10**9)
+    service.contract_reader = reader
+    # Already built: the cached confidential reader must not bypass the gate.
+    service._confidential_contract_reader = MagicMock()
+
+    answers = {VERIFIED_URL: VERIFIED_CHAIN, SAPPHIRE_URL: SAPPHIRE_CHAIN}
+
+    async def probe(url: str, _timeout: float) -> int:
+        return answers[url]
+
+    monkeypatch.setattr(rpc_identity, "_probe_chain_id", probe)
+    await initialize_verified_chain_rpc_urls(service.settings)
+    assert await service.get_gas_price(VERIFIED_CHAIN) == 10**9
+
+    answers[SAPPHIRE_URL] = 23294  # re-pointed at mainnet after startup
+    await rpc_identity.reverify_chain_rpc_urls(service.settings)
+
+    with pytest.raises(ValueError, match="Accounting reads are paused"):
+        await service.get_gas_price(VERIFIED_CHAIN)
+    with pytest.raises(ValueError, match="Accounting reads are paused"):
+        await service._get_confidential_reader_contract()
+
+    answers[SAPPHIRE_URL] = SAPPHIRE_CHAIN
+    await rpc_identity.reverify_chain_rpc_urls(service.settings)
+
+    assert await service.get_gas_price(VERIFIED_CHAIN) == 10**9
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_gas_limit_is_served_from_cache_within_the_ttl() -> None:
+    service = _pre_init_service({})
+    reader = MagicMock()
+    reader.functions.gasLimitNativeWithdraw.return_value.call = AsyncMock(return_value=25_000)
+    service.contract_reader = reader
+
+    assert await service._get_withdrawal_gas_limit(is_native=True) == 25_000
+    assert await service._get_withdrawal_gas_limit(is_native=True) == 25_000
+
+    reader.functions.gasLimitNativeWithdraw.return_value.call.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_gas_limit_is_reread_once_the_cache_entry_expires(monkeypatch) -> None:
+    """The constants move with an implementation upgrade, so the limit must not stay
+    pinned for the process lifetime the way the plain dict pinned it."""
+    monkeypatch.setattr(accounting_contract, "_WITHDRAWAL_GAS_LIMIT_CACHE_TTL", 0)
+    service = _pre_init_service({})
+    reader = MagicMock()
+    reader.functions.gasLimitERC20Withdraw.return_value.call = AsyncMock(
+        side_effect=[100_000, 120_000]
+    )
+    service.contract_reader = reader
+
+    assert await service._get_withdrawal_gas_limit(is_native=False) == 100_000
+    assert await service._get_withdrawal_gas_limit(is_native=False) == 120_000

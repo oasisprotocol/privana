@@ -36,6 +36,8 @@ CHAIN_NAMES: Dict[int, str] = {
     998: "HyperEVM Testnet",
     999: "HyperEVM",
     8453: "Base",
+    23295: "Sapphire Testnet",
+    23293: "Sapphire Localnet",
     84532: "Base Sepolia",
     11155111: "Ethereum Sepolia",
 }
@@ -45,6 +47,8 @@ NATIVE_TOKEN_SYMBOLS: Dict[int, str] = {
     998: "HYPE",
     999: "HYPE",
     8453: "ETH",
+    23295: "ROSE",
+    23293: "ROSE",
     84532: "ETH",
     11155111: "ETH",
 }
@@ -54,6 +58,8 @@ NATIVE_TOKEN_NAMES: Dict[int, str] = {
     998: "Hyperliquid",
     999: "Hyperliquid",
     8453: "Ether",
+    23295: "Rose",
+    23293: "Rose",
     84532: "Ether",
     11155111: "Ether",
 }
@@ -63,6 +69,8 @@ NATIVE_TOKEN_DECIMALS: Dict[int, int] = {
     998: 18,
     999: 18,
     8453: 18,
+    23295: 18,
+    23293: 18,
     84532: 18,
     11155111: 18,
 }
@@ -116,15 +124,31 @@ def _get_bool(name: str) -> bool:
     raise ValueError(f"Environment variable {name} must be a boolean")
 
 
-def _build_chain_rpc_urls(alchemy_api_key: Optional[str]) -> Dict[int, str]:
+def _build_chain_rpc_urls(
+    alchemy_api_key: Optional[str],
+    sapphire_chain_id: int,
+    sapphire_rpc_url: Optional[str] = None,
+) -> Dict[int, str]:
+    """Map chain ID to RPC URL.
+
+    Sapphire is seeded from its caller-supplied endpoint before the Alchemy key is
+    checked, so a deployment without Alchemy still serves Sapphire.
+    """
+    rpc_urls: Dict[int, str] = {}
+
+    if sapphire_rpc_url is None:
+        sapphire_rpc_url = os.getenv("SAPPHIRE_RPC_URL")
+
+    if sapphire_chain_id and sapphire_rpc_url:
+        rpc_urls[sapphire_chain_id] = sapphire_rpc_url
+
     if not alchemy_api_key or alchemy_api_key == "your-alchemy-api-key-here":
         logging.warning(
-            "ALCHEMY_API_KEY not configured. Deposit verification will fail. "
+            "ALCHEMY_API_KEY not configured. Deposit verification will fail for Alchemy chains. "
             "Get an API key from https://dashboard.alchemy.com/"
         )
-        return {}
+        return rpc_urls
 
-    rpc_urls = {}
     for chain_id, subdomain in ALCHEMY_CHAIN_SUBDOMAINS.items():
         rpc_urls[chain_id] = f"https://{subdomain}.g.alchemy.com/v2/{alchemy_api_key}"
 
@@ -235,8 +259,14 @@ def load_settings(refresh: bool = False) -> Settings:
 
     global _settings
     if _settings is None or refresh:
+        sapphire_chain_id = _get_int("SAPPHIRE_CHAIN_ID")
+        sapphire_rpc_url = os.getenv("SAPPHIRE_RPC_URL")
         alchemy_api_key = os.getenv("ALCHEMY_API_KEY")
-        chain_rpc_urls = _build_chain_rpc_urls(alchemy_api_key)
+        chain_rpc_urls = _build_chain_rpc_urls(
+            alchemy_api_key,
+            sapphire_chain_id=sapphire_chain_id,
+            sapphire_rpc_url=sapphire_rpc_url,
+        )
         auth_token_storage_dir = os.getenv("AUTH_TOKEN_STORAGE_DIR", ".auth_tokens")
         onramp_provider = os.getenv("ONRAMP_PROVIDER")
 
