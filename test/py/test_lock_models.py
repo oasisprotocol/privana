@@ -8,6 +8,8 @@ from src.models.accounting import (
     ModifyLockRequest,
     TransferLockedFundsRequest,
     TransferLockedNonceResponse,
+    TransferToLockFundsRequest,
+    TransferToLockNonceResponse,
 )
 
 
@@ -121,4 +123,42 @@ def test_modify_lock_nonce_response():
 
 def test_transfer_locked_nonce_response():
     r = TransferLockedNonceResponse(service_address="0xabc", nonce=0)
+    assert r.nonce == 0
+
+
+def test_transfer_to_lock_requires_nonce():
+    with pytest.raises(ValidationError):
+        TransferToLockFundsRequest(
+            user_address="0x1234567890123456789012345678901234567890",
+            lock_id=1,
+            amount=1000000,
+            signature="0xabcd",
+            # nonce intentionally missing
+        )
+
+
+def test_transfer_to_lock_rejects_zero_amount():
+    with pytest.raises(ValidationError):
+        TransferToLockFundsRequest(
+            user_address="0x1234567890123456789012345678901234567890",
+            lock_id=1,
+            amount=0,
+            nonce=0,
+            signature="0xabcd",
+        )
+
+
+def test_transfer_to_lock_accepts_nonce():
+    req = TransferToLockFundsRequest(
+        user_address="0x1234567890123456789012345678901234567890",
+        lock_id=1,
+        amount=1000000,
+        nonce=3,
+        signature="0xabcd",
+    )
+    assert req.nonce == 3
+
+
+def test_transfer_to_lock_nonce_response():
+    r = TransferToLockNonceResponse(service_address="0xabc", nonce=0)
     assert r.nonce == 0
