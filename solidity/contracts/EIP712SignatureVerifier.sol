@@ -61,6 +61,9 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /// @notice Mapping to track withdrawFromLock nonces per service
     mapping(address service => uint256 nonce) public withdrawFromLockNonces;
 
+    /// @notice Mapping to track transferToLock nonces per service for replay protection
+    mapping(address service => uint256 nonce) public transferToLockNonces;
+
     /// @notice Thrown when signature recovery fails or signer doesn't match expected address
     error InvalidSignature();
     /// @notice Thrown when the provided nonce doesn't match the expected nonce
@@ -150,6 +153,12 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         keccak256(
             "TransferLocked(address userAddress,address toAddress,uint256 lockId,uint256 amount,uint256 nonce,address serviceAddress)"
         );
+
+    /// @notice EIP-712 type hash for service-side locked fund transfer operations
+    bytes32 private constant TRANSFER_TO_LOCK_TYPEHASH =
+    keccak256(
+        "TransferToLock(address userAddress,uint256 lockId,uint256 amount,uint256 nonce)"
+    );
 
     /// @notice EIP-712 type hash for modifying an existing lock (add funds and/or extend expiry)
     bytes32 private constant MODIFY_LOCK_TYPEHASH =
@@ -396,8 +405,49 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     }
 
     /**
+     * @notice Verifies a service's EIP-712 signature for transferring its own funds into a user's lock.
+     * @dev Internal-only verifier; consumes the recovered signer's nonce so callers
+     *      cannot bump another service's nonce. Callers must separately check that
+     *      the returned address matches the lock's actual service (lock.serviceId).
+     *
+     * @param userAddress The address of the user whose lock is being funded
+     * @param lockId The unique identifier of the lock to modify
+     * @param amount Additional funds to add to the lock from the service's balance
+     * @param nonce The nonce for replay protection (must match signer's current transferToLockNonces)
+     * @param signature The EIP-712 signature authorizing the modification
+     * @return serviceAddress The recovered signer authorizing the modification
+     */
+    function verifyTransferToLockSignature(
+        address userAddress,
+        uint256 lockId,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) internal returns (address serviceAddress) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                TRANSFER_TO_LOCK_TYPEHASH,
+                userAddress,
+                lockId,
+                amount,
+                nonce
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        serviceAddress = ECDSA.recover(digest, signature);
+        if (serviceAddress == address(0)) {
+            revert InvalidSignature();
+        }
+        if (nonce != transferToLockNonces[serviceAddress]) {
+            revert InvalidNonce();
+        }
+
+        transferToLockNonces[serviceAddress]++;
+    }
+
+    /**
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[44] private __gap;
+    uint256[43] private __gap;
 }
