@@ -37,7 +37,9 @@ enum HistoryKind {
     TransferBalanceOut,
     TransferBalanceIn,
     ModifyLock,
-    UnlockLock
+    UnlockLock,
+    TransferToLockOut,
+    TransferToLockIn
 }
 
 struct TokenInfo {

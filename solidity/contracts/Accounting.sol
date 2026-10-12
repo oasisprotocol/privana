@@ -736,6 +736,62 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
     }
 
     /**
+     * @notice Modifies an existing lock by increasing the locked amount from the service side.
+     * @dev Restricted to the lock's own service (lock.serviceId); the signature must
+     *      recover to that exact address.
+     * @param userAddress The address of the user who originally locked the funds
+     * @param lockId The unique identifier of the lock to modify
+     * @param amount Additional amount to add to the lock
+     * @param nonce The nonce for replay protection (must match service's current transferToLockNonces)
+     * @param signature The EIP-712 signature from the service increasing the locked amount
+     */
+    function transferToLock(
+        address userAddress,
+        uint256 lockId,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) public {
+        if (amount == 0) revert InvalidAmount();
+
+        UserInfo storage uInfo = userInfo[userAddress];
+        FundLock[] storage locks = uInfo.activeLocks;
+
+        uint256 lockIndex = _findLockIndex(locks, lockId);
+        FundLock storage lock = locks[lockIndex];
+
+        address serviceAddress = EIP712SignatureVerifier.verifyTransferToLockSignature(
+            userAddress,
+            lockId,
+            amount,
+            nonce,
+            signature
+        );
+        if (serviceAddress != lock.serviceId) revert InvalidSignature();
+
+        if (balances[lock.serviceId][lock.tokenId] < amount)
+            revert InsufficientBalance();
+
+        balances[lock.serviceId][lock.tokenId] -= amount;
+        lock.amount += amount;
+
+        _appendUserCounterpartyHistory(
+            lock.serviceId,
+            HistoryKind.TransferToLockOut,
+            lock.tokenId,
+            amount,
+            userAddress
+        );
+        _appendUserCounterpartyHistory(
+            userAddress,
+            HistoryKind.TransferToLockIn,
+            lock.tokenId,
+            amount,
+            lock.serviceId
+        );
+    }
+
+    /**
      * @notice Withdraws locked funds to an external on-chain address via scheduled withdrawal.
      * @dev Service-authorized counterpart to `transferFromLock`: instead of crediting an
      *      internal balance, this schedules a cross-chain withdrawal signed by ROFL.
