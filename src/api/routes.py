@@ -62,6 +62,8 @@ from src.models.accounting import (
     SiweLoginRequest,
     SiweLoginResponse,
     SiweNonceResponse,
+    SystemAddress,
+    SystemAddressesResponse,
     TokenInfoResponse,
     TokenListResponse,
     TotalLockedBalanceResponse,
@@ -1555,6 +1557,19 @@ async def siwe_login(
         address=auth_result.address,
         jwt_expires_in=jwt_service.access_token_expiry_seconds,
         jwt_refresh_expires_in=jwt_service.refresh_token_expiry_seconds,
+    )
+
+
+@router.get("/system-addresses", response_model=SystemAddressesResponse)
+async def get_system_addresses() -> SystemAddressesResponse:
+    """Get the addresses users must not send funds to."""
+
+    settings = load_settings()
+    return SystemAddressesResponse(
+        system_addresses=[
+            SystemAddress(address=address, name=name)
+            for address, name in settings.system_addresses.items()
+        ]
     )
 
 

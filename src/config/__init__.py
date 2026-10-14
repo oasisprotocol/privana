@@ -254,6 +254,46 @@ def _build_token_infos() -> List[Dict[str, Any]]:
     return token_infos
 
 
+BURN_ADDRESSES: Dict[str, str] = {
+    "0x0000000000000000000000000000000000000000": "Zero address",
+    "0x000000000000000000000000000000000000dEaD": "Burn address",
+}
+
+
+def _build_system_addresses(accounting_contract_address: Optional[str]) -> Dict[str, str]:
+    """Parse addresses users must not send funds to from the SYSTEM_ADDRESSES env var.
+
+    Expects a JSON object mapping address to display name, e.g.
+      SYSTEM_ADDRESSES='{"0x...": "Privana Earn pool"}'
+    Burn addresses and the accounting contract are always included. Returns
+    checksummed addresses.
+    """
+    system_addresses = dict(BURN_ADDRESSES)
+    if accounting_contract_address and Web3.is_address(accounting_contract_address):
+        system_addresses[Web3.to_checksum_address(accounting_contract_address)] = "Privana vault"
+
+    raw = os.getenv("SYSTEM_ADDRESSES")
+    if not raw:
+        return system_addresses
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid SYSTEM_ADDRESSES JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("SYSTEM_ADDRESSES must be a JSON object mapping address to name")
+
+    for address, name in parsed.items():
+        if not Web3.is_address(address):
+            raise ValueError(f"SYSTEM_ADDRESSES key {address!r} is not a valid address")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"SYSTEM_ADDRESSES name for {address} must be a non-empty string")
+        system_addresses[Web3.to_checksum_address(address)] = name.strip()
+
+    return system_addresses
+
+
 def load_settings(refresh: bool = False) -> Settings:
     """Load settings, optionally refreshing cached values."""
 
@@ -284,6 +324,7 @@ def load_settings(refresh: bool = False) -> Settings:
             chain_rpc_urls=chain_rpc_urls,
             gas_prices_wei=_build_gas_prices(),
             token_infos=_build_token_infos(),
+            system_addresses=_build_system_addresses(os.getenv("ACCOUNTING_CONTRACT_ADDRESS")),
             withdrawal_poll_interval=_get_int("WITHDRAWAL_POLL_INTERVAL"),
             withdrawal_resolution_timeout=_get_int("WITHDRAWAL_RESOLUTION_TIMEOUT"),
             min_withdrawal_gas_balance=_get_int("MIN_WITHDRAWAL_GAS_BALANCE"),

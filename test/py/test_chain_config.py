@@ -7,12 +7,14 @@ from dotenv import dotenv_values
 
 from src.config import (
     ALCHEMY_CHAIN_SUBDOMAINS,
+    BURN_ADDRESSES,
     CHAIN_NAMES,
     NATIVE_TOKEN_DECIMALS,
     NATIVE_TOKEN_NAMES,
     NATIVE_TOKEN_SYMBOLS,
     _build_chain_rpc_urls,
     _build_gas_prices,
+    _build_system_addresses,
     _build_token_infos,
 )
 from src.config.chain_config import (
@@ -215,6 +217,69 @@ def test_build_token_infos_rejects_invalid_token_address(monkeypatch):
 
     with pytest.raises(ValueError, match="entry 0 token_address is not a valid address"):
         _build_token_infos()
+
+
+ACCOUNTING_CONTRACT = "0x5f16C90a0F410AE4Cdb76d9964f5FFDDeE305876"
+EARN_POOL = "0xdF925131222EEA3D1e0677e03e1E0868C19af84A"
+
+
+def test_build_system_addresses_defaults_to_burn_and_accounting_contract(monkeypatch):
+    monkeypatch.delenv("SYSTEM_ADDRESSES", raising=False)
+
+    assert _build_system_addresses(ACCOUNTING_CONTRACT) == {
+        **BURN_ADDRESSES,
+        ACCOUNTING_CONTRACT: "Privana vault",
+    }
+    assert _build_system_addresses(None) == BURN_ADDRESSES
+
+
+def test_build_system_addresses_parses_and_checksums(monkeypatch):
+    monkeypatch.setenv("SYSTEM_ADDRESSES", '{"%s": " Privana Earn pool "}' % EARN_POOL.lower())
+
+    assert _build_system_addresses(ACCOUNTING_CONTRACT) == {
+        **BURN_ADDRESSES,
+        ACCOUNTING_CONTRACT: "Privana vault",
+        EARN_POOL: "Privana Earn pool",
+    }
+
+
+@pytest.mark.parametrize("env_file", [".env.mainnet", ".env.testnet"])
+def test_deployed_system_addresses_parse(monkeypatch, env_file):
+    """A bad entry would stop the service at startup, so check the deployed values."""
+    repo_root = Path(__file__).parents[2]
+    raw = dotenv_values(repo_root / env_file).get("SYSTEM_ADDRESSES")
+    assert raw, f"{env_file} has no SYSTEM_ADDRESSES"
+    monkeypatch.setenv("SYSTEM_ADDRESSES", raw)
+
+    assert len(_build_system_addresses(None)) == len(BURN_ADDRESSES) + len(json.loads(raw))
+
+
+def test_build_system_addresses_rejects_invalid_json(monkeypatch):
+    monkeypatch.setenv("SYSTEM_ADDRESSES", "{not valid json")
+
+    with pytest.raises(ValueError, match="Invalid SYSTEM_ADDRESSES JSON"):
+        _build_system_addresses(None)
+
+
+def test_build_system_addresses_rejects_non_object(monkeypatch):
+    monkeypatch.setenv("SYSTEM_ADDRESSES", '["%s"]' % EARN_POOL)
+
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        _build_system_addresses(None)
+
+
+def test_build_system_addresses_rejects_invalid_address(monkeypatch):
+    monkeypatch.setenv("SYSTEM_ADDRESSES", '{"not-an-address": "Pool"}')
+
+    with pytest.raises(ValueError, match="is not a valid address"):
+        _build_system_addresses(None)
+
+
+def test_build_system_addresses_rejects_empty_name(monkeypatch):
+    monkeypatch.setenv("SYSTEM_ADDRESSES", '{"%s": " "}' % EARN_POOL)
+
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        _build_system_addresses(None)
 
 
 def test_sapphire_testnet_runtime_metadata():

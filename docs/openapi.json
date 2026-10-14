@@ -1433,6 +1433,42 @@
         "title": "SiweNonceResponse",
         "type": "object"
       },
+      "SystemAddress": {
+        "description": "An address users must not send funds to, with its display name.",
+        "properties": {
+          "address": {
+            "title": "Address",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "name"
+        ],
+        "title": "SystemAddress",
+        "type": "object"
+      },
+      "SystemAddressesResponse": {
+        "description": "Service-held, contract and burn addresses users must not send funds to.",
+        "properties": {
+          "system_addresses": {
+            "items": {
+              "$ref": "#/components/schemas/SystemAddress"
+            },
+            "title": "System Addresses",
+            "type": "array"
+          }
+        },
+        "required": [
+          "system_addresses"
+        ],
+        "title": "SystemAddressesResponse",
+        "type": "object"
+      },
       "TokenBalance": {
         "description": "Balance info for a single token (used in batch balance responses).",
         "properties": {
@@ -4490,6 +4526,28 @@
           }
         ],
         "summary": "Update Onramp",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/system-addresses": {
+      "get": {
+        "description": "Get the addresses users must not send funds to.",
+        "operationId": "get_system_addresses_v1_accounting_system_addresses_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemAddressesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get System Addresses",
         "tags": [
           "Accounting"
         ]

@@ -263,6 +263,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 |---|---|
 | `GET /tokens` | List of every registered token. |
 | `GET /tokens/{token_id}` | One token's metadata: type, chain, address, symbol, decimals. |
+| `GET /system-addresses` | Addresses users must not send funds to, as `{system_addresses: [{address, name}]}`: `SYSTEM_ADDRESSES`, the accounting contract, and the zero and `0x…dEaD` burn addresses. |
 | `GET /withdraw/{index}` | Public withdrawal record. |
 | `GET /withdraw/pending/{user}` | Pending withdrawals (public — knowing pending state isn't sensitive). |
 | `GET /withdraw/nonce/{user}` | Current withdrawal nonce. |

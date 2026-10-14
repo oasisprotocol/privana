@@ -820,3 +820,22 @@ def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
     assert kwargs["chain_id"] == 23295
     assert kwargs["deposit_address"] == "0x" + "aa" * 20
     assert kwargs["beneficiary"] == BENEFICIARY
+
+
+def test_system_addresses_lists_configured_addresses(monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.system_addresses = {
+        SERVICE_ADDRESS: "Privana vault",
+        CHECKSUM_BENEFICIARY: "Privana Earn pool",
+    }
+    monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
+
+    response = _make_client().get("/v1/accounting/system-addresses")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "system_addresses": [
+            {"address": SERVICE_ADDRESS, "name": "Privana vault"},
+            {"address": CHECKSUM_BENEFICIARY, "name": "Privana Earn pool"},
+        ]
+    }

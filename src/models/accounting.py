@@ -529,6 +529,19 @@ class TransferNonceResponse(BaseModel):
     nonce: int
 
 
+class SystemAddress(BaseModel):
+    """An address users must not send funds to, with its display name."""
+
+    address: str
+    name: str
+
+
+class SystemAddressesResponse(BaseModel):
+    """Service-held, contract and burn addresses users must not send funds to."""
+
+    system_addresses: list[SystemAddress]
+
+
 class LockNonceResponse(BaseModel):
     """Response containing the current createLock nonce for a user."""
 
