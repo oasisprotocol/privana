@@ -97,13 +97,11 @@ def authenticate_siwe_message(siwe_message_text: str, signature: str) -> Authent
         raise SiweAuthError(f"Destination chain {destination_chain_id} not supported")
 
     try:
-        provider = Web3.HTTPProvider(settings.sapphire_rpc_url)
         # Only EOA signatures are supported for now.
         siwe_message.verify(
             signature,
             domain=matched_config.domain,
             nonce=nonce,
-            provider=provider,
         )
     except InvalidSignature as exc:
         raise SiweAuthError("Invalid signature") from exc
