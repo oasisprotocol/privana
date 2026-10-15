@@ -42,6 +42,7 @@ from src.models.accounting import (
     DepositAddressResponse,
     DepositCheckRequest,
     DepositCheckResponse,
+    ErrorResponse,
     ExpiredLocksResponse,
     HistoryResponse,
     JwtSiweTokenResponse,
@@ -85,6 +86,7 @@ from src.models.accounting import (
 from src.models.private_read import PrivateReadAuth
 from src.services import onramp as onramp_service
 from src.services.accounting_contract import (
+    InternalTransferError,
     SubmissionResult,
     get_accounting_contract_service,
 )
@@ -230,6 +232,17 @@ def _require_private_read_auth(
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
     return PrivateReadAuth(bytes(raw), auth_token.user_addr)
+
+
+def _require_bearer_private_read_auth(
+    current_user: str = Depends(get_current_user),
+) -> PrivateReadAuth:
+    """Bearer-only auth for writes that also read privately for the user.
+
+    Unlike ``_require_private_read_auth``, it never accepts a SIWE token header,
+    whose expiry is only checked by the contract.
+    """
+    return PrivateReadAuth(_mint_private_read_token(current_user), current_user)
 
 
 def _checksum_private_read_user(user_address: str) -> str:
@@ -1136,6 +1149,40 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer funds")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+_INTERNAL_TRANSFER_ERROR_STATUS = {"signer_mismatch": 403, "invalid_nonce": 409}
+
+
+def _api_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+@router.post(
+    "/funds/internal-transfer",
+    response_model=TransactionSubmissionResponse,
+    responses={status: {"model": ErrorResponse} for status in (400, 403, 409, 500)},
+)
+async def internal_transfer(
+    payload: TransferFundsRequest,
+    auth: PrivateReadAuth = Depends(_require_bearer_private_read_auth),
+) -> TransactionSubmissionResponse:
+    """Send funds to another user's balance, refused before relaying when a check fails."""
+
+    try:
+        submission = await _service.internal_transfer(payload.model_dump(), auth)
+        return _wrap_submission(submission)
+    except InternalTransferError as exc:
+        status_code = _INTERNAL_TRANSFER_ERROR_STATUS.get(exc.code, 400)
+        raise _api_error(status_code, exc.code, exc.message) from exc
+    except ValueError as exc:
+        raise _api_error(400, "invalid_request", str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Internal transfer transaction reverted: %s", exc)
+        raise _api_error(422, "transaction_reverted", str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to submit internal transfer")
+        raise _api_error(500, "internal_error", "Failed to submit transaction") from exc
 
 
 @router.get("/funds/transfer/nonce/{user_address}", response_model=TransferNonceResponse)

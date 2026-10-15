@@ -153,6 +153,27 @@ class TokenContext:
     is_native: bool
 
 
+@dataclass
+class SignedTransfer:
+    """A parsed ``Transfer`` request and the address that signed it."""
+
+    signer: ChecksumAddress
+    to_address: ChecksumAddress
+    token_id: HexBytes
+    amount: int
+    nonce: int
+    signature: HexBytes
+
+
+class InternalTransferError(ValueError):
+    """An internal transfer refused before relaying, with a code clients can map."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 class AccountingContractService:
     """Encapsulates Accounting contract interactions."""
 
@@ -894,12 +915,51 @@ class AccountingContractService:
         return await self._submit(fn._encode_transaction_data())
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
+        transfer = await self._recover_transfer(payload)
+        await self._validate_user_nonce(
+            transfer.signer, transfer.nonce, "transferNonces", "Transfer"
+        )
+        return await self._submit_transfer(transfer)
+
+    async def internal_transfer(self, payload: Dict, auth: PrivateReadAuth) -> SubmissionResult:
+        user = self._require_address(auth.user_address, "user_address")
+        transfer = await self._recover_transfer(payload)
+        if transfer.signer != user:
+            raise InternalTransferError(
+                "signer_mismatch", "Transfer must be signed by the signed-in account."
+            )
+        system_name = self.settings.system_addresses.get(transfer.to_address)
+        if system_name is not None:
+            raise InternalTransferError(
+                "recipient_not_allowed",
+                f"Invalid address. This address belongs to {system_name}.",
+            )
+        if transfer.to_address == user:
+            raise InternalTransferError(
+                "recipient_is_self", "Cannot send funds to your own address."
+            )
+
+        expected_nonce = await self._get_reader_contract().functions.transferNonces(user).call()
+        if transfer.nonce != expected_nonce:
+            raise InternalTransferError(
+                "invalid_nonce",
+                f"Transfer nonce mismatch: got {transfer.nonce}, expected {expected_nonce}. "
+                "Another operation may have used it.",
+            )
+        balance = await self._fetch_balance(transfer.token_id, auth.token)
+        if balance < transfer.amount:
+            raise InternalTransferError(
+                "insufficient_balance", "Amount exceeds the available balance."
+            )
+        return await self._submit_transfer(transfer)
+
+    async def _recover_transfer(self, payload: Dict) -> SignedTransfer:
         to_addr = self._require_address(payload["to_address"], "to_address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-        user = await self._recover_eip712_signer(
+        signer = await self._recover_eip712_signer(
             "Transfer",
             [
                 {"name": "toAddress", "type": "address"},
@@ -915,14 +975,15 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "transferNonces", "Transfer")
+        return SignedTransfer(signer, to_addr, token, amount, nonce, signature)
 
+    async def _submit_transfer(self, transfer: SignedTransfer) -> SubmissionResult:
         fn = self.contract.functions.transferBalance(
-            to_addr,
-            token,
-            amount,
-            nonce,
-            signature,
+            transfer.to_address,
+            transfer.token_id,
+            transfer.amount,
+            transfer.nonce,
+            transfer.signature,
         )
         return await self._submit(fn._encode_transaction_data())
 

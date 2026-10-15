@@ -309,6 +309,19 @@ class TransactionSubmissionResponse(BaseModel):
     detail: Optional[str] = None
 
 
+class ErrorDetail(BaseModel):
+    """A stable machine-readable ``code`` plus a human-readable ``message``."""
+
+    code: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    """Error body of endpoints that return structured errors."""
+
+    detail: ErrorDetail
+
+
 class WithdrawalSubmissionResponse(TransactionSubmissionResponse):
     """Withdrawal submission with the created withdrawal's index when known.
 
