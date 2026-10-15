@@ -3,6 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from siwe import SiweMessage
 from web3 import Web3
 
 from src.auth import siwe_service
@@ -39,15 +42,12 @@ class FakeSiweMessage:
         self.domain = domain
         self.verify_calls: list[dict[str, object]] = []
 
-    def verify(
-        self, signature: str, domain: str, nonce: str, provider: object | None = None
-    ) -> None:
+    def verify(self, signature: str, domain: str, nonce: str) -> None:
         self.verify_calls.append(
             {
                 "signature": signature,
                 "domain": domain,
                 "nonce": nonce,
-                "provider": provider,
             }
         )
 
@@ -59,7 +59,6 @@ def auth_settings():
         auth_token_validity_seconds=600,
         environment="production",
         sapphire_chain_id=23295,
-        sapphire_rpc_url="https://testnet.sapphire.oasis.io",
     )
 
 
@@ -97,9 +96,6 @@ def test_authenticate_siwe_message_success(monkeypatch, auth_settings):
     assert verify_call["signature"] == "0x1234"
     assert verify_call["domain"] == TEST_DOMAIN
     assert verify_call["nonce"] == fake_message.nonce
-    # The SIWE message is always verified against the Sapphire RPC.
-    assert isinstance(verify_call["provider"], Web3.HTTPProvider)
-    assert verify_call["provider"].endpoint_uri == auth_settings.sapphire_rpc_url
     auth_token_service.create_and_encrypt.assert_called_once_with(
         domain=TEST_DOMAIN,
         user_addr=Web3.to_checksum_address(TEST_ADDRESS),
@@ -109,6 +105,64 @@ def test_authenticate_siwe_message_success(monkeypatch, auth_settings):
     )
     token_store.is_nonce_valid.assert_called_once_with(fake_message.nonce)
     token_store.consume_nonce.assert_called_once_with(fake_message.nonce)
+
+
+def _signed_siwe(signer, address: str) -> tuple[str, str]:
+    """Return a SIWE message claiming ``address`` and the signature of ``signer`` over it."""
+    now = datetime.now(timezone.utc)
+    text = SiweMessage(
+        domain=TEST_DOMAIN,
+        address=address,
+        uri=f"https://{TEST_DOMAIN}",
+        version="1",
+        chain_id=1,
+        issued_at=now.isoformat().replace("+00:00", "Z"),
+        expiration_time=(now + timedelta(seconds=600)).isoformat().replace("+00:00", "Z"),
+        nonce="a" * 16,
+        statement=VALID_SIWE_TEXT,
+    ).prepare_message()
+    signature = signer.sign_message(encode_defunct(text=text)).signature
+    return text, Web3.to_hex(signature)
+
+
+def _stub_auth_backends(monkeypatch, settings) -> None:
+    token_store = MagicMock()
+    token_store.is_nonce_valid.return_value = True
+    token_store.consume_nonce.return_value = True
+    auth_token_service = MagicMock()
+    auth_token_service.create_and_encrypt.return_value = b"\xaa\xbb"
+    monkeypatch.setattr(siwe_service, "load_settings", lambda: settings)
+    monkeypatch.setattr(siwe_service, "get_token_store", lambda: token_store)
+    monkeypatch.setattr(siwe_service, "get_auth_token_service", lambda: auth_token_service)
+
+
+def test_authenticate_siwe_message_accepts_eoa_signature(monkeypatch, auth_settings):
+    _stub_auth_backends(monkeypatch, auth_settings)
+    signer = Account.create()
+    text, signature = _signed_siwe(signer, signer.address)
+
+    result = siwe_service.authenticate_siwe_message(text, signature)
+
+    assert result.address == signer.address
+
+
+def test_authenticate_siwe_message_rejects_wrong_signer_without_rpc(monkeypatch, auth_settings):
+    """A bad signature fails locally, so an anonymous login never waits on the RPC."""
+    _stub_auth_backends(monkeypatch, auth_settings)
+    rpc_methods: list[str] = []
+
+    def record_rpc(self, method, params):
+        rpc_methods.append(method)
+        raise ConnectionError("unexpected RPC call")
+
+    monkeypatch.setattr(Web3.HTTPProvider, "make_request", record_rpc)
+    text, signature = _signed_siwe(Account.create(), Account.create().address)
+
+    with pytest.raises(siwe_service.SiweAuthError, match="^Invalid signature$") as exc_info:
+        siwe_service.authenticate_siwe_message(text, signature)
+
+    assert exc_info.value.status_code == 400
+    assert rpc_methods == []
 
 
 def test_authenticate_siwe_message_rejects_invalid_nonce(monkeypatch, auth_settings):
@@ -304,7 +358,6 @@ def multi_domain_auth_settings():
         auth_token_validity_seconds=600,
         environment="production",
         sapphire_chain_id=23295,
-        sapphire_rpc_url="https://testnet.sapphire.oasis.io",
     )
 
 
@@ -341,8 +394,6 @@ def test_authenticate_siwe_message_matches_secondary_domain(
     assert verify_call["signature"] == "0x1234"
     assert verify_call["domain"] == SECONDARY_DOMAIN
     assert verify_call["nonce"] == fake_message.nonce
-    assert isinstance(verify_call["provider"], Web3.HTTPProvider)
-    assert verify_call["provider"].endpoint_uri == multi_domain_auth_settings.sapphire_rpc_url
     auth_token_service.create_and_encrypt.assert_called_once_with(
         domain=SECONDARY_DOMAIN,
         user_addr=Web3.to_checksum_address(TEST_ADDRESS),
