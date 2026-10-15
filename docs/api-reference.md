@@ -80,6 +80,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /deposits/status/{id}` | required | same |
 | `GET /deposits/pending` | required | same |
 | `POST /funds/withdraw-from-lock` | required | same |
+| `POST /funds/internal-transfer` | required | `Authorization: Bearer …` only |
 | `GET /balances/{token_id}` | required | same |
 | `POST /balances/batch` | required | same |
 | `GET /funds/locked` | required | same |
@@ -237,10 +238,25 @@ Direct user-to-user balance transfer inside the accounting module — no on-chai
 
 ```
 GET  /funds/transfer/nonce/{user}     → current Transfer nonce
+POST /funds/internal-transfer         → {to_address, token_id, amount, nonce, signature}  (Bearer)
 POST /funds/transfer                  → {to_address, token_id, amount, nonce, signature}
 ```
 
-The signature is an EIP-712 `Transfer` from the source user.
+The signature is an EIP-712 `Transfer` from the source user. Both endpoints relay the same `transferBalance` call, and the relayer pays the gas.
+
+Clients sending on a user's behalf use `POST /funds/internal-transfer`. It requires `Authorization: Bearer …` and refuses a request before relaying, so a refusal costs no gas. Errors carry a stable `code`: `{"detail": {"code": "…", "message": "…"}}`.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | A malformed field or signature. |
+| 403 | `signer_mismatch` | The signature is not from the signed-in user. |
+| 400 | `recipient_not_allowed` | `to_address` is a system address (`GET /system-addresses`); the message names it. |
+| 400 | `recipient_is_self` | `to_address` is the sender. |
+| 409 | `invalid_nonce` | `nonce` is not the current `Transfer` nonce. Swaps and Earn deposits use the same nonce. |
+| 400 | `insufficient_balance` | `amount` exceeds the sender's available balance of `token_id`. |
+| 422 | `transaction_reverted` | The transaction reverted, e.g. a concurrent operation used the nonce first. |
+
+`POST /funds/transfer` runs none of these checks. Services use it for the LiFi swap legs, which move funds to and from the swap liquidity provider.
 
 ## Private Read Endpoints
 

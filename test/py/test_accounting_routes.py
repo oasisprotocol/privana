@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from web3 import Web3
@@ -9,13 +10,14 @@ from web3.exceptions import ContractCustomError
 
 import src.api.routes as routes
 import src.auth.dependencies as auth_dependencies
+from src.clients.rofl import TransactionRevertedError
 from src.config.chain_config import (
     MIN_DEPOSIT_ERC20_WEI,
     MIN_DEPOSIT_NATIVE_WEI,
     get_finality_depth,
 )
 from src.models.private_read import PrivateReadAuth
-from src.services.accounting_contract import SubmissionResult
+from src.services.accounting_contract import InternalTransferError, SubmissionResult
 from src.services.deposit_processor import DepositProcessor
 
 BENEFICIARY = "0x" + "bb" * 20
@@ -839,3 +841,113 @@ def test_system_addresses_lists_configured_addresses(monkeypatch) -> None:
             {"address": CHECKSUM_BENEFICIARY, "name": "Privana Earn pool"},
         ]
     }
+
+
+INTERNAL_TRANSFER_BODY = {
+    "to_address": "0x9876543210987654321098765432109876543210",
+    "token_id": TOKEN_ID_HEX,
+    "amount": "1000",
+    "nonce": 3,
+    "signature": "abcd",
+}
+
+
+def _make_bearer_private_read_client() -> TestClient:
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[routes._require_bearer_private_read_auth] = lambda: PrivateReadAuth(
+        token=b"\x12\x34", user_address=BENEFICIARY
+    )
+    return TestClient(app)
+
+
+def test_internal_transfer_route_mints_private_read_token_from_bearer_jwt(
+    monkeypatch, reset_auth_singletons, disable_rofl_keys
+) -> None:
+    class _JwtService:
+        def get_access_token_payload(self, token: str) -> dict:
+            assert token == "jwt-token"
+            return {"sub": BENEFICIARY}
+
+    mock_service = MagicMock()
+    mock_service.internal_transfer = AsyncMock(
+        return_value=SubmissionResult(submission_id="sub-1", status="submitted")
+    )
+    minted_token = b"\xab\xcd"
+    mint_private_read_token = MagicMock(return_value=minted_token)
+
+    monkeypatch.setattr(auth_dependencies, "get_jwt_service", lambda: _JwtService())
+    monkeypatch.setattr(routes, "_mint_private_read_token", mint_private_read_token)
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    response = _make_client().post(
+        "/v1/accounting/funds/internal-transfer",
+        json=INTERNAL_TRANSFER_BODY,
+        headers={"Authorization": "Bearer jwt-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["submission_id"] == "sub-1"
+    mint_private_read_token.assert_called_once_with(BENEFICIARY)
+    payload, auth = mock_service.internal_transfer.call_args[0]
+    assert payload["amount"] == 1000
+    assert payload["signature"] == "0xabcd"
+    assert auth == PrivateReadAuth(token=minted_token, user_address=BENEFICIARY)
+
+
+def test_internal_transfer_route_rejects_siwe_token_header(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.internal_transfer = AsyncMock()
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    response = _make_client().post(
+        "/v1/accounting/funds/internal-transfer",
+        json=INTERNAL_TRANSFER_BODY,
+        headers={"X-SIWE-Token": "0x1234"},
+    )
+
+    assert response.status_code == 401
+    mock_service.internal_transfer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code", "code"),
+    [
+        (
+            InternalTransferError("signer_mismatch", "Signed by someone else."),
+            403,
+            "signer_mismatch",
+        ),
+        (
+            InternalTransferError("recipient_not_allowed", "This address belongs to X."),
+            400,
+            "recipient_not_allowed",
+        ),
+        (InternalTransferError("recipient_is_self", "Own address."), 400, "recipient_is_self"),
+        (InternalTransferError("invalid_nonce", "Nonce mismatch."), 409, "invalid_nonce"),
+        (
+            InternalTransferError("insufficient_balance", "Too much."),
+            400,
+            "insufficient_balance",
+        ),
+        (ValueError("Invalid to_address provided"), 400, "invalid_request"),
+        (
+            TransactionRevertedError("Transaction reverted: InvalidNonce"),
+            422,
+            "transaction_reverted",
+        ),
+    ],
+)
+def test_internal_transfer_route_returns_structured_errors(
+    monkeypatch, error: Exception, status_code: int, code: str
+) -> None:
+    mock_service = MagicMock()
+    mock_service.internal_transfer = AsyncMock(side_effect=error)
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    response = _make_bearer_private_read_client().post(
+        "/v1/accounting/funds/internal-transfer", json=INTERNAL_TRANSFER_BODY
+    )
+
+    assert response.status_code == status_code
+    assert response.json() == {"detail": {"code": code, "message": str(error)}}

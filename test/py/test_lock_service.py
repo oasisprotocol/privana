@@ -5,12 +5,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
+from web3 import Web3
 
 from src.clients.rofl import RoflSubmissionResult
-from src.services.accounting_contract import AccountingContractService, TokenContext
+from src.models.private_read import PrivateReadAuth
+from src.services.accounting_contract import (
+    AccountingContractService,
+    InternalTransferError,
+    TokenContext,
+)
 
 USER = "0xaBcDef1234567890AbCDeF1234567890aBcDeF12"
 SERVICE = "0x1111111111111111111111111111111111111111"
+CHECKSUM_USER = Web3.to_checksum_address(USER)
+OTHER_USER = "0x9876543210987654321098765432109876543210"
+EARN_POOL = "0x1515151515151515151515151515151515151515"
 TEST_EIP712_DOMAIN = {
     "name": "AccountingModule",
     "version": "1",
@@ -200,6 +209,103 @@ class TestTransferFundsSubmission:
         _setup_user_nonce(service, "transferNonces", expected_nonce=0)
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.transfer_funds(self._make_payload(nonce=0))
+        service._submit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_relays_to_system_address(self, service):
+        # LiFi swap legs send to the LP, so this endpoint must skip the internal-transfer checks.
+        service.settings.system_addresses = {USER: "Privana swap liquidity"}
+        service._recover_eip712_signer = AsyncMock(return_value=USER)
+        _setup_user_nonce(service, "transferNonces", expected_nonce=0)
+        service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
+        await service.transfer_funds(self._make_payload(nonce=0))
+        service._submit.assert_called_once()
+
+
+class TestInternalTransfer:
+    AUTH = PrivateReadAuth(token=b"\x12\x34", user_address=CHECKSUM_USER)
+
+    @staticmethod
+    def _make_payload(to_address=OTHER_USER, amount=1000, nonce=0):
+        return {
+            "to_address": to_address,
+            "token_id": "0x" + "aa" * 32,
+            "amount": amount,
+            "nonce": nonce,
+            "signature": "0x" + "ab" * 65,
+        }
+
+    @staticmethod
+    def _prepare(service, signer=CHECKSUM_USER, expected_nonce=0, balance=1000):
+        service.settings.system_addresses = {EARN_POOL: "Privana Earn pool"}
+        service._recover_eip712_signer = AsyncMock(return_value=signer)
+        _setup_user_nonce(service, "transferNonces", expected_nonce=expected_nonce)
+        service._fetch_balance = AsyncMock(return_value=balance)
+        service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
+
+    @pytest.mark.asyncio
+    async def test_submits_when_checks_pass(self, service):
+        self._prepare(service)
+        await service.internal_transfer(self._make_payload(), self.AUTH)
+        service._fetch_balance.assert_awaited_once_with(bytes.fromhex("aa" * 32), b"\x12\x34")
+        service._submit.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("code", "payload", "setup"),
+        [
+            ("signer_mismatch", {}, {"signer": OTHER_USER}),
+            ("recipient_not_allowed", {"to_address": EARN_POOL}, {}),
+            ("recipient_is_self", {"to_address": USER}, {}),
+            ("invalid_nonce", {}, {"expected_nonce": 2}),
+            ("insufficient_balance", {"amount": 1001}, {}),
+        ],
+    )
+    async def test_refuses_without_relaying(self, service, code, payload, setup):
+        self._prepare(service, **setup)
+        with pytest.raises(InternalTransferError) as exc_info:
+            await service.internal_transfer(self._make_payload(**payload), self.AUTH)
+        assert exc_info.value.code == code
+        service._submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_names_the_system_address(self, service):
+        self._prepare(service)
+        with pytest.raises(InternalTransferError, match="belongs to Privana Earn pool"):
+            await service.internal_transfer(self._make_payload(to_address=EARN_POOL), self.AUTH)
+
+    @pytest.mark.asyncio
+    async def test_recovers_the_signer_from_a_real_signature(self, service):
+        account = Account.from_key("0x" + "11" * 32)
+        service._eip712_domain = TEST_EIP712_DOMAIN
+        payload = self._make_payload()
+        signable = encode_typed_data(
+            domain_data=TEST_EIP712_DOMAIN,
+            message_types={
+                "Transfer": [
+                    {"name": "toAddress", "type": "address"},
+                    {"name": "tokenId", "type": "bytes32"},
+                    {"name": "amount", "type": "uint256"},
+                    {"name": "nonce", "type": "uint256"},
+                ]
+            },
+            message_data={
+                "toAddress": payload["to_address"],
+                "tokenId": payload["token_id"],
+                "amount": payload["amount"],
+                "nonce": payload["nonce"],
+            },
+        )
+        payload["signature"] = "0x" + Account.sign_message(signable, account.key).signature.hex()
+        _setup_user_nonce(service, "transferNonces", expected_nonce=0)
+        service.settings.system_addresses = {}
+        service._fetch_balance = AsyncMock(return_value=1000)
+        service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
+
+        await service.internal_transfer(
+            payload, PrivateReadAuth(token=b"\x12\x34", user_address=account.address)
+        )
+
         service._submit.assert_called_once()
 
 
