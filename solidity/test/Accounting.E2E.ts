@@ -911,6 +911,38 @@ describe('WithdrawFromLock', function () {
     ).to.be.reverted; // WithCustomError(accounting, "AddressMismatch"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
 
+  it("should reject transferFromLock with zero destination", async function () {
+    const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
+    const nonce = await accounting.transferLockedNonces(userWallet2.address);
+
+    const signature = await userWallet2.signTypedData(
+      domain,
+      { TransferLocked: types.TransferLocked },
+      {
+        userAddress: userWallet1.address,
+        toAddress: ethers.ZeroAddress,
+        lockId,
+        amount: parseUsdt("1"),
+        nonce,
+        serviceAddress: userWallet2.address,
+      }
+    );
+
+    await expect(
+      accounting.transferFromLock(
+        userWallet1.address,
+        ethers.ZeroAddress,
+        lockId,
+        parseUsdt("1"),
+        nonce,
+        signature
+      )
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidSignature"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+
+    const locksAfter = await accounting.connect(userWallet1).getUserLocks(mockAuthToken(userWallet1.address));
+    expect(locksAfter[0][3]).to.equal(parseUsdt("2"));
+  });
+
   it("should reject withdrawFromLock signed by non-service", async function () {
     const lockId = await createLockForService(parseUsdt("2"), userWallet2.address);
     const nonce = await accounting.withdrawFromLockNonces(userWallet2.address);

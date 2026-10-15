@@ -895,6 +895,8 @@ class AccountingContractService:
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
         to_addr = self._require_address(payload["to_address"], "to_address")
+        if str(to_addr).lower() == ADDRESS_ZERO:
+            raise ValueError("to_address must not be the zero address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
@@ -930,6 +932,8 @@ class AccountingContractService:
         user = self._require_address(payload["user_address"], "user_address")
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
         to_addr = self._require_address(payload["to_address"], "to_address")
+        if str(to_addr).lower() == ADDRESS_ZERO:
+            raise ValueError("to_address must not be the zero address")
         amount = self._require_positive(payload["amount"], "amount")
         service = self._require_address(payload["service_address"], "service_address")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
