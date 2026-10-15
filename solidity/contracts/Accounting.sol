@@ -690,6 +690,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         bytes calldata signature
     ) public {
         if (amount == 0) revert InvalidAmount();
+        if (toAddress == address(0)) revert AddressMismatch();
 
         UserInfo storage uInfo = userInfo[userAddress];
         FundLock[] storage locks = uInfo.activeLocks;
@@ -719,7 +720,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
             amount,
             toAddress
         );
-        if (toAddress != address(0) && toAddress != userAddress) {
+        if (toAddress != userAddress) {
             _appendUserCounterpartyHistory(
                 toAddress,
                 HistoryKind.TransferFromLockIn,
@@ -886,6 +887,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
         bytes calldata signature
     ) public {
         if (amount == 0) revert InvalidAmount();
+        if (toAddress == address(0)) revert AddressMismatch();
 
         address userAddress = EIP712SignatureVerifier.verifyTransferSignature(
             toAddress,
@@ -908,7 +910,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
             amount,
             toAddress
         );
-        if (toAddress != address(0) && toAddress != userAddress) {
+        if (toAddress != userAddress) {
             _appendUserCounterpartyHistory(
                 toAddress,
                 HistoryKind.TransferBalanceIn,

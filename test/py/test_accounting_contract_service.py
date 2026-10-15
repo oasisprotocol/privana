@@ -716,6 +716,40 @@ async def test_get_batch_balances_reads_tokens_concurrently_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transfer_funds_rejects_zero_to_address() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+
+    with pytest.raises(ValueError, match="to_address must not be the zero address"):
+        await service.transfer_funds(
+            {
+                "to_address": "0x0000000000000000000000000000000000000000",
+                "token_id": "0x" + "aa" * 32,
+                "amount": 10,
+                "nonce": 0,
+                "signature": "0x1234",
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_transfer_locked_funds_rejects_zero_to_address() -> None:
+    service = AccountingContractService.__new__(AccountingContractService)
+
+    with pytest.raises(ValueError, match="to_address must not be the zero address"):
+        await service.transfer_locked_funds(
+            {
+                "user_address": USER_A,
+                "lock_id": 1,
+                "to_address": "0x0000000000000000000000000000000000000000",
+                "amount": 10,
+                "service_address": USER_A,
+                "nonce": 0,
+                "signature": "0x1234",
+            }
+        )
+
+
+@pytest.mark.asyncio
 async def test_withdraw_from_lock_rejects_zero_to_address() -> None:
     service = AccountingContractService.__new__(AccountingContractService)
 
