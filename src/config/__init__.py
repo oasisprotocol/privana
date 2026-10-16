@@ -114,6 +114,19 @@ def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
     return tuple(stripped for piece in value.split(",") if (stripped := piece.strip()))
 
 
+def _build_transfer_rate_limit_exempt() -> Tuple[str, ...]:
+    """Parse callers exempt from the ``/funds/transfer`` rate limit.
+
+    Expects comma-separated addresses in TRANSFER_RATE_LIMIT_EXEMPT: the services
+    that relay transfers for many users. Returns checksummed addresses.
+    """
+    addresses = _parse_csv_tuple(os.getenv("TRANSFER_RATE_LIMIT_EXEMPT"))
+    for address in addresses:
+        if not Web3.is_address(address):
+            raise ValueError(f"TRANSFER_RATE_LIMIT_EXEMPT entry {address!r} is not a valid address")
+    return tuple(Web3.to_checksum_address(address) for address in addresses)
+
+
 def _get_bool(name: str) -> bool:
     value = os.getenv(name)
     normalized = value.strip().lower()
@@ -284,6 +297,7 @@ def load_settings(refresh: bool = False) -> Settings:
             chain_rpc_urls=chain_rpc_urls,
             gas_prices_wei=_build_gas_prices(),
             token_infos=_build_token_infos(),
+            transfer_rate_limit_exempt=_build_transfer_rate_limit_exempt(),
             withdrawal_poll_interval=_get_int("WITHDRAWAL_POLL_INTERVAL"),
             withdrawal_resolution_timeout=_get_int("WITHDRAWAL_RESOLUTION_TIMEOUT"),
             min_withdrawal_gas_balance=_get_int("MIN_WITHDRAWAL_GAS_BALANCE"),

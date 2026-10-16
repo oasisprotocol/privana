@@ -14,6 +14,7 @@ from src.config import (
     _build_chain_rpc_urls,
     _build_gas_prices,
     _build_token_infos,
+    _build_transfer_rate_limit_exempt,
 )
 from src.config.chain_config import (
     CHAIN_CONFIGS,
@@ -279,3 +280,37 @@ def test_build_chain_rpc_urls_with_valid_alchemy_key():
     assert urls[23295] == "https://testnet.sapphire.oasis.io"
     assert urls[84532] == "https://base-sepolia.g.alchemy.com/v2/secret-alchemy-key"
     assert urls[11155111] == "https://eth-sepolia.g.alchemy.com/v2/secret-alchemy-key"
+
+
+EXEMPT_LP = "0xd1CBc91AB86c43F975a18126Cc6ad77cf1f22B8a"
+EXEMPT_HONOROLL = "0xDCFF0891F0Aea40b0ae4A7Ca3e00AD1012Fc2d16"
+
+
+def test_build_transfer_rate_limit_exempt_parses_and_checksums(monkeypatch):
+    monkeypatch.setenv("TRANSFER_RATE_LIMIT_EXEMPT", f" {EXEMPT_LP.lower()} , {EXEMPT_HONOROLL} ,")
+
+    assert _build_transfer_rate_limit_exempt() == (EXEMPT_LP, EXEMPT_HONOROLL)
+
+
+def test_build_transfer_rate_limit_exempt_defaults_to_empty(monkeypatch):
+    monkeypatch.delenv("TRANSFER_RATE_LIMIT_EXEMPT", raising=False)
+
+    assert _build_transfer_rate_limit_exempt() == ()
+
+
+def test_build_transfer_rate_limit_exempt_rejects_invalid_address(monkeypatch):
+    monkeypatch.setenv("TRANSFER_RATE_LIMIT_EXEMPT", "not-an-address")
+
+    with pytest.raises(ValueError, match="is not a valid address"):
+        _build_transfer_rate_limit_exempt()
+
+
+@pytest.mark.parametrize("env_file", [".env.mainnet", ".env.testnet"])
+def test_deployed_transfer_rate_limit_exempt_parses(monkeypatch, env_file):
+    """A bad entry would stop the service at startup, so check the deployed values."""
+    repo_root = Path(__file__).parents[2]
+    raw = dotenv_values(repo_root / env_file).get("TRANSFER_RATE_LIMIT_EXEMPT")
+    assert raw, f"{env_file} has no TRANSFER_RATE_LIMIT_EXEMPT"
+    monkeypatch.setenv("TRANSFER_RATE_LIMIT_EXEMPT", raw)
+
+    assert len(_build_transfer_rate_limit_exempt()) == len(raw.split(","))

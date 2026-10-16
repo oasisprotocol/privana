@@ -80,6 +80,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /deposits/status/{id}` | required | same |
 | `GET /deposits/pending` | required | same |
 | `POST /funds/withdraw-from-lock` | required | same |
+| `POST /funds/transfer` | required | same |
 | `GET /balances/{token_id}` | required | same |
 | `POST /balances/batch` | required | same |
 | `GET /funds/locked` | required | same |
@@ -240,7 +241,9 @@ GET  /funds/transfer/nonce/{user}     → current Transfer nonce
 POST /funds/transfer                  → {to_address, token_id, amount, nonce, signature}
 ```
 
-The signature is an EIP-712 `Transfer` from the source user.
+The signature is an EIP-712 `Transfer` from the source user. The caller must be authenticated, but need not be the signer: services relay transfers their users signed.
+
+The relayer pays the gas, so each caller is limited to 10 transfers per minute and 100 per day (`429` with `Retry-After` above that). Callers listed in `TRANSFER_RATE_LIMIT_EXEMPT` (comma-separated addresses: the swap LP and Honoroll, which transfer for many users) are exempt.
 
 ## Private Read Endpoints
 
