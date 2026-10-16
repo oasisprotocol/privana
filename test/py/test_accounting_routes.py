@@ -53,6 +53,14 @@ def _make_private_read_client(token: bytes = b"\x12\x34") -> TestClient:
     return TestClient(app)
 
 
+def _make_transfer_client() -> TestClient:
+    """Client with _require_transfer_caller overridden to a fixed caller."""
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[routes._require_transfer_caller] = lambda: BENEFICIARY
+    return TestClient(app)
+
+
 def test_withdraw_from_lock_route_wires_to_service(monkeypatch) -> None:
     mock_service = MagicMock()
     mock_service.withdraw_from_lock = AsyncMock(
@@ -820,3 +828,87 @@ def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
     assert kwargs["chain_id"] == 23295
     assert kwargs["deposit_address"] == "0x" + "aa" * 20
     assert kwargs["beneficiary"] == BENEFICIARY
+
+
+TRANSFER_BODY = {
+    "to_address": "0x9876543210987654321098765432109876543210",
+    "token_id": TOKEN_ID_HEX,
+    "amount": "1000",
+    "nonce": 3,
+    "signature": "abcd",
+}
+
+
+class _RecordingRateLimiter:
+    def __init__(self, retry_after: int | None = None) -> None:
+        self.retry_after = retry_after
+        self.calls: list[dict[str, object]] = []
+
+    def hit(self, **kwargs) -> int | None:
+        self.calls.append(kwargs)
+        return self.retry_after
+
+
+def _mock_transfer_service(monkeypatch) -> MagicMock:
+    mock_service = MagicMock()
+    mock_service.transfer_funds = AsyncMock(
+        return_value=SubmissionResult(submission_id="sub-1", status="submitted")
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+    return mock_service
+
+
+def _set_transfer_rate_limit_exempt(monkeypatch, exempt: tuple[str, ...]) -> None:
+    fake_settings = MagicMock()
+    fake_settings.transfer_rate_limit_exempt = exempt
+    monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
+
+
+def test_transfer_route_rejects_missing_auth(monkeypatch) -> None:
+    mock_service = _mock_transfer_service(monkeypatch)
+
+    response = _make_client().post("/v1/accounting/funds/transfer", json=TRANSFER_BODY)
+
+    assert response.status_code == 401
+    mock_service.transfer_funds.assert_not_called()
+
+
+def test_transfer_route_rate_limits_per_caller(monkeypatch) -> None:
+    mock_service = _mock_transfer_service(monkeypatch)
+    _set_transfer_rate_limit_exempt(monkeypatch, ())
+    limiter = _RecordingRateLimiter()
+    monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: limiter)
+
+    response = _make_transfer_client().post("/v1/accounting/funds/transfer", json=TRANSFER_BODY)
+
+    assert response.status_code == 200
+    assert [(call["limit"], call["window_seconds"]) for call in limiter.calls] == list(
+        routes._TRANSFER_RATE_LIMITS
+    )
+    assert {call["key"] for call in limiter.calls} == {BENEFICIARY}
+    mock_service.transfer_funds.assert_awaited_once()
+
+
+def test_transfer_route_returns_429_over_the_limit(monkeypatch) -> None:
+    mock_service = _mock_transfer_service(monkeypatch)
+    _set_transfer_rate_limit_exempt(monkeypatch, ())
+    monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: _RecordingRateLimiter(30))
+
+    response = _make_transfer_client().post("/v1/accounting/funds/transfer", json=TRANSFER_BODY)
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "30"
+    mock_service.transfer_funds.assert_not_called()
+
+
+def test_transfer_route_skips_rate_limit_for_exempt_caller(monkeypatch) -> None:
+    mock_service = _mock_transfer_service(monkeypatch)
+    _set_transfer_rate_limit_exempt(monkeypatch, (CHECKSUM_BENEFICIARY,))
+    limiter = _RecordingRateLimiter(30)
+    monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: limiter)
+
+    response = _make_transfer_client().post("/v1/accounting/funds/transfer", json=TRANSFER_BODY)
+
+    assert response.status_code == 200
+    assert limiter.calls == []
+    mock_service.transfer_funds.assert_awaited_once()

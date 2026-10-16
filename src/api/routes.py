@@ -148,6 +148,8 @@ _ONRAMP_PENDING_MAX_INTENT_LOOKUPS = 10
 _ONRAMP_INTENT_RATE_LIMIT = 20
 _ONRAMP_PENDING_RATE_LIMIT = 20
 _ONRAMP_SESSION_RATE_LIMIT = 10
+# (requests, window seconds) per caller of /funds/transfer.
+_TRANSFER_RATE_LIMITS = ((10, 60), (100, 86_400))
 _DEPOSITS_PENDING_RATE_LIMIT = 10
 _SUPPORTED_DEPOSIT_ADDRESS_VERSIONS = {0}
 
@@ -193,6 +195,39 @@ def _mint_private_read_token(user_address: str, *, valid_until: Optional[int] = 
     return token
 
 
+def _authenticate_caller(
+    current_user: Optional[str],
+    authorization: Optional[str],
+    token: Optional[str],
+    *,
+    validate_expiry: bool,
+) -> tuple[Optional[bytes], str]:
+    """Return the caller's SIWE token (None for a JWT caller) and address."""
+    if authorization and token:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provide either Authorization bearer token or {_SIWE_TOKEN_HEADER}, not both",
+        )
+    if current_user:
+        return None, current_user
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Missing Authorization bearer token or {_SIWE_TOKEN_HEADER} header",
+        )
+    try:
+        raw = HexBytes(token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {_SIWE_TOKEN_HEADER} header") from exc
+    try:
+        auth_token = get_auth_token_service().decode_auth_token(
+            bytes(raw), validate_expiry=validate_expiry
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+    return bytes(raw), auth_token.user_addr
+
+
 def _require_private_read_auth(
     current_user: Optional[str] = Depends(get_current_user_optional),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -207,27 +242,25 @@ def _require_private_read_auth(
     ``_require_resolved_private_read_auth``, which resolves on-chain via
     ``authSender()``.
     """
-    if authorization and token:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Provide either Authorization bearer token or {_SIWE_TOKEN_HEADER}, not both",
-        )
-    if current_user:
-        return PrivateReadAuth(_mint_private_read_token(current_user), current_user)
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Missing Authorization bearer token or {_SIWE_TOKEN_HEADER} header",
-        )
-    try:
-        raw = HexBytes(token)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid {_SIWE_TOKEN_HEADER} header") from exc
-    try:
-        auth_token = get_auth_token_service().decode_auth_token(bytes(raw), validate_expiry=False)
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
-    return PrivateReadAuth(bytes(raw), auth_token.user_addr)
+    raw, user_address = _authenticate_caller(
+        current_user, authorization, token, validate_expiry=False
+    )
+    if raw is None:
+        return PrivateReadAuth(_mint_private_read_token(user_address), user_address)
+    return PrivateReadAuth(raw, user_address)
+
+
+def _require_transfer_caller(
+    current_user: Optional[str] = Depends(get_current_user_optional),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    token: Optional[str] = Header(None, alias=_SIWE_TOKEN_HEADER),
+) -> str:
+    """Authenticate the caller of a relayed transfer.
+
+    The token never reaches the contract here, so its expiry is checked locally.
+    """
+    _, user_address = _authenticate_caller(current_user, authorization, token, validate_expiry=True)
+    return user_address
 
 
 def _checksum_private_read_user(user_address: str) -> str:
@@ -290,6 +323,27 @@ def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
             detail="Too many authentication requests. Please retry later.",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+def _enforce_transfer_rate_limit(caller: str) -> None:
+    """Rate-limit relayed transfers per caller, so one account can't drain relayer gas."""
+
+    caller = Web3.to_checksum_address(caller)
+    if caller in load_settings().transfer_rate_limit_exempt:
+        return
+    for limit, window_seconds in _TRANSFER_RATE_LIMITS:
+        retry_after = get_auth_rate_limiter().hit(
+            bucket=f"transfer_{window_seconds}s",
+            key=caller.lower(),
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        if retry_after is not None:
+            raise auth_exception(
+                status_code=429,
+                detail="Too many transfer requests. Please retry later.",
+                headers={"Retry-After": str(retry_after)},
+            )
 
 
 def _enforce_onramp_user_rate_limit(user_address: str, bucket: str, limit: int) -> None:
@@ -1120,9 +1174,16 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
 
 
 @router.post("/funds/transfer", response_model=TransactionSubmissionResponse)
-async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmissionResponse:
-    """Transfer funds between accounting balances using a user signature."""
+async def transfer_funds(
+    payload: TransferFundsRequest,
+    caller: str = Depends(_require_transfer_caller),
+) -> TransactionSubmissionResponse:
+    """Transfer funds between accounting balances using a user signature.
 
+    Rate-limited per caller, except for TRANSFER_RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).
+    """
+
+    _enforce_transfer_rate_limit(caller)
     try:
         submission = await _service.transfer_funds(payload.model_dump())
         return _wrap_submission(submission)
