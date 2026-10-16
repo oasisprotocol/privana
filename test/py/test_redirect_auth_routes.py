@@ -655,6 +655,35 @@ def test_private_read_token_rejects_invalid_direct_header_token(monkeypatch):
     assert exc_info.value.detail == "Invalid or expired SIWE token"
 
 
+def test_transfer_caller_rejects_expired_siwe_token(monkeypatch):
+    auth_token_service = MagicMock()
+    auth_token_service.decode_auth_token.side_effect = ValueError("Auth token has expired")
+    monkeypatch.setattr(routes, "get_auth_token_service", lambda: auth_token_service)
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes._require_transfer_caller(
+            current_user=None,
+            authorization=None,
+            token="0x1234",
+        )
+
+    assert exc_info.value.status_code == 401
+    auth_token_service.decode_auth_token.assert_called_once_with(
+        b"\x12\x34",
+        validate_expiry=True,
+    )
+
+
+def test_transfer_caller_takes_jwt_user_without_minting(monkeypatch):
+    auth_token_service = MagicMock()
+    monkeypatch.setattr(routes, "get_auth_token_service", lambda: auth_token_service)
+
+    caller = routes._require_transfer_caller(current_user=TEST_ADDRESS, token=None)
+
+    assert caller == TEST_ADDRESS
+    auth_token_service.create_and_encrypt.assert_not_called()
+
+
 def test_private_read_token_rejects_mixed_auth_headers():
     with pytest.raises(HTTPException) as exc_info:
         routes._require_private_read_auth(

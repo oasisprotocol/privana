@@ -3706,8 +3706,42 @@
     },
     "/v1/accounting/funds/transfer": {
       "post": {
-        "description": "Transfer funds between accounting balances using a user signature.",
+        "description": "Transfer funds between accounting balances using a user signature.\n\nRate-limited per caller, except for TRANSFER_RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).",
         "operationId": "transfer_funds_v1_accounting_funds_transfer_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3740,6 +3774,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Transfer Funds",
         "tags": [
           "Accounting"
