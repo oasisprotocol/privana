@@ -137,6 +137,7 @@ task("transfer")
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "X-SIWE-Token": siweToken,
         },
         body: JSON.stringify(payload),
       });

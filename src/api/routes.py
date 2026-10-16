@@ -148,6 +148,8 @@ _ONRAMP_PENDING_MAX_INTENT_LOOKUPS = 10
 _ONRAMP_INTENT_RATE_LIMIT = 20
 _ONRAMP_PENDING_RATE_LIMIT = 20
 _ONRAMP_SESSION_RATE_LIMIT = 10
+# (requests, window seconds) per caller of /funds/transfer.
+_TRANSFER_RATE_LIMITS = ((10, 60), (100, 86_400))
 _DEPOSITS_PENDING_RATE_LIMIT = 10
 _SUPPORTED_DEPOSIT_ADDRESS_VERSIONS = {0}
 
@@ -290,6 +292,27 @@ def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
             detail="Too many authentication requests. Please retry later.",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+def _enforce_transfer_rate_limit(caller: str) -> None:
+    """Rate-limit relayed transfers per caller, so one account can't drain relayer gas."""
+
+    caller = Web3.to_checksum_address(caller)
+    if caller in load_settings().transfer_rate_limit_exempt:
+        return
+    for limit, window_seconds in _TRANSFER_RATE_LIMITS:
+        retry_after = get_auth_rate_limiter().hit(
+            bucket=f"transfer_{window_seconds}s",
+            key=caller.lower(),
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        if retry_after is not None:
+            raise auth_exception(
+                status_code=429,
+                detail="Too many transfer requests. Please retry later.",
+                headers={"Retry-After": str(retry_after)},
+            )
 
 
 def _enforce_onramp_user_rate_limit(user_address: str, bucket: str, limit: int) -> None:
@@ -1120,9 +1143,16 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
 
 
 @router.post("/funds/transfer", response_model=TransactionSubmissionResponse)
-async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmissionResponse:
-    """Transfer funds between accounting balances using a user signature."""
+async def transfer_funds(
+    payload: TransferFundsRequest,
+    auth: PrivateReadAuth = Depends(_require_private_read_auth),
+) -> TransactionSubmissionResponse:
+    """Transfer funds between accounting balances using a user signature.
 
+    Rate-limited per caller, except for TRANSFER_RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).
+    """
+
+    _enforce_transfer_rate_limit(auth.user_address)
     try:
         submission = await _service.transfer_funds(payload.model_dump())
         return _wrap_submission(submission)
