@@ -895,6 +895,8 @@ class AccountingContractService:
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
         to_addr = self._require_address(payload["to_address"], "to_address")
+        if str(to_addr).lower() == ADDRESS_ZERO:
+            raise ValueError("to_address must not be the zero address")
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
@@ -930,6 +932,8 @@ class AccountingContractService:
         user = self._require_address(payload["user_address"], "user_address")
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
         to_addr = self._require_address(payload["to_address"], "to_address")
+        if str(to_addr).lower() == ADDRESS_ZERO:
+            raise ValueError("to_address must not be the zero address")
         amount = self._require_positive(payload["amount"], "amount")
         service = self._require_address(payload["service_address"], "service_address")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
@@ -946,6 +950,39 @@ class AccountingContractService:
         fn = self.contract.functions.transferFromLock(
             user,
             to_addr,
+            lock_id,
+            amount,
+            nonce,
+            signature,
+        )
+        return await self._submit(fn._encode_transaction_data())
+
+    async def transfer_to_lock(self, payload: Dict) -> SubmissionResult:
+        user = self._require_address(payload["user_address"], "user_address")
+        lock_id = self._require_positive(payload["lock_id"], "lock_id")
+        amount = self._require_positive(payload["amount"], "amount")
+        nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
+        signature = self._require_hex(payload["signature"], "signature")
+        service = await self._recover_eip712_signer(
+            "TransferToLock",
+            [
+                {"name": "userAddress", "type": "address"},
+                {"name": "lockId", "type": "uint256"},
+                {"name": "amount", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+            ],
+            {
+                "userAddress": user,
+                "lockId": lock_id,
+                "amount": amount,
+                "nonce": nonce,
+            },
+            signature,
+        )
+        await self._validate_user_nonce(service, nonce, "transferToLockNonces", "transferToLock")
+
+        fn = self.contract.functions.transferToLock(
+            user,
             lock_id,
             amount,
             nonce,
@@ -1345,6 +1382,13 @@ class AccountingContractService:
         nonce = await contract_reader.functions.transferLockedNonces(checksum_service).call()
         return {"service_address": checksum_service, "nonce": nonce}
 
+    async def get_transfer_to_lock_nonce(self, service_address: str) -> Dict[str, Any]:
+        """Get the current transferToLock nonce for a service."""
+        checksum_service = self._require_address(service_address, "service_address")
+        contract_reader = self._get_reader_contract()
+        nonce = await contract_reader.functions.transferToLockNonces(checksum_service).call()
+        return {"service_address": checksum_service, "nonce": nonce}
+
     async def get_rofl_signer_address(self) -> str:
         """Read the currently published ROFL signer address from the contract."""
         contract = self._get_reader_contract()
@@ -1439,6 +1483,8 @@ class AccountingContractService:
                 | HistoryKind.TransferBalanceIn
                 | HistoryKind.ModifyLock
                 | HistoryKind.UnlockLock
+                | HistoryKind.TransferToLockOut
+                | HistoryKind.TransferToLockIn
             ):
                 expected_len = _HISTORY_COUNTERPARTY_PAYLOAD_LEN
                 tail_field = "counterparty"

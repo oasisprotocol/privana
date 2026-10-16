@@ -70,6 +70,8 @@ from src.models.accounting import (
     TransferLockedFundsRequest,
     TransferLockedNonceResponse,
     TransferNonceResponse,
+    TransferToLockFundsRequest,
+    TransferToLockNonceResponse,
     UnlockAllExpiredLocksRequest,
     UnlockFundsRequest,
     UpdateOnRampRequest,
@@ -1213,6 +1215,44 @@ async def transfer_locked_funds(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("Failed to transfer locked funds")
+        raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
+
+
+@router.get(
+    "/funds/transfer-to-lock/nonce/{service_address}",
+    response_model=TransferToLockNonceResponse,
+)
+async def get_transfer_to_lock_nonce(service_address: str) -> TransferToLockNonceResponse:
+    """Get the current transferToLock nonce for a service."""
+
+    try:
+        result = await _service.get_transfer_to_lock_nonce(service_address)
+        return TransferToLockNonceResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to get transfer to lock nonce")
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve transfer to lock nonce"
+        ) from exc
+
+
+@router.post("/funds/transfer-to-lock", response_model=TransactionSubmissionResponse)
+async def transfer_to_lock(
+    payload: TransferToLockFundsRequest,
+) -> TransactionSubmissionResponse:
+    """Fund an existing lock from a service's balance based on the service's signature."""
+
+    try:
+        submission = await _service.transfer_to_lock(payload.model_dump())
+        return _wrap_submission(submission)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionRevertedError as exc:
+        logger.error("Transfer to lock transaction reverted: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Failed to transfer to lock")
         raise HTTPException(status_code=500, detail="Failed to submit transaction") from exc
 
 

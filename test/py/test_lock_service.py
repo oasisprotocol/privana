@@ -271,3 +271,44 @@ class TestTransferLockedFundsNonceValidation:
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.transfer_locked_funds(self._make_payload(nonce=0))
         service._submit.assert_called_once()
+
+
+class TestGetTransferToLockNonce:
+    @pytest.mark.asyncio
+    async def test_returns_nonce_for_valid_service_address(self, service):
+        _mock_reader(service, "transferToLockNonces", 9)
+        result = await service.get_transfer_to_lock_nonce(SERVICE)
+        assert result["nonce"] == 9
+        assert "service_address" in result
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_address(self, service):
+        with pytest.raises(ValueError, match="service_address"):
+            await service.get_transfer_to_lock_nonce("bad")
+
+
+class TestTransferToLockSubmission:
+    @staticmethod
+    def _make_payload(nonce=0):
+        return {
+            "user_address": USER,
+            "lock_id": 1,
+            "amount": 1000,
+            "nonce": nonce,
+            "signature": "0x" + "ab" * 65,
+        }
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_recovered_signer_nonce_does_not_match(self, service):
+        service._recover_eip712_signer = AsyncMock(return_value=SERVICE)
+        _setup_user_nonce(service, "transferToLockNonces", expected_nonce=5)
+        with pytest.raises(ValueError, match="nonce mismatch"):
+            await service.transfer_to_lock(self._make_payload(nonce=0))
+
+    @pytest.mark.asyncio
+    async def test_submits_when_recovered_signer_nonce_matches(self, service):
+        service._recover_eip712_signer = AsyncMock(return_value=SERVICE)
+        _setup_user_nonce(service, "transferToLockNonces", expected_nonce=0)
+        service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
+        await service.transfer_to_lock(self._make_payload(nonce=0))
+        service._submit.assert_called_once()

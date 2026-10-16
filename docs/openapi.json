@@ -488,7 +488,9 @@
               "transferBalanceIn",
               "modifyLock",
               "unlockLock",
-              "unknown"
+              "unknown",
+              "transferToLockOut",
+              "transferToLockIn"
             ],
             "title": "Kind",
             "type": "string"
@@ -1848,6 +1850,63 @@
           "nonce"
         ],
         "title": "TransferNonceResponse",
+        "type": "object"
+      },
+      "TransferToLockFundsRequest": {
+        "description": "Payload for a service funding an existing user lock.",
+        "properties": {
+          "amount": {
+            "exclusiveMinimum": 0.0,
+            "title": "Amount",
+            "type": "integer"
+          },
+          "lock_id": {
+            "minimum": 1.0,
+            "title": "Lock Id",
+            "type": "integer"
+          },
+          "nonce": {
+            "minimum": 0.0,
+            "title": "Nonce",
+            "type": "integer"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "user_address": {
+            "minLength": 1,
+            "title": "User Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_address",
+          "lock_id",
+          "amount",
+          "nonce",
+          "signature"
+        ],
+        "title": "TransferToLockFundsRequest",
+        "type": "object"
+      },
+      "TransferToLockNonceResponse": {
+        "description": "Response containing the current transferToLock nonce for a service.",
+        "properties": {
+          "nonce": {
+            "title": "Nonce",
+            "type": "integer"
+          },
+          "service_address": {
+            "title": "Service Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service_address",
+          "nonce"
+        ],
+        "title": "TransferToLockNonceResponse",
         "type": "object"
       },
       "UnlockAllExpiredLocksRequest": {
@@ -3767,6 +3826,91 @@
           }
         },
         "summary": "Get Transfer Locked Nonce",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/funds/transfer-to-lock": {
+      "post": {
+        "description": "Fund an existing lock from a service's balance based on the service's signature.",
+        "operationId": "transfer_to_lock_v1_accounting_funds_transfer_to_lock_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferToLockFundsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionSubmissionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transfer To Lock",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/funds/transfer-to-lock/nonce/{service_address}": {
+      "get": {
+        "description": "Get the current transferToLock nonce for a service.",
+        "operationId": "get_transfer_to_lock_nonce_v1_accounting_funds_transfer_to_lock_nonce__service_address__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "service_address",
+            "required": true,
+            "schema": {
+              "title": "Service Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferToLockNonceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Transfer To Lock Nonce",
         "tags": [
           "Accounting"
         ]

@@ -381,7 +381,7 @@ describe('Accounting history', function () {
     );
   });
 
-  it('records only the sender row for zero-address transfer recipients', async function () {
+  it('rejects transfers to the zero address without recording history', async function () {
     await accounting.setBalance(userWallet1.address, TEST_TOKEN.tokenId, parseUsdt('10'));
 
     const transferNonce = await accounting.transferNonces(userWallet1.address);
@@ -391,15 +391,13 @@ describe('Accounting history', function () {
       amount: parseUsdt('2'),
       nonce: transferNonce,
     });
-    await accounting.transferBalance(ethers.ZeroAddress, TEST_TOKEN.tokenId, parseUsdt('2'), transferNonce, transferSignature);
+    await expect(
+      accounting.transferBalance(ethers.ZeroAddress, TEST_TOKEN.tokenId, parseUsdt('2'), transferNonce, transferSignature)
+    ).to.be.reverted; // WithCustomError(accounting, "InvalidSignature"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
 
-    const [history, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
-
-    expect(total).to.equal(1n);
-    expect(history[0].kind).to.equal(5n);
-    expect(history[0].payload).to.equal(
-      counterpartyPayload(TEST_TOKEN.tokenId, parseUsdt('2'), ethers.ZeroAddress)
-    );
+    const [, total] = await accounting.getHistory(0, 10, mockAuthToken(userWallet1.address));
+    expect(total).to.equal(0n);
+    expect(await accounting.getBalance(userWallet1.address, TEST_TOKEN.tokenId)).to.equal(parseUsdt('10'));
   });
 
   it('records modifyLock history', async function () {

@@ -40,6 +40,8 @@ class HistoryKind(IntEnum):
     TransferBalanceIn = 6
     ModifyLock = 7
     UnlockLock = 8
+    TransferToLockOut = 9
+    TransferToLockIn = 10
 
 
 HISTORY_KIND_WIRE_NAMES: dict[HistoryKind, str] = {
@@ -52,6 +54,8 @@ HISTORY_KIND_WIRE_NAMES: dict[HistoryKind, str] = {
     HistoryKind.TransferBalanceIn: "transferBalanceIn",
     HistoryKind.ModifyLock: "modifyLock",
     HistoryKind.UnlockLock: "unlockLock",
+    HistoryKind.TransferToLockOut: "transferToLockOut",
+    HistoryKind.TransferToLockIn: "transferToLockIn",
 }
 
 
@@ -233,6 +237,24 @@ class TransferLockedFundsRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class TransferToLockFundsRequest(BaseModel):
+    """Payload for a service funding an existing user lock."""
+
+    user_address: str = Field(..., min_length=1)
+    lock_id: int = Field(..., ge=1)
+    amount: int = Field(..., gt=0)
+    nonce: int = Field(..., ge=0)
+    signature: str
+
+    @field_validator("amount", mode="before")
+    def _parse_amount(cls, value: int | str | float) -> int:
+        return _parse_int_amount(value)
+
+    @field_validator("signature")
+    def _normalise_ttl_signature(cls, value: str) -> str:
+        return _normalise_hex(value)
+
+
 class WithdrawFromLockRequest(BaseModel):
     """Payload for withdrawing funds directly from a lock to an external address."""
 
@@ -371,6 +393,8 @@ class HistoryEntry(BaseModel):
         "modifyLock",
         "unlockLock",
         "unknown",
+        "transferToLockOut",
+        "transferToLockIn",
     ]
     timestamp: int
     token_id: Optional[str] = None
@@ -545,6 +569,13 @@ class ModifyLockNonceResponse(BaseModel):
 
 class TransferLockedNonceResponse(BaseModel):
     """Response containing the current transferFromLock nonce for a service."""
+
+    service_address: str
+    nonce: int
+
+
+class TransferToLockNonceResponse(BaseModel):
+    """Response containing the current transferToLock nonce for a service."""
 
     service_address: str
     nonce: int
