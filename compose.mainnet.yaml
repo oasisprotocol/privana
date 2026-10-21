@@ -4,7 +4,7 @@ services:
       context: .
       args:
         - ENV_FILE=.env.mainnet
-    image: "ghcr.io/oasisprotocol/privana@sha256:1d371abc66aa750aa3a9e64759dd9bbd62b5d3c399f82098fccb563150a85970"
+    image: "ghcr.io/oasisprotocol/privana@sha256:c5e4107e9e9c134bfd378aa0a5014ab7d3fd565debe5504d4f4964f8eec63b9a"
     platform: linux/amd64
     environment:
       - SWEEP_STATE_DIR=/data/sweep-engine
