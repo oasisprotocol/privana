@@ -15,7 +15,7 @@ from src.config.chain_config import (
     get_finality_depth,
 )
 from src.models.private_read import PrivateReadAuth
-from src.services.accounting_contract import SubmissionResult
+from src.services.accounting_contract import SubmissionResult, TransferOutcomeUnknownError
 from src.services.deposit_processor import DepositProcessor
 
 BENEFICIARY = "0x" + "bb" * 20
@@ -820,3 +820,27 @@ def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
     assert kwargs["chain_id"] == 23295
     assert kwargs["deposit_address"] == "0x" + "aa" * 20
     assert kwargs["beneficiary"] == BENEFICIARY
+
+
+def test_transfer_locked_route_maps_unknown_outcome_to_409(monkeypatch) -> None:
+    mock_service = MagicMock()
+    mock_service.transfer_locked_funds = AsyncMock(
+        side_effect=TransferOutcomeUnknownError("submitted earlier without a seen result")
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    response = _make_client().post(
+        "/v1/accounting/funds/transfer-locked",
+        json={
+            "user_address": BENEFICIARY,
+            "lock_id": 1,
+            "to_address": BENEFICIARY,
+            "amount": "1000",
+            "service_address": SERVICE_ADDRESS,
+            "nonce": 0,
+            "signature": "0xabcd",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "without a seen result" in response.json()["detail"]

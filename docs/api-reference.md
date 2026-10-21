@@ -221,7 +221,7 @@ Locks are escrow primitives: a user locks funds for a service, and the service c
 | `GET /funds/modify-lock/nonce/{user}` | — | Fetch nonce for `ModifyLock` EIP-712 |
 | `POST /funds/modify-lock` | user | Add funds and/or extend expiry (`{lock_id, amount, new_expiry, nonce, signature}`). Pure no-ops are rejected. |
 | `GET /funds/transfer-locked/nonce/{service}` | — | Fetch nonce for `TransferFromLock` EIP-712 |
-| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`) |
+| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`). Resending the same signed transfer is safe: it joins the one in flight, or returns the original reply for up to seven days after Privana has seen it succeed. `409` means Privana submitted it earlier without seeing a result: it landed if the service's nonce has moved past it and the service signed nothing else at that nonce. |
 | `POST /funds/withdraw-from-lock` | user (auth) | User withdraws locked funds directly to an external destination (`{to_address, lock_id, amount, nonce, signature}` — the user is resolved from the auth header, not the body) |
 | `POST /funds/unlock` | — | Unlock a single expired lock (`{user_address, lock_id}`, no signature; reverts if not yet expired) |
 | `POST /funds/unlock-all-expired` | — | Unlock every expired lock for a user in one tx |

@@ -86,6 +86,7 @@ from src.models.private_read import PrivateReadAuth
 from src.services import onramp as onramp_service
 from src.services.accounting_contract import (
     SubmissionResult,
+    TransferOutcomeUnknownError,
     get_accounting_contract_service,
 )
 from src.services.deposit_discovery import (
@@ -1210,6 +1211,9 @@ async def transfer_locked_funds(
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransferOutcomeUnknownError as exc:
+        logger.warning("Transfer locked funds outcome unknown: %s", exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TransactionRevertedError as exc:
         logger.error("Transfer locked funds transaction reverted: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc

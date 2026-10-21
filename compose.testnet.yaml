@@ -8,6 +8,7 @@ services:
     platform: linux/amd64
     environment:
       - SWEEP_STATE_DIR=/data/sweep-engine
+      - OPERATION_STATE_DIR=/data/operations
       - SAPPHIRE_RPC_HEADERS
       - ONRAMP_PROVIDER
       - TRANSAK_CLIENT_IP_HEADER
@@ -21,6 +22,7 @@ services:
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
       - sweep-engine-data:/data/sweep-engine
+      - operation-data:/data/operations
     ports:
       - "8000:8000"
     annotations:
@@ -29,3 +31,4 @@ services:
 
 volumes:
   sweep-engine-data:
+  operation-data:
