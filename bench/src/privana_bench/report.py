@@ -68,6 +68,7 @@ def summarize(
         "unresolved": outcomes["unresolved"],
         "replies": dict(Counter(t.reply.kind for t in transfers if t.reply is not None)),
         "failed_replies_that_landed": failed_landed,
+        "resends": sum(t.resends for t in transfers),
         "connections_that_never_opened": sum(
             t.reply.connect_failures for t in transfers if t.reply is not None
         ),
@@ -104,6 +105,7 @@ def to_markdown(meta: dict[str, Any], summary: dict[str, Any], transfers: list[T
         f"Landed {summary['landed']} of {summary['sent']} sent, refused {summary['refused']}, "
         f"unresolved {summary['unresolved']}. Replies: {summary['replies']}. "
         f"Failed replies that landed: {summary['failed_replies_that_landed']}. "
+        f"Resends after a lost reply: {summary['resends']}. "
         f"Connections that never opened: {summary['connections_that_never_opened']}. "
         f"Balances: {summary['balances']}. Ended: {summary['ended']}.",
         "",

@@ -216,7 +216,7 @@ async def _live_transfers(
 async def _locks(
     cfg: Config, args: argparse.Namespace, chain: Chain, privana: Privana, facts: Facts
 ) -> int:
-    plan = await locks.plan(cfg, chain, privana, facts.nonce, args.n, RESULTS)
+    plan = await locks.plan(cfg, chain, privana, facts.nonce, args.n, args.amount, RESULTS)
     print(
         f"Sapphire Testnet, Accounting {cfg.accounting} VERSION {facts.version}. "
         f"Funder {plan.funder.address} at transfer nonce {plan.funder_nonce}, service "

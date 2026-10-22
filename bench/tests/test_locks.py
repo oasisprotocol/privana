@@ -180,6 +180,30 @@ async def test_live_run_end_to_end(world: World, tmp_path: Path) -> None:
     assert unsettled(tmp_path, SERVICE, ACCOUNTING, 0) == []
 
 
+@pytest.mark.parametrize(
+    ("benchmark", "amount", "blocks"),
+    [("locks", "0.01", False), ("locks", "0.02", True), ("transfers", "0.01", True)],
+)
+async def test_an_earlier_write_at_the_funder_nonce_blocks_only_another_write(
+    world: World, tmp_path: Path, benchmark: str, amount: str, blocks: bool
+) -> None:
+    # An earlier run left funding nonce 0 unresolved. A locks run of the same amount
+    # sends that same write first.
+    start = {"event": "start", "benchmark": benchmark, "amount": "0.01", "token_id": TOKEN}
+    start |= {"sender": FUNDER, "accounting": ACCOUNTING}
+    (tmp_path / "earlier").mkdir()
+    (tmp_path / "earlier" / "funding.jsonl").write_text(
+        json.dumps(start) + "\n" + json.dumps({"event": "send", "k": 0, "nonce": 0}) + "\n"
+    )
+    args = locks_args(live=False)
+    args.amount = amount
+    if blocks:
+        with pytest.raises(PreflightError, match="left write 0 .* at nonce 0 unresolved"):
+            await cli.run(CFG, args)
+    else:
+        assert await cli.run(CFG, args) == 0
+
+
 async def test_a_lock_that_did_not_land_makes_the_run_partial(
     world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

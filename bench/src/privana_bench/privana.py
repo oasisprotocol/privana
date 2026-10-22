@@ -1,7 +1,8 @@
 """Privana through the published SDK, the way an integrator calls it.
 
-No client gets a token provider, so the SDK never replays a request: a write
-goes out at most once. Only a write whose connection never opened is tried again.
+No client gets a token provider, so the SDK never replays a request. A write
+goes out again only when its connection never opened, here, or after a lost
+reply in the one-after-another phases (transfers.py).
 """
 
 from __future__ import annotations
@@ -54,8 +55,8 @@ class Reply:
 
     refused: a 4xx, the SDK rejected it before sending, or the connection never
     opened on any try. Privana did not queue it, or it reverted.
-    unknown: a 5xx, a 400 Privana raised after sending, a timeout or a lost
-    connection. It can still land.
+    unknown: a 5xx, a 409, a 400 Privana raised after sending, a timeout or a
+    lost connection. It can still land.
     connect_failures: tries whose connection never opened, so nothing went out.
     retry_s: seconds from the first try to the last one, so a reply time can
     count from the try that went out.
@@ -90,9 +91,9 @@ async def _reply(write: Awaitable[object]) -> Reply:
     try:
         await write
     except AccountingApiError as exc:
-        # The only 400s raised after the write went out name ROFL: the enclave's
-        # reply did not parse.
-        sent = exc.status_code == 400 and "ROFL" in str(exc.detail)
+        # The 4xx replies raised after the write went out: a 409, submitted without a
+        # seen outcome, and a 400 naming ROFL, whose enclave reply did not parse.
+        sent = exc.status_code == 409 or (exc.status_code == 400 and "ROFL" in str(exc.detail))
         kind: ReplyKind = "refused" if 400 <= exc.status_code < 500 and not sent else "unknown"
         return Reply(kind, exc.status_code, safe_detail(exc.detail))
     except ValidationError as exc:

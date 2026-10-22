@@ -137,6 +137,16 @@ async def burst(
                 journal.write("outcome", **asdict(a))
 
 
+def same_funding(amount: str, token_id: str) -> Callable[[dict[str, Any]], bool]:
+    """Whether an earlier journal is a locks run's funding of `amount` of `token_id`.
+    Funding at nonce X always pays player PLAYER_INDEX + X, so its write at the
+    funder's nonce is the one this run sends first."""
+    expected = ("locks", amount, token_id)
+    return lambda start: (
+        (start.get("benchmark"), start.get("amount"), start.get("token_id")) == expected
+    )
+
+
 @dataclass
 class Plan:
     funder: LocalAccount
@@ -149,7 +159,13 @@ class Plan:
 
 
 async def plan(
-    cfg: Config, chain: Chain, privana: Privana, funder_nonce: int, n: int, results: Path
+    cfg: Config,
+    chain: Chain,
+    privana: Privana,
+    funder_nonce: int,
+    n: int,
+    amount: str,
+    results: Path,
 ) -> Plan:
     """Public reads only: the players are new, and no earlier write can still land."""
     funder, service = wallets(cfg.mnemonic)
@@ -166,7 +182,9 @@ async def plan(
         raise PreflightError(
             f"the service's settle nonce is {service_nonce} on chain but {api_nonce} in the API"
         )
-    check_settled(results, funder.address, cfg.accounting, funder_nonce)
+    check_settled(
+        results, funder.address, cfg.accounting, funder_nonce, same_funding(amount, cfg.token_id)
+    )
     check_settled(results, service.address, cfg.accounting, service_nonce)
     # The service's signed lock read works if a new player shows no locks.
     probe = await chain.service_locks(service, [players[0].address])
@@ -405,6 +423,7 @@ def summarize(ts: Sequence[Transfer]) -> dict[str, Any]:
         "unresolved": unresolved,
         "replies": dict(Counter(_label(t.reply) for t in ts if t.reply)),
         "failed_replies_that_landed": sum(1 for t in landed if t.reply and t.reply.kind != "ok"),
+        "resends": sum(t.resends for t in ts),
         "connections_that_never_opened": sum(t.reply.connect_failures for t in ts if t.reply),
         "first_send_to_last_landing_s": _round(span),
         # An unresolved write stalls the phase, so a rate over the landed ones misleads.
@@ -445,6 +464,9 @@ def to_markdown(
         "Replies: " + "; ".join(f"{n} {s['replies']}" for n, s in summaries.items()) + ".",
         "Failed replies that landed: "
         + "; ".join(f"{n} {s['failed_replies_that_landed']}" for n, s in summaries.items())
+        + ".",
+        "Resends after a lost reply: "
+        + "; ".join(f"{n} {s['resends']}" for n, s in summaries.items())
         + ".",
         "Connections that never opened, so nothing went out on that try: "
         + "; ".join(f"{n} {s['connections_that_never_opened']}" for n, s in summaries.items())
