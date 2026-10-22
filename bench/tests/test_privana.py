@@ -126,6 +126,7 @@ def test_transfer_signature_recovers_as_privana_checks_it(api: Privana) -> None:
             AccountingApiError("x", 400, "ROFL appd returned invalid CBOR response: x"),
             Reply("unknown", 400, "ROFL appd returned invalid CBOR response: x"),
         ),
+        (AccountingApiError("x", 409, "outcome unseen"), Reply("unknown", 409, "outcome unseen")),
         (AccountingApiError("x", 422, "reverted"), Reply("refused", 422, "reverted")),
         (AccountingApiError("x", 429, "slow down"), Reply("refused", 429, "slow down")),
         (

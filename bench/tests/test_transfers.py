@@ -20,6 +20,7 @@ REPLY = 0.02  # how long the fake API takes to answer
 LAND = 0.05  # how long a transfer takes to land
 MAX_WAIT = 0.3
 REFUSED_WAIT = 0.1
+RESEND_AFTER = 0.08
 
 REPLIES = {
     "ok": Reply("ok", 200),
@@ -36,6 +37,7 @@ class Step:
     jump: int = 1  # how far the nonce moves when it lands
     raises: bool = False
     reply_after: float = REPLY
+    lands_on_try: int = 1  # earlier tries are lost on the way in
 
 
 @dataclass
@@ -72,19 +74,23 @@ class Run:
     elapsed: float
 
 
-async def run(tmp_path: Path, steps: list[Step], world: World | None = None) -> Run:
+async def run(
+    tmp_path: Path, steps: list[Step], world: World | None = None, max_wait: float = MAX_WAIT
+) -> Run:
     world = world or World()
     world.run_task = asyncio.current_task()
     path = tmp_path / "journal.jsonl"
     journal = Journal(path)
 
     async def send(nonce: int) -> Reply:
-        k = len(world.sent)
-        last = json.loads(path.read_text().splitlines()[-1])
-        assert (last["event"], last["k"], last["nonce"]) == ("send", k, nonce), "journal first"
+        k = nonce - START
         world.sent.append(nonce)
+        tries = world.sent.count(nonce)
+        last = json.loads(path.read_text().splitlines()[-1])
+        expected = ("send" if tries == 1 else "resend", k, nonce)
+        assert (last["event"], last["k"], last["nonce"]) == expected, "journal first"
         step = steps[k]
-        if step.land_after is not None:
+        if step.land_after is not None and tries == step.lands_on_try:
             world.landings.append((time.time() + step.land_after, nonce + step.jump))
         await asyncio.sleep(step.reply_after)
         if step.raises:
@@ -101,8 +107,9 @@ async def run(tmp_path: Path, steps: list[Step], world: World | None = None) -> 
         journal,
         transfers,
         POLL,
-        MAX_WAIT,
+        max_wait,
         REFUSED_WAIT,
+        resend_after_s=RESEND_AFTER,
     )
     elapsed = time.time() - started
     journal.close()
@@ -142,16 +149,63 @@ async def test_failed_reply_that_landed_counts_as_landed(tmp_path: Path) -> None
 
 
 async def test_unknown_that_never_lands_stops_without_resigning(tmp_path: Path) -> None:
-    r = await run(tmp_path, [Step("ok"), Step("unknown", land_after=None), Step("ok")])
-    assert r.world.sent == [7, 8]
+    steps = [Step("ok"), Step("unknown", land_after=None), Step("ok")]
+    r = await run(tmp_path, steps, max_wait=0.6)
+    assert r.world.sent == [7, 8, 8, 8, 8]
     assert r.transfers[1].outcome == "unresolved"
     assert r.transfers[1].note == (
-        "after 0 s the last nonce read showed 8, reply 500 Failed to submit transaction, "
-        "so it can still land"
+        "after 1 s the last nonce read showed 8, reply 500 Failed to submit transaction, "
+        "resent 3 times, so it can still land"
     )
     assert r.ended.startswith("stopped at transfer 1: unresolved")
-    assert r.transfers[1].done_at - r.transfers[1].sent_at >= MAX_WAIT
+    assert r.transfers[1].done_at - r.transfers[1].sent_at >= 0.6
     assert r.records[-1]["outcome"] == "unresolved"
+
+
+async def test_lost_write_goes_out_again_and_lands(tmp_path: Path) -> None:
+    r = await run(tmp_path, [Step("unknown", lands_on_try=2), Step("ok")])
+    assert r.ended == "completed"
+    assert r.world.sent == [7, 7, 8]
+    t = r.transfers[0]
+    assert (t.outcome, t.resends) == ("landed", 1)
+    assert t.note == (
+        "the reply said it failed (500 Failed to submit transaction), but it landed, resent 1 time"
+    )
+    events = [rec["event"] for rec in r.records]
+    assert events == ["send", "resend", "resend reply", "outcome", "send", "outcome"]
+    assert (r.records[2]["nonce"], r.records[2]["reply"]["kind"]) == (7, "unknown")
+
+
+async def test_no_resend_while_a_node_is_behind(tmp_path: Path) -> None:
+    run_task = asyncio.current_task()
+
+    async def read_nonce() -> int:
+        await asyncio.sleep(0)
+        return START if asyncio.current_task() is run_task else START - 1
+
+    sent: list[int] = []
+
+    async def send(nonce: int) -> Reply:
+        sent.append(nonce)
+        return REPLIES["unknown"]
+
+    journal = Journal(tmp_path / "journal.jsonl")
+    transfers: list[Transfer] = []
+    await run_transfers(
+        1,
+        START,
+        send,
+        read_nonce,
+        journal,
+        transfers,
+        POLL,
+        MAX_WAIT,
+        REFUSED_WAIT,
+        resend_after_s=RESEND_AFTER,
+    )
+    journal.close()
+    assert sent == [START]
+    assert (transfers[0].outcome, transfers[0].resends) == ("unresolved", 0)
 
 
 async def test_ok_reply_that_never_lands_is_unresolved(tmp_path: Path) -> None:
