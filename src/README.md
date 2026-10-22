@@ -208,7 +208,7 @@ Key file: `services/token_info_bootstrap.py`.
 | What | Where | Lifecycle |
 |------|-------|-----------|
 | Sweep records | `/data/sweep-engine/sweep_<deposit_id>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
-| Transfer-locked submissions | diskcache in `/data/operations`, keyed by the transfer's EIP-712 digest | Written as pending before submitting, marked executed when appd reports success, deleted when a first submission reverts. Expire after seven days. Survive ROFL restarts. |
+| Transfer-locked submissions | diskcache in `/data/accounting`, keyed by the transfer's EIP-712 digest | Written as pending before submitting, marked executed when appd reports success, deleted when a first submission reverts. Expire after seven days. Survive ROFL restarts. |
 | JWT signing key | Derived in-memory from ROFL TEE seed at startup | Re-derived on each start; deterministic per ROFL app. |
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
 | On-ramp intent key ring | Derived in-memory from ROFL raw-256 key IDs at startup | Re-derived on each start; deterministic per ROFL app and key ID. |
@@ -251,7 +251,7 @@ Environment variables: see `.env.localnet`, `.env.testnet`, and `.env.localnet.s
 - `SAPPHIRE_PRIVATE_KEY` (local dev only) — bypasses ROFL appd; uses a direct EOA for Sapphire txs
 - `DISABLE_ROFL_KEYS` (local dev only) — use non-TEE AuthToken/JWT keys and publicly derivable on-ramp intent keys; never enable in production
 - `SWEEP_STATE_DIR` (default `/data/sweep-engine`) — sweep state directory
-- `OPERATION_STATE_DIR` (default `/data/operations`) — transfer-locked submission records
+- `ACCOUNTING_STATE_DIR` (default `/data/accounting`) — transfer-locked submission records
 - `ONRAMP_PROVIDER` — Credit card on-ramp provider: `transak` or `moonpay`
 - `TRANSAK_API_KEY`, `TRANSAK_API_SECRET` — backend-only partner credentials
 - `TRANSAK_API_BASE_URL`, `TRANSAK_GATEWAY_BASE_URL`, `TRANSAK_REFERRER_DOMAIN` — approved Transak environment/domain

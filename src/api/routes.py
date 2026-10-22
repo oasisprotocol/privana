@@ -1212,7 +1212,7 @@ async def transfer_locked_funds(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TransferOutcomeUnknownError as exc:
-        logger.warning("Transfer locked funds outcome unknown: %s", exc)
+        logger.warning("Transfer locked funds outcome unknown: %s", exc, exc_info=True)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TransactionRevertedError as exc:
         logger.error("Transfer locked funds transaction reverted: %s", exc)
