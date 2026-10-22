@@ -1,11 +1,12 @@
 """One wallet sends N transfers in a row to a second wallet.
 
-Each transfer is written to the journal before it is sent and is signed once,
-at the nonce Privana shows as current. The next one waits until that nonce
-shows as used, and the run stops at the first transfer that does not land, so
-no transfer is ever re-signed at another nonce. The sender is a test wallet
-nothing else signs for, so a nonce step is our transfer. The balance check at
-the end confirms it.
+Each transfer is written to the journal before it is sent, signed at the nonce
+Privana shows as current. A transfer whose reply was lost goes out again, the
+same signed write, while that nonce stays unused. The next one waits until that
+nonce shows as used, and the run stops at the first transfer that does not
+land, so no transfer is ever re-signed at another nonce. The sender is a test
+wallet nothing else signs for, so a nonce step is our transfer. The balance
+check at the end confirms it.
 """
 
 from __future__ import annotations
@@ -29,6 +30,11 @@ ReadNonce = Callable[[], Awaitable[int]]
 # A few 4xx replies come after the enclave already sent the transaction, so a
 # refusal stands only if a nonce read this long after the reply shows it unused.
 REFUSED_WAIT_S = 30.0
+# A lost reply can be a request that never reached Privana, so the same write goes
+# out again while its nonce shows unused this long after the last try. A nonce
+# takes one write, so at most one copy lands.
+RESEND_AFTER_S = 30.0
+RESENDS = 3
 
 
 @dataclass
@@ -44,6 +50,7 @@ class Transfer:
     done_at: float = 0.0  # when the run moved on from it, or stopped
     outcome: Outcome = "unresolved"
     note: str = ""
+    resends: int = 0  # sends of the same write after a lost reply
 
 
 class Journal:
@@ -64,11 +71,16 @@ class Journal:
 
 
 def unsettled(
-    results: Path, sender: str, accounting: str, nonce: int
+    results: Path,
+    sender: str,
+    accounting: str,
+    nonce: int,
+    same: Callable[[dict[str, Any]], bool] = lambda start: False,
 ) -> list[tuple[str, int, int]]:
     """Writes in earlier runs' journals that can still land: sent by `sender`
     to `accounting`, without a landed or refused outcome, at a nonce not used
-    yet. Returns (journal, k, nonce) for each."""
+    yet. A write at `nonce` from a run whose start passes `same` is the write
+    this run sends first, so it is left out. Returns (journal, k, nonce) for each."""
     found: list[tuple[str, int, int]] = []
     for path in sorted(results.glob("*/*.jsonl")):
         records: list[dict[str, Any]] = []
@@ -87,15 +99,24 @@ def unsettled(
         found += [
             (f"{path.parent.name}/{path.name}", r["k"], r["nonce"])
             for r in records
-            if r["event"] == "send" and r["k"] not in settled and r["nonce"] >= nonce
+            if r["event"] == "send"
+            and r["k"] not in settled
+            and r["nonce"] >= nonce
+            and not (r["nonce"] == nonce and same(start))
         ]
     return found
 
 
-def check_settled(results: Path, sender: str, accounting: str, nonce: int) -> None:
+def check_settled(
+    results: Path,
+    sender: str,
+    accounting: str,
+    nonce: int,
+    same: Callable[[dict[str, Any]], bool] = lambda start: False,
+) -> None:
     """Refuse to start while an earlier run left a write from `sender` that can
-    still land, since this run would reuse its nonce."""
-    pending = unsettled(results, sender, accounting, nonce)
+    still land, since this run would reuse its nonce for another write."""
+    pending = unsettled(results, sender, accounting, nonce, same)
     if pending:
         journal, k, at = pending[0]
         raise PreflightError(
@@ -129,8 +150,32 @@ async def _watch(t: Transfer, read_nonce: ReadNonce, deadline: float, poll_s: fl
         await asyncio.sleep(poll_s)
 
 
+async def _resend(
+    t: Transfer, send: Send, watch: asyncio.Task[None], journal: Journal, after_s: float
+) -> None:
+    """Send `t` again, up to RESENDS times, each time its nonce still shows unused
+    `after_s` after the last try. Returns once the watch ends."""
+    while t.resends < RESENDS:
+        done, _ = await asyncio.wait({watch}, timeout=after_s)
+        if done:
+            return
+        if t.seen_nonce != t.nonce:
+            continue  # a node behind proves nothing
+        t.resends += 1
+        journal.write("resend", k=t.k, nonce=t.nonce, at=time.time())
+        try:
+            reply = await send(t.nonce)
+        except Exception as exc:
+            reply = Reply("unknown", None, type(exc).__name__)
+        journal.write("resend reply", k=t.k, nonce=t.nonce, at=time.time(), reply=asdict(reply))
+
+
 def _said(reply: Reply) -> str:
     return " ".join(str(part) for part in (reply.status, reply.detail) if part) or reply.kind
+
+
+def _resent(t: Transfer) -> str:
+    return f", resent {t.resends} time{'s' if t.resends > 1 else ''}" if t.resends else ""
 
 
 async def run_transfers(
@@ -144,6 +189,7 @@ async def run_transfers(
     max_wait_s: float,
     refused_wait_s: float = REFUSED_WAIT_S,
     progress: Callable[[Transfer], None] = lambda t: None,
+    resend_after_s: float = RESEND_AFTER_S,
 ) -> str:
     """Send up to `n` transfers from `start_nonce`, the nonce the run expects,
     appending each to `transfers` as it starts. Returns why the run ended."""
@@ -167,6 +213,8 @@ async def run_transfers(
             t.reply_at = time.time()
             t.sent_at += t.reply.retry_s  # the try that went out
             refused = t.reply.kind == "refused"
+            if t.reply.kind == "unknown":
+                await _resend(t, send, watch, journal, resend_after_s)
             await asyncio.wait({watch}, timeout=refused_wait_s if refused else None)
             watch.cancel()  # no read of it lands on `t` after this
             confirmed = False
@@ -182,7 +230,7 @@ async def run_transfers(
         if t.landed_at is not None:
             t.outcome = "landed"
             if t.reply.kind != "ok":
-                t.note = f"the reply said it failed ({_said(t.reply)}), but it landed"
+                t.note = f"the reply said it failed ({_said(t.reply)}), but it landed{_resent(t)}"
         elif confirmed:
             t.outcome = "refused"
             t.note = _said(t.reply)
@@ -193,7 +241,10 @@ async def run_transfers(
                 else f"the last nonce read showed {t.seen_nonce}"
             )
             reply = "" if t.reply.kind == "ok" else f", reply {_said(t.reply)}"
-            t.note = f"after {t.done_at - t.sent_at:.0f} s {seen}{reply}, so it can still land"
+            t.note = (
+                f"after {t.done_at - t.sent_at:.0f} s {seen}{reply}{_resent(t)}, "
+                "so it can still land"
+            )
         journal.write("outcome", **asdict(t))
         progress(t)
 

@@ -19,12 +19,12 @@ PASS means all N locks landed and were settled, and the funder's balance ended w
 
 ## How a write is judged
 
-Each write is saved to the run's journal, signed at its wallet's next nonce and sent once. A try whose connection never opens sends nothing, so the same signed write goes out again, up to 3 tries. No write is re-signed at another nonce. One after another means each write waits for the previous one to land, and the run stops at the first that does not.
+Each write is saved to the run's journal and signed at its wallet's next nonce. A try whose connection never opens sends nothing, so the same signed write goes out again, up to 3 tries. One after another, a write whose reply was lost also goes out again while its nonce still shows unused 30 s after the last try, up to 3 times: the proxy can cut a request before it reaches Privana, and a nonce takes one write, so at most one copy lands. Writes sent all at once go out once each. No write is re-signed at another nonce. One after another means each write waits for the previous one to land, and the run stops at the first that does not.
 
 Each write ends as one of:
 
 - **landed**: its wallet's nonce moved past it, whatever the reply said. A signature is valid at one nonce and nothing else signs for these wallets, so only this write can move it.
-- **refused**: a 4xx reply, an SDK rejection or no connection on any try, and a nonce read 30 s after the reply still shows it unused. A 400 that Privana raises after sending, when the enclave's reply does not parse, does not count.
+- **refused**: a 4xx reply, an SDK rejection or no connection on any try, and a nonce read 30 s after the reply still shows it unused. A 409, submitted without a seen outcome, does not count, nor does a 400 that Privana raises after sending when the enclave's reply does not parse.
 - **unresolved**: neither, such as no landing within `--max-wait`. It can still land, so the run stops before reusing its nonce and skips the balance check.
 
 ## Setup
@@ -61,7 +61,7 @@ A locks run with N = 100 sends about 300 writes through Privana's one signer ove
 
 Each run writes `results/<UTC time>-<benchmark>/` with `report.md`, `report.json` and its journals. A journal holds the setup, then a line before each send and one with its outcome: nonces, times and replies, never keys, signatures or login tokens. `results/` stays out of git.
 
-Ctrl-C stops a run and still writes the report. A run refuses to start while an earlier journal holds a write that can still land at the nonce it would use. If that write will never land, move its run folder out of `results/`.
+Ctrl-C stops a run and still writes the report. A run refuses to start while an earlier journal holds a write that can still land at the nonce it would use. If that write will never land, move its run folder out of `results/`. A locks run that stopped in funding doesn't block the next locks run with the same `--amount` and `TOKEN_ID`: funding at nonce X always pays player 1000 + X, so that run sends the same write first. Leave the folder in `results/`, so it keeps guarding the nonce until one copy lands.
 
 ## Development
 
