@@ -85,6 +85,7 @@ from src.models.accounting import (
 from src.models.private_read import PrivateReadAuth
 from src.services import onramp as onramp_service
 from src.services.accounting_contract import (
+    SubmissionOutcomeUnknownError,
     SubmissionResult,
     get_accounting_contract_service,
 )
@@ -1096,6 +1097,9 @@ async def lock_funds(payload: LockFundsRequest) -> TransactionSubmissionResponse
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SubmissionOutcomeUnknownError as exc:
+        logger.warning("Lock funds outcome unknown: %s", exc, exc_info=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TransactionRevertedError as exc:
         logger.error("Lock funds transaction reverted: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1113,6 +1117,9 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SubmissionOutcomeUnknownError as exc:
+        logger.warning("Modify lock outcome unknown: %s", exc, exc_info=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TransactionRevertedError as exc:
         logger.error("Modify lock transaction reverted: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1130,6 +1137,9 @@ async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmission
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SubmissionOutcomeUnknownError as exc:
+        logger.warning("Transfer funds outcome unknown: %s", exc, exc_info=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TransactionRevertedError as exc:
         logger.error("Transfer funds transaction reverted: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1210,6 +1220,9 @@ async def transfer_locked_funds(
         return _wrap_submission(submission)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SubmissionOutcomeUnknownError as exc:
+        logger.warning("Transfer locked funds outcome unknown: %s", exc, exc_info=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TransactionRevertedError as exc:
         logger.error("Transfer locked funds transaction reverted: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc

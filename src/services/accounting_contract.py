@@ -22,7 +22,7 @@ from web3.middleware import SignAndSendRawMiddlewareBuilder
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
-from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient
+from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient, TransactionRevertedError
 from src.clients.web3_provider import make_async_web3
 from src.config import (
     CHAIN_NAMES,
@@ -34,6 +34,7 @@ from src.config import (
 from src.models.accounting import HISTORY_KIND_WIRE_NAMES, HistoryKind, parse_chain_type
 from src.models.private_read import PrivateReadAuth
 from src.models.types import Settings
+from src.services.accounting_store import AccountingCall, AccountingStore
 from src.services.cache import AsyncTTLCache
 from src.services.rpc_identity import is_url_verified, require_verified_web3
 
@@ -144,6 +145,10 @@ class SubmissionResult:
     index: Optional[int] = None
 
 
+class SubmissionOutcomeUnknownError(Exception):
+    """Raised when a signed write was submitted and its outcome is unknown."""
+
+
 @dataclass
 class TokenContext:
     """Derived metadata needed to craft withdrawal transactions."""
@@ -193,6 +198,10 @@ class AccountingContractService:
         self._withdrawals_scanned = 0
         self._unresolved_withdrawals: Dict[int, Dict[str, Any]] = {}
         self._withdrawals_lock = asyncio.Lock()
+
+        self._accounting_store = AccountingStore()
+        # One task per key, so a resend during a submission joins it instead of submitting again.
+        self._submissions: Dict[str, asyncio.Task[SubmissionResult]] = {}
 
         self.rofl_client = RoflAppdClient()
         self._chain_web3: Dict[int, AsyncWeb3] = {}
@@ -364,6 +373,52 @@ class AccountingContractService:
                 f"{label} nonce mismatch: got {nonce}, expected {expected_nonce}. "
                 f"The nonce may already have been used by another request."
             )
+
+    async def _submit_signed(
+        self, signer: ChecksumAddress, nonce: int, nonce_fn: str, label: str, data: bytes
+    ) -> SubmissionResult:
+        # Only an exact resend, signature included, shares this key and gets the same outcome.
+        key = Web3.to_hex(Web3.keccak(HexBytes(data)))
+
+        async def submit() -> SubmissionResult:
+            try:
+                earlier = self._accounting_store.get(key)
+                if earlier is not None and earlier.status == "executed":
+                    return SubmissionResult(
+                        submission_id=earlier.submission_id or "", status="submitted"
+                    )
+                await self._validate_user_nonce(signer, nonce, nonce_fn, label)
+
+                self._accounting_store.put(key, AccountingCall(status="pending"))
+                logger.info("Submitting %s %s at nonce %d", label, key, nonce)
+                result = await self._submit(data)
+                self._accounting_store.put(
+                    key, AccountingCall(status="executed", submission_id=result.submission_id)
+                )
+                logger.info("%s %s executed", label, key)
+                return result
+            except TransactionRevertedError:
+                # Only a first submission's revert is final: an earlier one can have landed first.
+                if earlier is None:
+                    self._accounting_store.delete(key)
+                raise
+            finally:
+                del self._submissions[key]
+
+        task = self._submissions.get(key)
+        if task is None:
+            task = asyncio.create_task(submit())
+            self._submissions[key] = task
+        try:
+            # Shielded so cancelling a caller doesn't cancel the submission or its record.
+            return await asyncio.shield(task)
+        except Exception as exc:
+            # A record left after a failure means it was submitted and its outcome is unknown.
+            if self._accounting_store.get(key) is None:
+                raise
+            raise SubmissionOutcomeUnknownError(
+                f"{label} {key} was submitted and its outcome is unknown"
+            ) from exc
 
     async def _get_siwe_auth_address(self) -> ChecksumAddress:
         if self._siwe_auth_address is not None:
@@ -848,7 +903,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "createLockNonces", "createLock")
 
         fn = self.contract.functions.createLock(
             service,
@@ -858,7 +912,9 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            user, nonce, "createLockNonces", "createLock", fn._encode_transaction_data()
+        )
 
     async def modify_lock(self, payload: Dict) -> SubmissionResult:
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
@@ -882,7 +938,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "modifyLockNonces", "modifyLock")
 
         fn = self.contract.functions.modifyLock(
             lock_id,
@@ -891,7 +946,9 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            user, nonce, "modifyLockNonces", "modifyLock", fn._encode_transaction_data()
+        )
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
         to_addr = self._require_address(payload["to_address"], "to_address")
@@ -917,7 +974,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "transferNonces", "Transfer")
 
         fn = self.contract.functions.transferBalance(
             to_addr,
@@ -926,7 +982,9 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            user, nonce, "transferNonces", "Transfer", fn._encode_transaction_data()
+        )
 
     async def transfer_locked_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
@@ -939,14 +997,6 @@ class AccountingContractService:
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
 
-        contract_reader = self._get_reader_contract()
-        expected_nonce = await contract_reader.functions.transferLockedNonces(service).call()
-        if nonce != expected_nonce:
-            raise ValueError(
-                f"transferFromLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                f"The nonce may already have been used by another request."
-            )
-
         fn = self.contract.functions.transferFromLock(
             user,
             to_addr,
@@ -955,7 +1005,13 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            service,
+            nonce,
+            "transferLockedNonces",
+            "transferFromLock",
+            fn._encode_transaction_data(),
+        )
 
     async def transfer_to_lock(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")

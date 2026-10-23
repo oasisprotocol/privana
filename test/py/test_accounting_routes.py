@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from web3 import Web3
@@ -15,7 +16,7 @@ from src.config.chain_config import (
     get_finality_depth,
 )
 from src.models.private_read import PrivateReadAuth
-from src.services.accounting_contract import SubmissionResult
+from src.services.accounting_contract import SubmissionOutcomeUnknownError, SubmissionResult
 from src.services.deposit_processor import DepositProcessor
 
 BENEFICIARY = "0x" + "bb" * 20
@@ -820,3 +821,54 @@ def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
     assert kwargs["chain_id"] == 23295
     assert kwargs["deposit_address"] == "0x" + "aa" * 20
     assert kwargs["beneficiary"] == BENEFICIARY
+
+
+@pytest.mark.parametrize(
+    "path, method, body",
+    [
+        (
+            "lock",
+            "lock_funds",
+            {
+                "service_address": SERVICE_ADDRESS,
+                "token_id": "0x" + "aa" * 32,
+                "amount": "1000",
+                "expiry": 9999999999,
+            },
+        ),
+        ("modify-lock", "modify_lock", {"lock_id": 1, "amount": "0", "new_expiry": 9999999999}),
+        (
+            "transfer",
+            "transfer_funds",
+            {"to_address": BENEFICIARY, "token_id": "0x" + "aa" * 32, "amount": "1000"},
+        ),
+        (
+            "transfer-locked",
+            "transfer_locked_funds",
+            {
+                "user_address": BENEFICIARY,
+                "lock_id": 1,
+                "to_address": BENEFICIARY,
+                "amount": "1000",
+                "service_address": SERVICE_ADDRESS,
+            },
+        ),
+    ],
+)
+def test_signed_write_route_maps_unknown_outcome_to_409(monkeypatch, path, method, body) -> None:
+    mock_service = MagicMock()
+    setattr(
+        mock_service,
+        method,
+        AsyncMock(
+            side_effect=SubmissionOutcomeUnknownError("submitted and its outcome is unknown")
+        ),
+    )
+    monkeypatch.setattr(routes, "_service", mock_service)
+
+    response = _make_client().post(
+        f"/v1/accounting/funds/{path}", json={**body, "nonce": 0, "signature": "0xabcd"}
+    )
+
+    assert response.status_code == 409
+    assert "outcome is unknown" in response.json()["detail"]
