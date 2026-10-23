@@ -2,6 +2,7 @@ import "./deploy";
 import "./localnetToken";
 import "./show";
 import "./tokens";
+import "./history";
 import "./sign";
 import "./accounts";
 import "./withdraw";
