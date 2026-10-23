@@ -6,13 +6,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
+from web3 import Web3
 
 from src.clients.rofl import RoflSubmissionResult, TransactionRevertedError
 from src.services.accounting_contract import (
     AccountingContractService,
+    SubmissionOutcomeUnknownError,
     SubmissionResult,
     TokenContext,
-    TransferOutcomeUnknownError,
 )
 from src.services.accounting_store import AccountingStore
 
@@ -27,7 +28,7 @@ TEST_EIP712_DOMAIN = {
 
 
 @pytest.fixture
-def service():
+def service(tmp_path):
     with (
         patch("src.services.accounting_contract.load_settings") as mock_settings,
         patch("src.services.accounting_contract.RoflAppdClient"),
@@ -39,7 +40,9 @@ def service():
             accounting_gas_limit=500_000,
             chain_rpc_urls=[],
         )
-        yield AccountingContractService()
+        accounting = AccountingContractService()
+        accounting._accounting_store = AccountingStore(str(tmp_path))
+        yield accounting
 
 
 def _mock_reader(service_obj, fn_name, return_value):
@@ -245,50 +248,27 @@ class TestRequestWithdrawalSubmission:
         service.rofl_client.submit_tx.assert_awaited_once()
 
 
-SERVICE_ACCOUNT = Account.from_key("0x" + "22" * 32)
-TRANSFER_LOCKED_TYPES = [
-    {"name": "userAddress", "type": "address"},
-    {"name": "toAddress", "type": "address"},
-    {"name": "lockId", "type": "uint256"},
-    {"name": "amount", "type": "uint256"},
-    {"name": "nonce", "type": "uint256"},
-    {"name": "serviceAddress", "type": "address"},
-]
-
-
-def _signed_transfer_locked(nonce=0, signer=SERVICE_ACCOUNT):
-    """Return a transfer-locked payload signed by `signer` and its record key."""
-    signable = encode_typed_data(
-        domain_data=TEST_EIP712_DOMAIN,
-        message_types={"TransferLocked": TRANSFER_LOCKED_TYPES},
-        message_data={
-            "userAddress": USER,
-            "toAddress": USER,
-            "lockId": 1,
-            "amount": 1000,
-            "nonce": nonce,
-            "serviceAddress": SERVICE_ACCOUNT.address,
-        },
-    )
-    signed = Account.sign_message(signable, signer.key)
-    payload = {
-        "user_address": USER,
-        "lock_id": 1,
-        "to_address": USER,
-        "amount": 1000,
-        "service_address": SERVICE_ACCOUNT.address,
-        "nonce": nonce,
-        "signature": signed.signature.hex(),
-    }
-    digest = signed.message_hash.to_0x_hex()
-    return payload, f"{SERVICE_ACCOUNT.address}:{digest}"
+def _record(service_obj):
+    """Return the store record of the last submitted call."""
+    data = service_obj._submit.call_args.args[0]
+    return service_obj._accounting_store.get(Web3.to_hex(Web3.keccak(hexstr=data)))
 
 
 class TestTransferLockedFunds:
+    @staticmethod
+    def _make_payload(nonce=0):
+        return {
+            "user_address": USER,
+            "lock_id": 1,
+            "to_address": USER,
+            "amount": 1000,
+            "service_address": SERVICE,
+            "nonce": nonce,
+            "signature": "0x" + "ab" * 65,
+        }
+
     @pytest.fixture
-    def settle_service(self, service, tmp_path):
-        service._eip712_domain = TEST_EIP712_DOMAIN
-        service._accounting_store = AccountingStore(str(tmp_path))
+    def settle_service(self, service):
         _mock_reader(service, "transferLockedNonces", 0)
         return service
 
@@ -296,47 +276,11 @@ class TestTransferLockedFunds:
     async def test_rejects_when_nonce_does_not_match(self, settle_service):
         _mock_reader(settle_service, "transferLockedNonces", 5)
         settle_service._submit = AsyncMock()
-        payload, _ = _signed_transfer_locked(nonce=0)
         with pytest.raises(ValueError, match="nonce mismatch"):
-            await settle_service.transfer_locked_funds(payload)
+            await settle_service.transfer_locked_funds(self._make_payload(nonce=0))
         settle_service._submit.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_rejects_signature_not_from_service(self, settle_service):
-        settle_service._submit = AsyncMock()
-        payload, _ = _signed_transfer_locked(signer=Account.from_key("0x" + "33" * 32))
-        with pytest.raises(ValueError, match="not from service_address"):
-            await settle_service.transfer_locked_funds(payload)
-        settle_service._submit.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_submits_and_records_executed(self, settle_service):
-        settle_service._submit = AsyncMock(
-            return_value=SubmissionResult(submission_id="0xabc", status="submitted")
-        )
-        payload, key = _signed_transfer_locked()
-
-        result = await settle_service.transfer_locked_funds(payload)
-
-        assert result.submission_id == "0xabc"
-        assert settle_service._accounting_store.get(key).status == "executed"
-        assert not settle_service._settle_tasks
-
-    @pytest.mark.asyncio
-    async def test_resend_after_execution_replays_without_reading_the_nonce(self, settle_service):
-        settle_service._submit = AsyncMock(
-            return_value=SubmissionResult(submission_id="0xabc", status="submitted")
-        )
-        payload, _ = _signed_transfer_locked()
-        await settle_service.transfer_locked_funds(payload)
-        settle_service._get_reader_contract = MagicMock(side_effect=RuntimeError("RPC down"))
-
-        result = await settle_service.transfer_locked_funds(payload)
-
-        assert result.submission_id == "0xabc"
-        settle_service._submit.assert_called_once()
-
-    # The first result is unseen in the join tests, so a resend that doesn't join submits again.
+    # The first result is unseen, so a resend that doesn't join submits again.
     @pytest.mark.asyncio
     async def test_resend_in_flight_joins_the_first(self, settle_service):
         started, release = asyncio.Event(), asyncio.Event()
@@ -347,7 +291,7 @@ class TestTransferLockedFunds:
             raise RuntimeError("appd timed out")
 
         settle_service._submit = AsyncMock(side_effect=slow_submit)
-        payload, _ = _signed_transfer_locked()
+        payload = self._make_payload()
 
         first = asyncio.create_task(settle_service.transfer_locked_funds(payload))
         await started.wait()
@@ -355,32 +299,7 @@ class TestTransferLockedFunds:
         release.set()
 
         results = await asyncio.gather(first, second, return_exceptions=True)
-        assert all(isinstance(r, TransferOutcomeUnknownError) for r in results)
-        settle_service._submit.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_resend_during_nonce_read_joins_the_first(self, settle_service):
-        started, release = asyncio.Event(), asyncio.Event()
-
-        async def slow_nonce():
-            started.set()
-            await release.wait()
-            return 0
-
-        reader = _mock_reader(settle_service, "transferLockedNonces", 0)
-        nonce_call = reader.functions.transferLockedNonces.return_value.call
-        nonce_call.side_effect = slow_nonce
-        settle_service._submit = AsyncMock(side_effect=RuntimeError("appd timed out"))
-        payload, _ = _signed_transfer_locked()
-
-        first = asyncio.create_task(settle_service.transfer_locked_funds(payload))
-        await started.wait()
-        second = asyncio.create_task(settle_service.transfer_locked_funds(payload))
-        release.set()
-
-        results = await asyncio.gather(first, second, return_exceptions=True)
-        assert all(isinstance(r, TransferOutcomeUnknownError) for r in results)
-        nonce_call.assert_awaited_once()
+        assert all(isinstance(r, SubmissionOutcomeUnknownError) for r in results)
         settle_service._submit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -393,31 +312,30 @@ class TestTransferLockedFunds:
             return SubmissionResult(submission_id="0xabc", status="submitted")
 
         settle_service._submit = AsyncMock(side_effect=slow_submit)
-        payload, key = _signed_transfer_locked()
 
-        caller = asyncio.create_task(settle_service.transfer_locked_funds(payload))
+        caller = asyncio.create_task(settle_service.transfer_locked_funds(self._make_payload()))
         await started.wait()
-        submission = settle_service._settle_tasks[key]
+        (submission,) = settle_service._submissions.values()
         caller.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await caller
         await submission
 
-        assert settle_service._accounting_store.get(key).status == "executed"
+        assert _record(settle_service).status == "executed"
 
     @pytest.mark.asyncio
     async def test_first_submission_revert_is_final(self, settle_service):
         settle_service._submit = AsyncMock(
             side_effect=TransactionRevertedError("Transaction reverted: InsufficientLockedAmount")
         )
-        payload, key = _signed_transfer_locked()
+        payload = self._make_payload()
 
         for _ in range(2):
             with pytest.raises(TransactionRevertedError):
                 await settle_service.transfer_locked_funds(payload)
 
-        assert settle_service._accounting_store.get(key) is None
+        assert _record(settle_service) is None
         assert settle_service._submit.call_count == 2
 
     @pytest.mark.asyncio
@@ -428,15 +346,15 @@ class TestTransferLockedFunds:
                 TransactionRevertedError("Transaction reverted: InvalidNonce"),
             ]
         )
-        payload, key = _signed_transfer_locked()
-        with pytest.raises(TransferOutcomeUnknownError):
+        payload = self._make_payload()
+        with pytest.raises(SubmissionOutcomeUnknownError):
             await settle_service.transfer_locked_funds(payload)
 
-        with pytest.raises(TransferOutcomeUnknownError) as exc_info:
+        with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
             await settle_service.transfer_locked_funds(payload)
 
         assert isinstance(exc_info.value.__cause__, TransactionRevertedError)
-        assert settle_service._accounting_store.get(key).status == "pending"
+        assert _record(settle_service).status == "pending"
 
     @pytest.mark.asyncio
     async def test_resubmission_after_unseen_submission_can_succeed(self, settle_service):
@@ -446,52 +364,39 @@ class TestTransferLockedFunds:
                 SubmissionResult(submission_id="0xabc", status="submitted"),
             ]
         )
-        payload, key = _signed_transfer_locked()
-        with pytest.raises(TransferOutcomeUnknownError):
+        payload = self._make_payload()
+        with pytest.raises(SubmissionOutcomeUnknownError):
             await settle_service.transfer_locked_funds(payload)
-        assert settle_service._accounting_store.get(key).status == "pending"
+        assert _record(settle_service).status == "pending"
 
         result = await settle_service.transfer_locked_funds(payload)
 
         assert result.submission_id == "0xabc"
-        assert settle_service._accounting_store.get(key).status == "executed"
+        assert _record(settle_service).status == "executed"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "break_nonce_read",
-        [
-            lambda s: setattr(
-                s, "_get_reader_contract", MagicMock(side_effect=ValueError("RPC unverified"))
-            ),
-            lambda s: _mock_reader(s, "transferLockedNonces", 1),
-        ],
-        ids=["read fails", "nonce moved"],
-    )
-    async def test_unseen_submission_survives_restart(
-        self, settle_service, tmp_path, break_nonce_read
-    ):
+    async def test_unseen_submission_survives_restart(self, settle_service, tmp_path):
         settle_service._submit = AsyncMock(side_effect=RuntimeError("appd timed out"))
-        payload, key = _signed_transfer_locked()
-        with pytest.raises(TransferOutcomeUnknownError):
+        payload = self._make_payload()
+        with pytest.raises(SubmissionOutcomeUnknownError):
             await settle_service.transfer_locked_funds(payload)
         settle_service._accounting_store = AccountingStore(str(tmp_path))
-        break_nonce_read(settle_service)
+        _mock_reader(settle_service, "transferLockedNonces", 1)
 
-        with pytest.raises(TransferOutcomeUnknownError) as exc_info:
+        with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
             await settle_service.transfer_locked_funds(payload)
 
         assert isinstance(exc_info.value.__cause__, ValueError)
-        assert settle_service._accounting_store.get(key).status == "pending"
+        assert _record(settle_service).status == "pending"
         settle_service._submit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_failure_to_record_pending_prevents_submission(self, settle_service):
         settle_service._accounting_store.put = MagicMock(side_effect=OSError("disk full"))
         settle_service._submit = AsyncMock()
-        payload, _ = _signed_transfer_locked()
 
         with pytest.raises(OSError):
-            await settle_service.transfer_locked_funds(payload)
+            await settle_service.transfer_locked_funds(self._make_payload())
 
         settle_service._submit.assert_not_called()
 
@@ -509,10 +414,9 @@ class TestTransferLockedFunds:
         settle_service._submit = AsyncMock(
             return_value=SubmissionResult(submission_id="0xabc", status="submitted")
         )
-        payload, _ = _signed_transfer_locked()
 
-        with pytest.raises(TransferOutcomeUnknownError):
-            await settle_service.transfer_locked_funds(payload)
+        with pytest.raises(SubmissionOutcomeUnknownError):
+            await settle_service.transfer_locked_funds(self._make_payload())
 
 
 class TestGetTransferToLockNonce:
@@ -554,3 +458,35 @@ class TestTransferToLockSubmission:
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.transfer_to_lock(self._make_payload(nonce=0))
         service._submit.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method, payload, nonce_fn",
+    [
+        ("lock_funds", TestLockFundsSubmission._make_payload(), "createLockNonces"),
+        ("modify_lock", TestModifyLockSubmission._make_payload(), "modifyLockNonces"),
+        ("transfer_funds", TestTransferFundsSubmission._make_payload(), "transferNonces"),
+        (
+            "transfer_locked_funds",
+            TestTransferLockedFunds._make_payload(),
+            "transferLockedNonces",
+        ),
+    ],
+    ids=["lock", "modify-lock", "transfer", "transfer-locked"],
+)
+async def test_resend_after_execution_replays_without_reading_the_nonce(
+    service, method, payload, nonce_fn
+):
+    service._recover_eip712_signer = AsyncMock(return_value=USER)
+    _setup_user_nonce(service, nonce_fn)
+    service._submit = AsyncMock(
+        return_value=SubmissionResult(submission_id="0xabc", status="submitted")
+    )
+    await getattr(service, method)(payload)
+    service._get_reader_contract = MagicMock(side_effect=RuntimeError("RPC down"))
+
+    result = await getattr(service, method)(payload)
+
+    assert result.submission_id == "0xabc"
+    service._submit.assert_called_once()

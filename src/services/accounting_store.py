@@ -21,7 +21,7 @@ class AccountingCall:
 
 
 class AccountingStore:
-    """Disk-backed Accounting calls, keyed by signer and EIP-712 digest."""
+    """Disk-backed Accounting calls, keyed by the hash of their calldata."""
 
     def __init__(self, state_dir: str = DEFAULT_STATE_DIR) -> None:
         # No size eviction, and FULL sync keeps a pending record through a host crash.

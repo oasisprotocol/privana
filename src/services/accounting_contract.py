@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from eth_account import Account
-from eth_account.messages import SignableMessage, encode_typed_data
+from eth_account.messages import encode_typed_data
 from eth_account.signers.local import LocalAccount
 from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
@@ -145,8 +145,8 @@ class SubmissionResult:
     index: Optional[int] = None
 
 
-class TransferOutcomeUnknownError(Exception):
-    """Raised when a transfer was submitted and its outcome is unknown."""
+class SubmissionOutcomeUnknownError(Exception):
+    """Raised when a signed write was submitted and its outcome is unknown."""
 
 
 @dataclass
@@ -201,7 +201,7 @@ class AccountingContractService:
 
         self._accounting_store = AccountingStore()
         # One task per key, so a resend during a submission joins it instead of submitting again.
-        self._settle_tasks: Dict[str, asyncio.Task[SubmissionResult]] = {}
+        self._submissions: Dict[str, asyncio.Task[SubmissionResult]] = {}
 
         self.rofl_client = RoflAppdClient()
         self._chain_web3: Dict[int, AsyncWeb3] = {}
@@ -350,29 +350,18 @@ class AccountingContractService:
         message: Dict[str, Any],
         signature: HexBytes,
     ) -> ChecksumAddress:
-        signable = await self._eip712_signable(primary_type, message_types, message)
+        domain = await self._get_eip712_domain()
         try:
+            signable = encode_typed_data(
+                domain_data=domain,
+                message_types={primary_type: message_types},
+                message_data=message,
+            )
             signer = Account.recover_message(signable, signature=signature)
         except Exception as exc:
             raise ValueError("Invalid EIP-712 signature") from exc
 
         return _to_checksum(signer)
-
-    async def _eip712_signable(
-        self,
-        primary_type: str,
-        message_types: list[Dict[str, str]],
-        message: Dict[str, Any],
-    ) -> SignableMessage:
-        domain = await self._get_eip712_domain()
-        try:
-            return encode_typed_data(
-                domain_data=domain,
-                message_types={primary_type: message_types},
-                message_data=message,
-            )
-        except Exception as exc:
-            raise ValueError("Invalid EIP-712 signature") from exc
 
     async def _validate_user_nonce(
         self, user: ChecksumAddress, nonce: int, nonce_fn: str, label: str
@@ -384,6 +373,52 @@ class AccountingContractService:
                 f"{label} nonce mismatch: got {nonce}, expected {expected_nonce}. "
                 f"The nonce may already have been used by another request."
             )
+
+    async def _submit_signed(
+        self, signer: ChecksumAddress, nonce: int, nonce_fn: str, label: str, data: bytes
+    ) -> SubmissionResult:
+        # Only an exact resend, signature included, shares this key and gets the same outcome.
+        key = Web3.to_hex(Web3.keccak(HexBytes(data)))
+
+        async def submit() -> SubmissionResult:
+            try:
+                earlier = self._accounting_store.get(key)
+                if earlier is not None and earlier.status == "executed":
+                    return SubmissionResult(
+                        submission_id=earlier.submission_id or "", status="submitted"
+                    )
+                await self._validate_user_nonce(signer, nonce, nonce_fn, label)
+
+                self._accounting_store.put(key, AccountingCall(status="pending"))
+                logger.info("Submitting %s %s at nonce %d", label, key, nonce)
+                result = await self._submit(data)
+                self._accounting_store.put(
+                    key, AccountingCall(status="executed", submission_id=result.submission_id)
+                )
+                logger.info("%s %s executed", label, key)
+                return result
+            except TransactionRevertedError:
+                # Only a first submission's revert is final: an earlier one can have landed first.
+                if earlier is None:
+                    self._accounting_store.delete(key)
+                raise
+            finally:
+                del self._submissions[key]
+
+        task = self._submissions.get(key)
+        if task is None:
+            task = asyncio.create_task(submit())
+            self._submissions[key] = task
+        try:
+            # Shielded so cancelling a caller doesn't cancel the submission or its record.
+            return await asyncio.shield(task)
+        except Exception as exc:
+            # A record left after a failure means it was submitted and its outcome is unknown.
+            if self._accounting_store.get(key) is None:
+                raise
+            raise SubmissionOutcomeUnknownError(
+                f"{label} {key} was submitted and its outcome is unknown"
+            ) from exc
 
     async def _get_siwe_auth_address(self) -> ChecksumAddress:
         if self._siwe_auth_address is not None:
@@ -868,7 +903,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "createLockNonces", "createLock")
 
         fn = self.contract.functions.createLock(
             service,
@@ -878,7 +912,9 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            user, nonce, "createLockNonces", "createLock", fn._encode_transaction_data()
+        )
 
     async def modify_lock(self, payload: Dict) -> SubmissionResult:
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
@@ -902,7 +938,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "modifyLockNonces", "modifyLock")
 
         fn = self.contract.functions.modifyLock(
             lock_id,
@@ -911,7 +946,9 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            user, nonce, "modifyLockNonces", "modifyLock", fn._encode_transaction_data()
+        )
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
         to_addr = self._require_address(payload["to_address"], "to_address")
@@ -937,7 +974,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "transferNonces", "Transfer")
 
         fn = self.contract.functions.transferBalance(
             to_addr,
@@ -946,7 +982,9 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit_signed(
+            user, nonce, "transferNonces", "Transfer", fn._encode_transaction_data()
+        )
 
     async def transfer_locked_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
@@ -958,34 +996,6 @@ class AccountingContractService:
         service = self._require_address(payload["service_address"], "service_address")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-        message_types = [
-            {"name": "userAddress", "type": "address"},
-            {"name": "toAddress", "type": "address"},
-            {"name": "lockId", "type": "uint256"},
-            {"name": "amount", "type": "uint256"},
-            {"name": "nonce", "type": "uint256"},
-            {"name": "serviceAddress", "type": "address"},
-        ]
-        message = {
-            "userAddress": user,
-            "toAddress": to_addr,
-            "lockId": lock_id,
-            "amount": amount,
-            "nonce": nonce,
-            "serviceAddress": service,
-        }
-        signer = await self._recover_eip712_signer(
-            "TransferLocked", message_types, message, signature
-        )
-        # The record key leaves out the signature, so only the service's own signature is accepted.
-        if signer != service:
-            raise ValueError("TransferLocked signature is not from service_address")
-        # Every resend of the same signed transfer shares this key, so it gets the same outcome.
-        signable = await self._eip712_signable("TransferLocked", message_types, message)
-        digest = Web3.to_hex(
-            Web3.keccak(b"\x19" + signable.version + signable.header + signable.body)
-        )
-        key = f"{service}:{digest}"
 
         fn = self.contract.functions.transferFromLock(
             user,
@@ -995,50 +1005,13 @@ class AccountingContractService:
             nonce,
             signature,
         )
-
-        task = self._settle_tasks.get(key)
-        if task is None:
-            task = asyncio.create_task(
-                self._settle(key, service, nonce, fn._encode_transaction_data())
-            )
-            self._settle_tasks[key] = task
-        try:
-            # Shielded so cancelling a caller doesn't cancel the submission or its record.
-            return await asyncio.shield(task)
-        except Exception as exc:
-            # A record left after a failure means it was submitted and its outcome is unknown.
-            if self._accounting_store.get(key) is None:
-                raise
-            raise TransferOutcomeUnknownError(
-                f"Transfer {key} was submitted and its outcome is unknown"
-            ) from exc
-
-    async def _settle(
-        self, key: str, service: ChecksumAddress, nonce: int, data: bytes
-    ) -> SubmissionResult:
-        try:
-            earlier = self._accounting_store.get(key)
-            if earlier is not None and earlier.status == "executed":
-                return SubmissionResult(
-                    submission_id=earlier.submission_id or "", status="submitted"
-                )
-            await self._validate_user_nonce(
-                service, nonce, "transferLockedNonces", "transferFromLock"
-            )
-
-            self._accounting_store.put(key, AccountingCall(status="pending"))
-            result = await self._submit(data)
-            self._accounting_store.put(
-                key, AccountingCall(status="executed", submission_id=result.submission_id)
-            )
-            return result
-        except TransactionRevertedError:
-            # Only a first submission's revert is final: an earlier one can have landed first.
-            if earlier is None:
-                self._accounting_store.delete(key)
-            raise
-        finally:
-            del self._settle_tasks[key]
+        return await self._submit_signed(
+            service,
+            nonce,
+            "transferLockedNonces",
+            "transferFromLock",
+            fn._encode_transaction_data(),
+        )
 
     async def transfer_to_lock(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")

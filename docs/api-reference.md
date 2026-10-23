@@ -23,7 +23,8 @@ If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`
 - **Amounts** are integers in the token's base units (wei for ETH, smallest unit for ERC-20). Strings are accepted; scientific notation is parsed with `Decimal` to preserve precision.
 - **Signatures** are EIP-712 typed-data signatures. User-signed accounting operations are defined in `solidity/contracts/EIP712SignatureVerifier.sol`.
 - **Nonces** are per-operation. User-signed operations key nonces by recovered signer; service-signed lock operations key nonces by service. Always fetch the current nonce immediately before signing.
-- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
+- **Resends** of the same signed body are safe on `POST /funds/lock`, `/funds/modify-lock`, `/funds/transfer` and `/funds/transfer-locked`. A resend joins the write in flight, or returns the original reply for up to seven days after Privana has seen it succeed. Privana keeps these replies on its machine, so a machine replacement drops them. `409` means Privana submitted the write and its outcome is unknown: it landed if the signer's nonce has moved past it and the signer signed nothing else at that nonce. If the nonce has not moved, resend the same body.
+- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `409` for a submitted lock or transfer whose outcome is unknown, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
 
 ### User-Signed EIP-712 Types
 
@@ -221,7 +222,7 @@ Locks are escrow primitives: a user locks funds for a service, and the service c
 | `GET /funds/modify-lock/nonce/{user}` | — | Fetch nonce for `ModifyLock` EIP-712 |
 | `POST /funds/modify-lock` | user | Add funds and/or extend expiry (`{lock_id, amount, new_expiry, nonce, signature}`). Pure no-ops are rejected. |
 | `GET /funds/transfer-locked/nonce/{service}` | — | Fetch nonce for `TransferFromLock` EIP-712 |
-| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`). Resending the same signed transfer is safe: it joins the one in flight, or returns the original reply for up to seven days after Privana has seen it succeed. `409` means Privana submitted it and its outcome is unknown: it landed if the service's nonce has moved past it and the service signed nothing else at that nonce. If the nonce has not moved, resend the same body. |
+| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`) |
 | `POST /funds/withdraw-from-lock` | user (auth) | User withdraws locked funds directly to an external destination (`{to_address, lock_id, amount, nonce, signature}` — the user is resolved from the auth header, not the body) |
 | `POST /funds/unlock` | — | Unlock a single expired lock (`{user_address, lock_id}`, no signature; reverts if not yet expired) |
 | `POST /funds/unlock-all-expired` | — | Unlock every expired lock for a user in one tx |
@@ -297,7 +298,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a provider webhook signature/JWT that fails verification. |
 | `403 Forbidden` | On-ramp record belongs to a different user or deposit address. |
 | `404 Not Found` | Status check for an unknown deposit. |
-| `409 Conflict` | A `POST /funds/transfer-locked` transfer was submitted and its outcome is unknown. That endpoint's row says how to tell whether it landed. |
+| `409 Conflict` | A lock, lock change or transfer was submitted and its outcome is unknown. **Resends** under Conventions says how to tell whether it landed. |
 | `413 Payload Too Large` | A provider webhook body exceeds the 1 MiB cap. |
 | `422 Unprocessable Entity` | FastAPI/Pydantic request-model validation, or a contract revert after a parsed request reaches the chain. Contract-revert responses carry the revert reason when available. |
 | `429 Too Many Requests` | An auth/on-ramp rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
