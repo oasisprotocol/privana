@@ -825,7 +825,7 @@ def test_pending_deposits_accepts_sapphire_chain_23295(monkeypatch) -> None:
 def test_transfer_locked_route_maps_unknown_outcome_to_409(monkeypatch) -> None:
     mock_service = MagicMock()
     mock_service.transfer_locked_funds = AsyncMock(
-        side_effect=TransferOutcomeUnknownError("submitted earlier without a seen result")
+        side_effect=TransferOutcomeUnknownError("submitted and its outcome is unknown")
     )
     monkeypatch.setattr(routes, "_service", mock_service)
 
@@ -843,4 +843,4 @@ def test_transfer_locked_route_maps_unknown_outcome_to_409(monkeypatch) -> None:
     )
 
     assert response.status_code == 409
-    assert "without a seen result" in response.json()["detail"]
+    assert "outcome is unknown" in response.json()["detail"]

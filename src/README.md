@@ -208,7 +208,7 @@ Key file: `services/token_info_bootstrap.py`.
 | What | Where | Lifecycle |
 |------|-------|-----------|
 | Sweep records | `/data/sweep-engine/sweep_<deposit_id>.json` (one file per active sweep) | Created on `PENDING`, atomically replaced on each transition, deleted after credit. Survives ROFL restarts. |
-| Transfer-locked submissions | diskcache in `/data/accounting`, keyed by the transfer's EIP-712 digest | Written as pending before submitting, marked executed when appd reports success, deleted when a first submission reverts. Expire after seven days. Survive ROFL restarts. |
+| Transfer-locked submissions | diskcache in `/data/accounting`, keyed by the service and the transfer's EIP-712 digest | Written as pending before submitting, marked executed when appd reports success, deleted when a first submission reverts. Expire after seven days. Survive ROFL restarts. |
 | JWT signing key | Derived in-memory from ROFL TEE seed at startup | Re-derived on each start; deterministic per ROFL app. |
 | AuthToken encryption key | Derived in-memory from ROFL TEE seed; **also synced to `AccountingSiweAuth` on Sapphire** | At first start, `auth_token_keys.sync_key_to_contract()` writes it on-chain so view-call SIWE token decryption works inside the contract. |
 | On-ramp intent key ring | Derived in-memory from ROFL raw-256 key IDs at startup | Re-derived on each start; deterministic per ROFL app and key ID. |

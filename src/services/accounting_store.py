@@ -21,25 +21,24 @@ class AccountingCall:
 
 
 class AccountingStore:
-    """Disk-backed Accounting calls, keyed by the call's EIP-712 digest."""
+    """Disk-backed Accounting calls, keyed by signer and EIP-712 digest."""
 
     def __init__(self, state_dir: str = DEFAULT_STATE_DIR) -> None:
         # No size eviction, and FULL sync keeps a pending record through a host crash.
         self._cache = Cache(
             state_dir,
             eviction_policy="none",
-            sqlite_journal_mode="WAL",
             sqlite_synchronous=2,
         )
 
-    def get(self, digest: str) -> Optional[AccountingCall]:
-        value = self._cache.get(digest, default=None)
+    def get(self, key: str) -> Optional[AccountingCall]:
+        value = self._cache.get(key)
         if value is None:
             return None
         return AccountingCall(**value)
 
-    def put(self, digest: str, call: AccountingCall) -> None:
-        self._cache.set(digest, asdict(call), expire=_RECORD_TTL_SECONDS)
+    def put(self, key: str, call: AccountingCall) -> None:
+        self._cache.set(key, asdict(call), expire=_RECORD_TTL_SECONDS)
 
-    def delete(self, digest: str) -> None:
-        self._cache.delete(digest)
+    def delete(self, key: str) -> None:
+        self._cache.delete(key)

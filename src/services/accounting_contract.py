@@ -146,7 +146,7 @@ class SubmissionResult:
 
 
 class TransferOutcomeUnknownError(Exception):
-    """Raised when Privana submitted a transfer without seeing its result."""
+    """Raised when a transfer was submitted and its outcome is unknown."""
 
 
 @dataclass
@@ -199,7 +199,8 @@ class AccountingContractService:
         self._unresolved_withdrawals: Dict[int, Dict[str, Any]] = {}
         self._withdrawals_lock = asyncio.Lock()
 
-        self._accounting_store: Optional[AccountingStore] = None
+        self._accounting_store = AccountingStore()
+        # One task per key, so a resend during a submission joins it instead of submitting again.
         self._settle_tasks: Dict[str, asyncio.Task[SubmissionResult]] = {}
 
         self.rofl_client = RoflAppdClient()
@@ -371,12 +372,7 @@ class AccountingContractService:
                 message_data=message,
             )
         except Exception as exc:
-            raise ValueError("Invalid EIP-712 message") from exc
-
-    def _get_accounting_store(self) -> AccountingStore:
-        if self._accounting_store is None:
-            self._accounting_store = AccountingStore()
-        return self._accounting_store
+            raise ValueError("Invalid EIP-712 signature") from exc
 
     async def _validate_user_nonce(
         self, user: ChecksumAddress, nonce: int, nonce_fn: str, label: str
@@ -981,13 +977,15 @@ class AccountingContractService:
         signer = await self._recover_eip712_signer(
             "TransferLocked", message_types, message, signature
         )
+        # The record key leaves out the signature, so only the service's own signature is accepted.
         if signer != service:
             raise ValueError("TransferLocked signature is not from service_address")
-        # Every resend of the same signed transfer shares this digest, so it gets the same outcome.
+        # Every resend of the same signed transfer shares this key, so it gets the same outcome.
         signable = await self._eip712_signable("TransferLocked", message_types, message)
         digest = Web3.to_hex(
             Web3.keccak(b"\x19" + signable.version + signable.header + signable.body)
         )
+        key = f"{service}:{digest}"
 
         fn = self.contract.functions.transferFromLock(
             user,
@@ -998,68 +996,49 @@ class AccountingContractService:
             signature,
         )
 
-        task = self._settle_tasks.get(digest)
+        task = self._settle_tasks.get(key)
         if task is None:
             task = asyncio.create_task(
-                self._settle(digest, service, nonce, fn._encode_transaction_data())
+                self._settle(key, service, nonce, fn._encode_transaction_data())
             )
-            self._settle_tasks[digest] = task
-        # Shielded so a dropped connection still lets the outcome be recorded.
-        return await asyncio.shield(task)
+            self._settle_tasks[key] = task
+        try:
+            # Shielded so cancelling a caller doesn't cancel the submission or its record.
+            return await asyncio.shield(task)
+        except Exception as exc:
+            # A record left after a failure means it was submitted and its outcome is unknown.
+            if self._accounting_store.get(key) is None:
+                raise
+            raise TransferOutcomeUnknownError(
+                f"Transfer {key} was submitted and its outcome is unknown"
+            ) from exc
 
     async def _settle(
-        self, digest: str, service: ChecksumAddress, nonce: int, data: bytes
+        self, key: str, service: ChecksumAddress, nonce: int, data: bytes
     ) -> SubmissionResult:
         try:
-            store = self._get_accounting_store()
-            earlier = store.get(digest)
+            earlier = self._accounting_store.get(key)
             if earlier is not None and earlier.status == "executed":
                 return SubmissionResult(
                     submission_id=earlier.submission_id or "", status="submitted"
                 )
+            await self._validate_user_nonce(
+                service, nonce, "transferLockedNonces", "transferFromLock"
+            )
 
-            try:
-                contract = self._get_reader_contract()
-                expected_nonce = await contract.functions.transferLockedNonces(service).call()
-            except Exception as exc:
-                if earlier is not None:
-                    raise TransferOutcomeUnknownError(
-                        "This transfer was submitted earlier without a seen result, "
-                        "and reading the service's transferFromLock nonce failed"
-                    ) from exc
-                raise
-            if nonce != expected_nonce:
-                if earlier is not None:
-                    raise TransferOutcomeUnknownError(
-                        "This transfer was submitted earlier without a seen result, "
-                        f"and the service's transferFromLock nonce is now {expected_nonce}"
-                    )
-                raise ValueError(
-                    f"transferFromLock nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                    f"The nonce may already have been used by another request."
-                )
-
-            store.put(digest, AccountingCall(status="pending"))
-            try:
-                result = await self._submit(data)
-            except TransactionRevertedError as exc:
-                # Only a first submission's revert is final: an earlier one can have landed first.
-                if earlier is not None:
-                    raise TransferOutcomeUnknownError(
-                        "This transfer was submitted earlier without a seen result, "
-                        f"and resubmitting it reverted: {exc}"
-                    ) from exc
-                store.delete(digest)
-                raise
-            except Exception as exc:
-                # Any other error leaves it pending, since its transaction can still land.
-                raise TransferOutcomeUnknownError(
-                    "This transfer was submitted without a seen result"
-                ) from exc
-            store.put(digest, AccountingCall(status="executed", submission_id=result.submission_id))
+            self._accounting_store.put(key, AccountingCall(status="pending"))
+            result = await self._submit(data)
+            self._accounting_store.put(
+                key, AccountingCall(status="executed", submission_id=result.submission_id)
+            )
             return result
+        except TransactionRevertedError:
+            # Only a first submission's revert is final: an earlier one can have landed first.
+            if earlier is None:
+                self._accounting_store.delete(key)
+            raise
         finally:
-            del self._settle_tasks[digest]
+            del self._settle_tasks[key]
 
     async def transfer_to_lock(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")

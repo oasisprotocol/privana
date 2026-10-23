@@ -221,7 +221,7 @@ Locks are escrow primitives: a user locks funds for a service, and the service c
 | `GET /funds/modify-lock/nonce/{user}` | — | Fetch nonce for `ModifyLock` EIP-712 |
 | `POST /funds/modify-lock` | user | Add funds and/or extend expiry (`{lock_id, amount, new_expiry, nonce, signature}`). Pure no-ops are rejected. |
 | `GET /funds/transfer-locked/nonce/{service}` | — | Fetch nonce for `TransferFromLock` EIP-712 |
-| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`). Resending the same signed transfer is safe: it joins the one in flight, or returns the original reply for up to seven days after Privana has seen it succeed. `409` means Privana submitted it without seeing a result: it landed if the service's nonce has moved past it and the service signed nothing else at that nonce. If the nonce has not moved, resend the same body. |
+| `POST /funds/transfer-locked` | service | Service consumes part or all of the lock to a destination user (`{user_address, lock_id, to_address, amount, service_address, nonce, signature}`). Resending the same signed transfer is safe: it joins the one in flight, or returns the original reply for up to seven days after Privana has seen it succeed. `409` means Privana submitted it and its outcome is unknown: it landed if the service's nonce has moved past it and the service signed nothing else at that nonce. If the nonce has not moved, resend the same body. |
 | `POST /funds/withdraw-from-lock` | user (auth) | User withdraws locked funds directly to an external destination (`{to_address, lock_id, amount, nonce, signature}` — the user is resolved from the auth header, not the body) |
 | `POST /funds/unlock` | — | Unlock a single expired lock (`{user_address, lock_id}`, no signature; reverts if not yet expired) |
 | `POST /funds/unlock-all-expired` | — | Unlock every expired lock for a user in one tx |
@@ -297,6 +297,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a provider webhook signature/JWT that fails verification. |
 | `403 Forbidden` | On-ramp record belongs to a different user or deposit address. |
 | `404 Not Found` | Status check for an unknown deposit. |
+| `409 Conflict` | A `POST /funds/transfer-locked` transfer was submitted and its outcome is unknown. That endpoint's row says how to tell whether it landed. |
 | `413 Payload Too Large` | A provider webhook body exceeds the 1 MiB cap. |
 | `422 Unprocessable Entity` | FastAPI/Pydantic request-model validation, or a contract revert after a parsed request reaches the chain. Contract-revert responses carry the revert reason when available. |
 | `429 Too Many Requests` | An auth/on-ramp rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
