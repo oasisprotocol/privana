@@ -2,11 +2,14 @@
 
 import asyncio
 import os
+import tempfile
 
 # src.config runs load_dotenv() at import, which would pull in a developer's
 # untracked .env and make results depend on the machine. Block it so every run
 # sees what CI sees: the process environment plus .env.localnet.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
+# The Accounting service opens its store at import, and /data exists only in the container.
+os.environ["ACCOUNTING_STATE_DIR"] = tempfile.mkdtemp()
 
 import pytest
 from dotenv import dotenv_values

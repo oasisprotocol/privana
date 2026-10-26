@@ -12,11 +12,15 @@ Used by:
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv(".env.testnet") # Use Testnet environment in openapi specs usage
+# The Accounting service opens its store at import, and /data exists only in the container.
+os.environ["ACCOUNTING_STATE_DIR"] = tempfile.mkdtemp()
 
 from src.main import app
 

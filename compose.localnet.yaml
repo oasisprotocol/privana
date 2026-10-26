@@ -9,6 +9,7 @@ services:
     environment:
       - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
       - SWEEP_STATE_DIR=/data/sweep-engine
+      - ACCOUNTING_STATE_DIR=/data/accounting
       - ONRAMP_PROVIDER
       - MOONPAY_API_KEY=${MOONPAY_API_KEY}
       - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY}
@@ -31,6 +32,7 @@ services:
     volumes:
       - ./rofl-appd.sock:/run/rofl-appd.sock
       - sweep-engine-data:/data/sweep-engine
+      - accounting-data:/data/accounting
     network_mode: host # For sapphire-localnet
     ports:
       - "8000:8000"
@@ -38,3 +40,4 @@ services:
 
 volumes:
   sweep-engine-data:
+  accounting-data:

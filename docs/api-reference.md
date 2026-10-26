@@ -23,7 +23,8 @@ If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`
 - **Amounts** are integers in the token's base units (wei for ETH, smallest unit for ERC-20). Strings are accepted; scientific notation is parsed with `Decimal` to preserve precision.
 - **Signatures** are EIP-712 typed-data signatures. User-signed accounting operations are defined in `solidity/contracts/EIP712SignatureVerifier.sol`.
 - **Nonces** are per-operation. User-signed operations key nonces by recovered signer; service-signed lock operations key nonces by service. Always fetch the current nonce immediately before signing.
-- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
+- **Resends** of the same signed body are safe on `POST /funds/lock`, `/funds/modify-lock`, `/funds/transfer` and `/funds/transfer-locked`. A resend joins the write in flight, or returns the original reply for up to seven days after Privana has seen it succeed. Privana keeps these replies on its machine, so a machine replacement drops them. `409` means Privana submitted the write and its outcome is unknown: it landed if the signer's nonce has moved past it and the signer signed nothing else at that nonce. If the nonce has not moved, resend the same body.
+- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `409` for a submitted lock or transfer whose outcome is unknown, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
 
 ### User-Signed EIP-712 Types
 
@@ -297,6 +298,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a provider webhook signature/JWT that fails verification. |
 | `403 Forbidden` | On-ramp record belongs to a different user or deposit address. |
 | `404 Not Found` | Status check for an unknown deposit. |
+| `409 Conflict` | A lock, lock change or transfer was submitted and its outcome is unknown. **Resends** under Conventions says how to tell whether it landed. |
 | `413 Payload Too Large` | A provider webhook body exceeds the 1 MiB cap. |
 | `422 Unprocessable Entity` | FastAPI/Pydantic request-model validation, or a contract revert after a parsed request reaches the chain. Contract-revert responses carry the revert reason when available. |
 | `429 Too Many Requests` | An auth/on-ramp rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
