@@ -229,11 +229,11 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_invalid_cbor_raises_error(self, mock_async_client_class):
-        """Test that submit_tx raises ValueError when response is invalid CBOR."""
+        """Test that invalid CBOR, read after appd submitted, raises no ValueError."""
         from src.clients.rofl import RoflAppdClient
 
         mock_client = MagicMock()
-        mock_client.sign_submit = AsyncMock(side_effect=cbor2.CBORDecodeError("invalid"))
+        mock_client.sign_submit = AsyncMock(side_effect=cbor2.CBORDecodeValueError("invalid"))
         mock_async_client_class.return_value = mock_client
 
         client = RoflAppdClient()
@@ -242,14 +242,14 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
             "data": "0xabcdef",
         }
 
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(RuntimeError) as ctx:
             await client.submit_tx(tx)
 
-        self.assertIn("invalid CBOR", str(ctx.exception))
+        self.assertIn("Invalid ROFL response", str(ctx.exception))
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_missing_ok_key_raises_error(self, mock_async_client_class):
-        """Test that submit_tx raises ValueError when response has no 'ok' or 'fail' key."""
+        """Test that a response with no 'ok' or 'fail' key raises no ValueError."""
         from src.clients.rofl import RoflAppdClient
 
         mock_client = MagicMock()
@@ -265,7 +265,7 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
             "data": "0xabcdef",
         }
 
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(RuntimeError) as ctx:
             await client.submit_tx(tx)
 
         self.assertIn("missing 'ok' key", str(ctx.exception))
