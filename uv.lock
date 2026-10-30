@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -1389,16 +1389,16 @@ wheels = [
 
 [[package]]
 name = "oasis-rofl-client"
-version = "0.2.0"
+version = "0.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
     { name = "httpx" },
     { name = "web3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/03/04bf3b61731d139d4fb808c7af44a3dc8755edb95ade85d603cc9c2a2b42/oasis_rofl_client-0.2.0.tar.gz", hash = "sha256:439769554baa311c578816b54069bfd3aac82b361859f7d551a9bf2698f5b3c9", size = 177732, upload-time = "2026-01-09T15:09:42.561Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/8c/3bdcfe6df222c1ef630d205aaf19629d2cff66ee44852bd1cf6ac1617b39/oasis_rofl_client-0.2.1.tar.gz", hash = "sha256:83713d45cfc817f1fb584b9afeb76d067b893d38a5b8804586e227ad02d8db28", size = 178461, upload-time = "2026-10-30T08:59:24.933Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/51/ed5fc1f37eebd4f8cf117d238b76904b6c68cbd6fc192bf4d17433edf7f1/oasis_rofl_client-0.2.0-py3-none-any.whl", hash = "sha256:89fffd9d349beca102be2d8dfeea07233699757f9d981b8293b0eae2cc6c77d0", size = 8893, upload-time = "2026-01-09T15:09:43.619Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/ad/0751d8ac88fa0b0470674832bc554b14d471a6dda644d4b3cef7958bf958/oasis_rofl_client-0.2.1-py3-none-any.whl", hash = "sha256:cf0eac1e679f2cace71fb65871268794830edd7eac1e033722ebf46e1f5f50a3", size = 9020, upload-time = "2026-10-30T08:59:23.9Z" },
 ]
 
 [[package]]
@@ -1548,7 +1548,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.2" },
-    { name = "oasis-rofl-client", specifier = ">=0.2.0" },
+    { name = "oasis-rofl-client", specifier = ">=0.2.1" },
     { name = "oasis-sapphire-py", specifier = ">=0.4.2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.0" },
     { name = "py-trie", marker = "extra == 'test'", specifier = ">=1.0.0" },
