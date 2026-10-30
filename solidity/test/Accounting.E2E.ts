@@ -1633,6 +1633,44 @@ describe('ModifyLock', function () {
       parseUsdt("0.1"), transferLockedNonce, signature
     )).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
   });
+
+  it("Should accept each transferFromLock nonce in the window once, in any order", async function () {
+    const locks = await accountingUser1.getUserLocks(mockAuthToken(userWallet1.address));
+    const lockId = locks[0][0];
+    const amount = parseUsdt("0.01");
+
+    const settle = async (nonce: bigint) => {
+      const signature = await userWallet2.signTypedData(
+        domain,
+        { TransferLocked: types.TransferLocked },
+        {
+          userAddress: userWallet1.address,
+          toAddress: userWallet2.address,
+          lockId,
+          amount,
+          nonce,
+          serviceAddress: userWallet2.address,
+        }
+      );
+      return accounting.transferFromLock(
+        userWallet1.address, userWallet2.address, lockId, amount, nonce, signature
+      );
+    };
+
+    // 1024 starts a bitmap word, so the counter scan crosses it.
+    await (await accounting.setTransferLockedNonce(userWallet2.address, 1022n)).wait();
+    for (const nonce of [1022n + 255n, 1023n, 1024n]) await (await settle(nonce)).wait();
+    expect(await accounting.transferLockedNonces(userWallet2.address)).to.equal(1022n);
+    expect(await accounting.isTransferLockedNonceUsed(userWallet2.address, 1024n)).to.equal(true);
+    expect(await accounting.isTransferLockedNonceUsed(userWallet2.address, 1025n)).to.equal(false);
+
+    await (await settle(1022n)).wait();
+    expect(await accounting.transferLockedNonces(userWallet2.address)).to.equal(1025n);
+
+    for (const nonce of [1022n + 255n, 1024n, 1025n + 256n]) {
+      await expect(settle(nonce)).to.be.reverted; // WithCustomError(accounting, "InvalidNonce"); // https://github.com/oasisprotocol/sapphire-paratime/issues/688
+    }
+  });
 });
 
 describe('Upgradability', function () {
@@ -1728,18 +1766,18 @@ describe('Upgradability', function () {
     expect(tokenInfoAfter.tokenType).to.equal(tokenInfoBefore.tokenType, "Token info should be preserved after upgrade");
     expect(tokenInfoAfter.data).to.equal(tokenInfoBefore.data, "Token data should be preserved after upgrade");
 
-    expect(await upgraded.VERSION()).to.equal(3n, "VERSION should be 3 after upgrade");
+    expect(await upgraded.VERSION()).to.equal(4n, "VERSION should be 4 after upgrade");
     // Verify the proxy address is the same
     expect(await upgraded.getAddress()).to.equal(proxyAddress, "Proxy address should remain the same");
   });
 
-  // Scope: the pre-upgrade mock compiles from current source (already VERSION 3), so this exercises proxy mechanics and state preservation, not a layout migration.
-  it("Should upgrade implementation, report VERSION == 3, and preserve prior state", async function () {
+  // Scope: the pre-upgrade mock compiles from current source (already VERSION 4), so this exercises proxy mechanics and state preservation, not a layout migration.
+  it("Should upgrade implementation, report VERSION == 4, and preserve prior state", async function () {
     const user = getDeployer(2);
     const freshProxy = await deployMockAccounting(await mockSiweAuth.getAddress());
     const freshProxyAddress = await freshProxy.getAddress();
 
-    expect(await freshProxy.VERSION()).to.equal(3n);
+    expect(await freshProxy.VERSION()).to.equal(4n);
 
     const data = ethers.concat([
       ethers.zeroPadValue(ethers.toBeHex(TEST_TOKEN.chainId), 32),
@@ -1774,7 +1812,7 @@ describe('Upgradability', function () {
 
     const upgraded = (await ethers.getContractFactory('MockAccounting')).attach(freshProxyAddress) as unknown as MockAccounting;
 
-    expect(await upgraded.VERSION()).to.equal(3n, "VERSION must report 3");
+    expect(await upgraded.VERSION()).to.equal(4n, "VERSION must report 4");
     expect(await upgraded.getBalance(user.address, TEST_TOKEN.tokenId)).to.equal(balanceBefore, "User balance must be preserved");
     expect(await upgraded.owner()).to.equal(ownerBefore, "Contract owner must be preserved");
     expect(await upgraded.gasPrices(testChainId)).to.equal(gasPriceBefore, "Chain gas price must be preserved");
