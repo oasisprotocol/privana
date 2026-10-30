@@ -294,7 +294,7 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
     @patch("src.clients.rofl.AsyncRoflClient")
     def test_singleton_pattern(self, mock_async_client_class):
         """Test that RoflAppdClient is a singleton."""
-        from src.clients.rofl import RoflAppdClient
+        from src.clients.rofl import _APPD_TIMEOUT_SECONDS, RoflAppdClient
 
         mock_client = MagicMock()
         mock_async_client_class.return_value = mock_client
@@ -303,8 +303,8 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
         client2 = RoflAppdClient()
 
         self.assertIs(client1, client2)
-        # AsyncRoflClient should only be instantiated once
-        self.assertEqual(mock_async_client_class.call_count, 1)
+        # AsyncRoflClient should only be instantiated once, with the appd timeout
+        mock_async_client_class.assert_called_once_with(timeout=_APPD_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
