@@ -821,6 +821,7 @@ async def test_withdraw_from_lock_reads_locks_via_confidential_reader() -> None:
     service._fetch_user_locks = AsyncMock(return_value=[lock_tuple])
     service._get_token_context = AsyncMock(return_value=token_ctx)
     service._check_destination_balance = AsyncMock(return_value=None)
+    service._simulate = AsyncMock()
 
     result = await service.withdraw_from_lock(
         {

@@ -7,8 +7,10 @@ import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import Web3
+from web3.exceptions import ContractCustomError, Web3RPCError
 
 from src.clients.rofl import RoflSubmissionResult, TransactionRevertedError
+from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import (
     AccountingContractService,
     SubmissionOutcomeUnknownError,
@@ -42,6 +44,7 @@ def service(tmp_path):
         )
         accounting = AccountingContractService()
         accounting._accounting_store = AccountingStore(str(tmp_path))
+        accounting._simulate = AsyncMock()
         yield accounting
 
 
@@ -129,6 +132,77 @@ class TestEip712SignerRecovery:
         )
 
         assert signer == account.address
+
+
+def _revert():
+    return TransactionRevertedError("Transaction reverted: InsufficientBalance")
+
+
+class TestSimulate:
+    @pytest.fixture
+    def node(self, service):
+        del service._simulate
+        node = MagicMock()
+        node.eth.call = AsyncMock(return_value=b"")
+        service._get_simulation_web3 = MagicMock(return_value=node)
+        service.rofl_client.submit_tx = AsyncMock(
+            return_value=RoflSubmissionResult(submission_id="0xabc", ok_payload=None)
+        )
+        return node
+
+    @pytest.mark.asyncio
+    async def test_simulates_the_transaction_it_submits(self, service, node):
+        await service._submit("0xdeadbeef", simulate=True)
+
+        tx = service.rofl_client.submit_tx.call_args.args[0]
+        node.eth.call.assert_awaited_once_with(tx)
+        assert tx["gas"] == service.gas_limit
+
+    @pytest.mark.asyncio
+    async def test_submits_without_a_call_when_not_simulating(self, service, node):
+        await service._submit("0xdeadbeef", simulate=False)
+
+        node.eth.call.assert_not_called()
+        service.rofl_client.submit_tx.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "selector, name",
+        [
+            (Web3.to_hex(Web3.keccak(text="InsufficientBalance()")[:4]), "InsufficientBalance"),
+            ("0x12345678", "unknown (selector: 0x12345678)"),
+        ],
+        ids=["known", "unknown"],
+    )
+    async def test_a_revert_is_never_submitted(self, service, node, selector, name):
+        node.eth.call.side_effect = ContractCustomError(selector, data=selector)
+
+        with pytest.raises(TransactionRevertedError) as exc:
+            await service._submit("0xdeadbeef", simulate=True)
+
+        assert str(exc.value) == f"Transaction reverted: {name}"
+        assert exc.value.error_name == name
+        service.rofl_client.submit_tx.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_running_out_of_gas_is_a_revert(self, service, node):
+        node.eth.call.side_effect = Web3RPCError(
+            "{'code': -32000, 'message': 'execution failed: out of gas'}"
+        )
+
+        with pytest.raises(TransactionRevertedError, match="reverted: out of gas"):
+            await service._submit("0xdeadbeef", simulate=True)
+
+        service.rofl_client.submit_tx.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_rpc_failure_is_not_a_revert(self, service, node):
+        node.eth.call.side_effect = Web3RPCError("429 Too Many Requests")
+
+        with pytest.raises(Web3RPCError):
+            await service._submit("0xdeadbeef", simulate=True)
+
+        service.rofl_client.submit_tx.assert_not_called()
 
 
 class TestLockFundsSubmission:
@@ -247,6 +321,23 @@ class TestRequestWithdrawalSubmission:
 
         service.rofl_client.submit_tx.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_simulated_revert_is_never_submitted(self, service):
+        service._recover_eip712_signer = AsyncMock(return_value=USER)
+        _setup_user_nonce(service, "withdrawalNonces", expected_nonce=0)
+        service.settings.chain_rpc_urls = {84532: "https://example"}
+        service._get_token_context = AsyncMock(
+            return_value=TokenContext(chain_id=84532, token_address=None, is_native=True)
+        )
+        service._check_destination_balance = AsyncMock(return_value=None)
+        service._simulate = AsyncMock(side_effect=_revert())
+        service.rofl_client.submit_tx = AsyncMock()
+
+        with pytest.raises(TransactionRevertedError, match="InsufficientBalance"):
+            await service.request_withdrawal(self._make_payload(nonce=0))
+
+        service.rofl_client.submit_tx.assert_not_called()
+
 
 def _record(service_obj):
     """Return the store record of the last submitted call."""
@@ -280,12 +371,29 @@ class TestTransferLockedFunds:
             await settle_service.transfer_locked_funds(self._make_payload(nonce=0))
         settle_service._submit.assert_not_called()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error", [_revert(), RuntimeError("RPC down")], ids=["revert", "rpc-failure"]
+    )
+    async def test_failed_simulation_leaves_no_record(self, settle_service, error):
+        settle_service._simulate = AsyncMock(side_effect=error)
+        settle_service.rofl_client.submit_tx = AsyncMock()
+
+        with pytest.raises(type(error)):
+            await settle_service.transfer_locked_funds(self._make_payload())
+
+        settle_service.rofl_client.submit_tx.assert_not_called()
+        # Nothing was submitted, so a resend is a fresh attempt, not an unknown outcome.
+        tx = settle_service._simulate.call_args.args[0]
+        key = Web3.to_hex(Web3.keccak(hexstr=tx["data"]))
+        assert settle_service._accounting_store.get(key) is None
+
     # The first result is unseen, so a resend that doesn't join submits again.
     @pytest.mark.asyncio
     async def test_resend_in_flight_joins_the_first(self, settle_service):
         started, release = asyncio.Event(), asyncio.Event()
 
-        async def slow_submit(_data):
+        async def slow_submit(_data, **_):
             started.set()
             await release.wait()
             raise RuntimeError("appd timed out")
@@ -306,7 +414,7 @@ class TestTransferLockedFunds:
     async def test_dropped_caller_still_records_outcome(self, settle_service):
         started, release = asyncio.Event(), asyncio.Event()
 
-        async def slow_submit(_data):
+        async def slow_submit(_data, **_):
             started.set()
             await release.wait()
             return SubmissionResult(submission_id="0xabc", status="submitted")
@@ -490,3 +598,61 @@ async def test_resend_after_execution_replays_without_reading_the_nonce(
 
     assert result.submission_id == "0xabc"
     service._submit.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method, payload, nonce_fn",
+    [
+        ("lock_funds", TestLockFundsSubmission._make_payload(), "createLockNonces"),
+        ("modify_lock", TestModifyLockSubmission._make_payload(), "modifyLockNonces"),
+        ("transfer_funds", TestTransferFundsSubmission._make_payload(), "transferNonces"),
+        (
+            "transfer_locked_funds",
+            TestTransferLockedFunds._make_payload(),
+            "transferLockedNonces",
+        ),
+        (
+            "transfer_to_lock",
+            TestTransferToLockSubmission._make_payload(),
+            "transferToLockNonces",
+        ),
+        ("unlock_funds", {"user_address": USER, "lock_id": 1}, None),
+    ],
+    ids=["lock", "modify-lock", "transfer", "transfer-locked", "transfer-to-lock", "unlock"],
+)
+async def test_simulated_revert_is_never_submitted(service, method, payload, nonce_fn):
+    service._recover_eip712_signer = AsyncMock(return_value=USER)
+    if nonce_fn:
+        _setup_user_nonce(service, nonce_fn)
+    service._simulate = AsyncMock(side_effect=_revert())
+    service.rofl_client.submit_tx = AsyncMock()
+
+    with pytest.raises(TransactionRevertedError, match="InsufficientBalance"):
+        await getattr(service, method)(payload)
+
+    service.rofl_client.submit_tx.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_lock_revert_is_never_submitted(service):
+    service._fetch_user_locks = AsyncMock(return_value=[(1, SERVICE, b"\xaa" * 32, 1000, 1)])
+    service._get_token_context = AsyncMock(
+        return_value=TokenContext(chain_id=84532, token_address=None, is_native=True)
+    )
+    service.settings.chain_rpc_urls = {84532: "https://example"}
+    service._check_destination_balance = AsyncMock(return_value=None)
+    service._simulate = AsyncMock(side_effect=_revert())
+    service.rofl_client.submit_tx = AsyncMock()
+    payload = {
+        "to_address": SERVICE,
+        "lock_id": 1,
+        "amount": 1000,
+        "nonce": 0,
+        "signature": "0x" + "ab" * 65,
+    }
+
+    with pytest.raises(TransactionRevertedError, match="InsufficientBalance"):
+        await service.withdraw_from_lock(payload, PrivateReadAuth(token=b"t", user_address=USER))
+
+    service.rofl_client.submit_tx.assert_not_called()

@@ -17,10 +17,10 @@ from sapphirepy import sapphire
 from web3 import AsyncWeb3, Web3
 from web3.constants import ADDRESS_ZERO
 from web3.contract import AsyncContract
-from web3.exceptions import ContractLogicError
+from web3.exceptions import ContractCustomError, ContractLogicError, Web3RPCError
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 
-from src.abi.accounting import ACCOUNTING_ABI
+from src.abi.accounting import ACCOUNTING_ABI, get_error_name
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
 from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient, TransactionRevertedError
 from src.clients.web3_provider import make_async_web3
@@ -117,6 +117,14 @@ async def _call_with_transient_retry(factory, op: str):
             await asyncio.sleep(_TRANSIENT_READ_BACKOFF_SEC * attempt)
 
 
+def _revert_error_name(exc: ContractLogicError) -> str:
+    """Name the error a call reverted with, in the format the ROFL client uses."""
+    if isinstance(exc, ContractCustomError) and isinstance(exc.data, str):
+        selector = HexBytes(exc.data)[:4]
+        return get_error_name(bytes(selector)) or f"unknown (selector: {selector.to_0x_hex()})"
+    return str(exc)
+
+
 def _to_prefixed_hex(value: Any) -> str:
     return HexBytes(value).to_0x_hex().lower()
 
@@ -182,6 +190,7 @@ class AccountingContractService:
         )
 
         self._confidential_reader_w3: Optional[AsyncWeb3] = None
+        self._simulation_w3: Optional[AsyncWeb3] = None
         self._confidential_contract_reader: Optional[AsyncContract] = None
         self._deposit_address: Optional[str] = None
         self._siwe_domain: Optional[str] = None
@@ -253,11 +262,47 @@ class AccountingContractService:
         return tx
 
     async def _submit(
-        self, data: bytes, value: int = 0, gas: Optional[int] = None
+        self, data: bytes, *, simulate: bool, value: int = 0, gas: Optional[int] = None
     ) -> SubmissionResult:
+        """Submit a transaction via ROFL.
+
+        ``simulate`` has no default, so each caller decides: True for relays anyone can request
+        through the API, False for the service's own calls (onlyROFL ones can't pass a
+        simulation, as it isn't sent by ROFL).
+        """
         tx = self._build_tx(data, value=value, gas=gas)
+        if simulate:
+            await self._simulate(tx)
         rofl_result = await self.rofl_client.submit_tx(tx)
         return SubmissionResult(submission_id=rofl_result.submission_id, status="submitted")
+
+    async def _simulate(self, tx: Dict) -> None:
+        """Run a transaction as a call first, so one that would fail costs no gas.
+
+        Unsigned, as no relayed function reads msg.sender and a signed query costs three more
+        round trips. Still encrypted, so the RPC node can't read the calldata.
+        """
+        try:
+            await self._get_simulation_web3().eth.call(tx)
+        except ContractLogicError as exc:
+            name = _revert_error_name(exc)
+            raise TransactionRevertedError(
+                f"Transaction reverted: {name}", error_name=name
+            ) from exc
+        except Web3RPCError as exc:
+            if "out of gas" not in str(exc):
+                raise
+            raise TransactionRevertedError("Transaction reverted: out of gas") from exc
+
+    def _get_simulation_web3(self) -> AsyncWeb3:
+        self.require_verified_sapphire()
+        if self._simulation_w3 is None:
+            if not self.sapphire_rpc_url:
+                raise ValueError("SAPPHIRE_RPC_URL must be configured to simulate transactions")
+            self._simulation_w3 = sapphire.wrap(
+                make_async_web3(self.sapphire_rpc_url, self.settings.sapphire_rpc_headers)
+            )
+        return self._simulation_w3
 
     def _require_address(self, value: str, field: str) -> ChecksumAddress:
         if not isinstance(value, str) or not Web3.is_address(value):
@@ -388,10 +433,12 @@ class AccountingContractService:
                         submission_id=earlier.submission_id or "", status="submitted"
                     )
                 await self._validate_user_nonce(signer, nonce, nonce_fn, label)
+                # Before the pending record: a failed simulation submitted nothing.
+                await self._simulate(self._build_tx(data))
 
                 self._accounting_store.put(key, AccountingCall(status="pending"))
                 logger.info("Submitting %s %s at nonce %d", label, key, nonce)
-                result = await self._submit(data)
+                result = await self._submit(data, simulate=False)
                 self._accounting_store.put(
                     key, AccountingCall(status="executed", submission_id=result.submission_id)
                 )
@@ -757,7 +804,7 @@ class AccountingContractService:
             amount,
             deposit_id,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=False)
 
     async def generate_sweep_native(
         self,
@@ -854,7 +901,7 @@ class AccountingContractService:
     async def set_token_info(self, token_type: int, data: bytes) -> SubmissionResult:
         """Register a token via a ROFL-authenticated setTokenInfo tx."""
         fn = self.contract.functions.setTokenInfo((token_type, bytes(data)))
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=False)
 
     async def is_deposit_processed(self, deposit_id: bytes) -> bool:
         """Check if a deposit has already been processed on-chain.
@@ -1044,7 +1091,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=True)
 
     async def withdraw_from_lock(self, payload: Dict, auth: PrivateReadAuth) -> SubmissionResult:
         user = self._require_address(auth.user_address, "user_address")
@@ -1081,7 +1128,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        result = await self._submit(fn._encode_transaction_data())
+        result = await self._submit(fn._encode_transaction_data(), simulate=True)
 
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:
@@ -1098,7 +1145,7 @@ class AccountingContractService:
             user,
             lock_id,
         )
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=True)
 
     async def request_withdrawal(self, payload: Dict) -> SubmissionResult:
         token = self._require_hex(payload["token_id"], "token_id", expected_len=32)
@@ -1145,10 +1192,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-
-        rofl_result = await self.rofl_client.submit_tx(
-            self._build_tx(fn._encode_transaction_data())
-        )
+        submission = await self._submit(fn._encode_transaction_data(), simulate=True)
 
         detail_parts = [f"chain_id={context.chain_id}"]
         if context.token_address:
@@ -1158,7 +1202,7 @@ class AccountingContractService:
         index = await self._locate_withdrawal_index(user, token, amount)
 
         return SubmissionResult(
-            submission_id=rofl_result.submission_id,
+            submission_id=submission.submission_id,
             status="submitted",
             detail=detail,
             index=index,
@@ -1198,7 +1242,7 @@ class AccountingContractService:
     async def resolve_withdrawal(self, index: int) -> SubmissionResult:
         """Submit resolveWithdrawal transaction via ROFL."""
         fn = self.contract.functions.resolveWithdrawal(index)
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=False)
 
     async def get_withdrawal(self, index: int) -> Dict[str, Any]:
         contract_reader = self._get_reader_contract()
@@ -1344,7 +1388,7 @@ class AccountingContractService:
         user = self._require_address(payload["user_address"], "user_address")
 
         fn = self.contract.functions.unlockAllExpiredLocks(user)
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=True)
 
     async def get_token_info(self, token_id: str) -> Dict[str, Any]:
         token_hex = self._require_hex(token_id, "token_id", expected_len=32)
@@ -1455,7 +1499,7 @@ class AccountingContractService:
         """Publish the ROFL-derived signer address on-chain via a ROFL-authenticated tx."""
         checksum = self._require_address(new_signer, "new_signer")
         fn = self.contract.functions.setRoflSignerAddress(checksum)
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=False)
 
     async def get_gas_price(self, chain_id: int) -> int:
         """Read the currently published gas price (wei) for a chain from the contract."""
@@ -1465,7 +1509,7 @@ class AccountingContractService:
     async def set_gas_price(self, chain_id: int, gas_price: int) -> SubmissionResult:
         """Publish a chain's gas price on-chain via a ROFL-authenticated tx."""
         fn = self.contract.functions.setGasPrice(chain_id, gas_price)
-        return await self._submit(fn._encode_transaction_data())
+        return await self._submit(fn._encode_transaction_data(), simulate=False)
 
     async def set_auth_token_enc_key(self, enc_key: bytes) -> None:
         """Sync the AuthToken encryption key to the AccountingSiweAuth contract via ROFL."""
