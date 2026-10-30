@@ -38,9 +38,10 @@ _LANDING_HTML: str = (Path(__file__).parent / "templates" / "landing.html").read
     encoding="utf-8"
 )
 
-# Sapphire sweeps need the 25,000 gasLimitNativeSweep; a pre-upgrade proxy signs
-# them at 21,000 and strands every deposit. The lifespan refuses to start below this.
-REQUIRED_ACCOUNTING_VERSION = 3
+# Sapphire sweeps need v3's 25,000 gasLimitNativeSweep; an older proxy signs them at
+# 21,000 and strands every deposit. The settle nonce pre-check needs v4's
+# isTransferLockedNonceUsed. The lifespan refuses to start below this.
+REQUIRED_ACCOUNTING_VERSION = 4
 
 settings = load_settings()
 
@@ -156,8 +157,7 @@ async def lifespan(_app: FastAPI):
         if deployed_version < REQUIRED_ACCOUNTING_VERSION:
             logger.critical(
                 "Accounting implementation VERSION %d is below the required %d; refusing to "
-                "start so no token registration or 21,000-gas Sapphire sweep happens before "
-                "the proxy upgrade lands",
+                "start until the proxy upgrade lands",
                 deployed_version,
                 REQUIRED_ACCOUNTING_VERSION,
             )

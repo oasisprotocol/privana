@@ -39,6 +39,14 @@ contract MockAccounting is Accounting {
     }
 
     /**
+     * @notice Test helper to set a service's transferLocked nonce directly
+     * @dev Only for testing purposes - NOT for production use
+     */
+    function setTransferLockedNonce(address service, uint256 nonce) external {
+        transferLockedNonces[service] = nonce;
+    }
+
+    /**
      * @notice Ignore ROFL check if app id is zero.
      * @dev Only for testing purposes - NOT for production use
      */
