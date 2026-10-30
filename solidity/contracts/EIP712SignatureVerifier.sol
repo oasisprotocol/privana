@@ -55,7 +55,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /// @notice Mapping to track modifyLock nonces per user for replay protection
     mapping(address user => uint256 nonce) public modifyLockNonces;
 
-    /// @notice Mapping to track transferLocked nonces per service for replay protection
+    /// @notice Lowest unused transferLocked nonce per service
     mapping(address service => uint256 nonce) public transferLockedNonces;
 
     /// @notice Mapping to track withdrawFromLock nonces per service
@@ -64,10 +64,16 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
     /// @notice Mapping to track transferToLock nonces per service for replay protection
     mapping(address service => uint256 nonce) public transferToLockNonces;
 
+    /// @notice Used transferLocked nonces per service, 256 per word
+    mapping(address service => mapping(uint256 word => uint256 bits)) private transferLockedNonceBitmap;
+
     /// @notice Thrown when signature recovery fails or signer doesn't match expected address
     error InvalidSignature();
-    /// @notice Thrown when the provided nonce doesn't match the expected nonce
+    /// @notice Thrown when the provided nonce is already used or not yet valid
     error InvalidNonce();
+
+    /// @notice Count of usable transferLocked nonces, starting at transferLockedNonces
+    uint256 private constant TRANSFER_LOCKED_NONCE_WINDOW = 256;
 
     /// @notice EIP-712 domain typehash carrying the chain in `salt` instead of `chainId`
     bytes32 private constant SALTED_DOMAIN_TYPEHASH =
@@ -297,7 +303,7 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
      * @param toAddress The address receiving the transferred locked funds
      * @param lockId The unique identifier of the lock being transferred from
      * @param amount The amount of locked tokens to transfer
-     * @param nonce The nonce for replay protection (must match service's current transferLockedNonces)
+     * @param nonce The nonce for replay protection (unused, and at most 255 past service's transferLockedNonces)
      * @param signature The EIP-712 signature from the service authorizing the transfer
      */
     function verifyTransferLockedSignature(
@@ -309,10 +315,6 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
         uint256 nonce,
         bytes calldata signature
     ) internal {
-        if (nonce != transferLockedNonces[serviceAddress]) {
-            revert InvalidNonce();
-        }
-
         bytes32 structHash = keccak256(
             abi.encode(
                 TRANSFER_LOCKED_TYPEHASH,
@@ -330,7 +332,34 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
             revert InvalidSignature();
         }
 
-        transferLockedNonces[serviceAddress]++;
+        _useTransferLockedNonce(serviceAddress, nonce);
+    }
+
+    /**
+     * @notice Whether a service has used a transferLocked nonce.
+     * @param serviceAddress The service that signs the transfers
+     * @param nonce The transferLocked nonce to check
+     */
+    function isTransferLockedNonceUsed(address serviceAddress, uint256 nonce) public view returns (bool) {
+        return nonce < transferLockedNonces[serviceAddress] ||
+            (transferLockedNonceBitmap[serviceAddress][nonce >> 8] & (1 << (nonce & 255))) != 0;
+    }
+
+    /// @dev Marks the nonce used, then moves transferLockedNonces to the lowest unused nonce.
+    function _useTransferLockedNonce(address serviceAddress, uint256 nonce) private {
+        uint256 next = transferLockedNonces[serviceAddress];
+        if (isTransferLockedNonceUsed(serviceAddress, nonce) || nonce >= next + TRANSFER_LOCKED_NONCE_WINDOW) {
+            revert InvalidNonce();
+        }
+        mapping(uint256 word => uint256 bits) storage bitmap = transferLockedNonceBitmap[serviceAddress];
+        bitmap[nonce >> 8] |= 1 << (nonce & 255);
+        // Reads each bitmap word once, so filling a full window stays cheap.
+        uint256 bits = bitmap[next >> 8];
+        while ((bits & (1 << (next & 255))) != 0) {
+            next++;
+            if ((next & 255) == 0) bits = bitmap[next >> 8];
+        }
+        transferLockedNonces[serviceAddress] = next;
     }
 
     function verifyWithdrawFromLockSignature(
@@ -449,5 +478,5 @@ abstract contract EIP712SignatureVerifier is Initializable, EIP712Upgradeable {
      * @dev Reserved storage gap for future upgrades.
      * This allows adding new state variables without shifting storage layout.
      */
-    uint256[43] private __gap;
+    uint256[42] private __gap;
 }

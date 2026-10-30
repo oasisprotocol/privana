@@ -27,7 +27,7 @@ import {UPUPSUpgradeable} from "./lib/UPUPSUpgradeable.sol";
  */
 contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpgradeable, UPUPSUpgradeable {
     /// @notice Contract version, bumped on each upgrade for tracking/verification.
-    uint64 public constant VERSION = 3;
+    uint64 public constant VERSION = 4;
 
     /// @dev Maximum entries returned by `getHistory` in a single call.
     uint256 private constant MAX_HISTORY_PAGE_SIZE = 100;
@@ -678,7 +678,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
      * @param toAddress The address receiving the transferred locked funds
      * @param lockId The unique identifier of the lock to transfer from
      * @param amount The amount of locked tokens to transfer
-     * @param nonce The nonce for replay protection (must match service's current transferLockedNonces)
+     * @param nonce The nonce for replay protection (unused, and at most 255 past service's transferLockedNonces)
      * @param signature The EIP-712 signature from the service authorizing the transfer
      */
     function transferFromLock(

@@ -72,6 +72,9 @@ _WITHDRAWAL_READ_BATCH_SIZE = 50  # withdrawals(i) reads per JSON-RPC batch
 # between admission and broadcast does not strand the withdrawal.
 _WITHDRAWAL_GAS_BUFFER_PERCENT = 20
 
+# Matches TRANSFER_LOCKED_NONCE_WINDOW in EIP712SignatureVerifier.sol.
+_TRANSFER_LOCKED_NONCE_WINDOW = 256
+
 # Note: Balance and user locks are not cached because SIWE token must be
 # validated on each request. In the future, if SIWE validation moves to
 # the API layer, caching could be added here for performance.
@@ -368,7 +371,11 @@ class AccountingContractService:
     ) -> None:
         contract_reader = self._get_reader_contract()
         expected_nonce = await getattr(contract_reader.functions, nonce_fn)(user).call()
-        if nonce != expected_nonce:
+        if nonce != expected_nonce and not (
+            nonce_fn == "transferLockedNonces"
+            and expected_nonce < nonce < expected_nonce + _TRANSFER_LOCKED_NONCE_WINDOW
+            and not await contract_reader.functions.isTransferLockedNonceUsed(user, nonce).call()
+        ):
             raise ValueError(
                 f"{label} nonce mismatch: got {nonce}, expected {expected_nonce}. "
                 f"The nonce may already have been used by another request."

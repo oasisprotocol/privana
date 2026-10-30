@@ -158,6 +158,14 @@ class TestLockFundsSubmission:
         await service.lock_funds(self._make_payload(nonce=0))
         service._submit.assert_called_once()
 
+    # Only transferFromLock takes a nonce window.
+    @pytest.mark.asyncio
+    async def test_rejects_a_nonce_ahead_of_the_counter(self, service):
+        service._recover_eip712_signer = AsyncMock(return_value=USER)
+        _setup_user_nonce(service, "createLockNonces", expected_nonce=5)
+        with pytest.raises(ValueError, match="nonce mismatch"):
+            await service.lock_funds(self._make_payload(nonce=6))
+
 
 class TestModifyLockSubmission:
     @staticmethod
@@ -273,12 +281,22 @@ class TestTransferLockedFunds:
         return service
 
     @pytest.mark.asyncio
-    async def test_rejects_when_nonce_does_not_match(self, settle_service):
-        _mock_reader(settle_service, "transferLockedNonces", 5)
+    @pytest.mark.parametrize(("nonce", "used"), [(0, False), (5 + 256, False), (6, True)])
+    async def test_rejects_when_nonce_does_not_match(self, settle_service, nonce, used):
+        reader = _mock_reader(settle_service, "transferLockedNonces", 5)
+        reader.functions.isTransferLockedNonceUsed.return_value.call = AsyncMock(return_value=used)
         settle_service._submit = AsyncMock()
         with pytest.raises(ValueError, match="nonce mismatch"):
-            await settle_service.transfer_locked_funds(self._make_payload(nonce=0))
+            await settle_service.transfer_locked_funds(self._make_payload(nonce=nonce))
         settle_service._submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_accepts_an_unused_nonce_in_the_window(self, settle_service):
+        reader = _mock_reader(settle_service, "transferLockedNonces", 5)
+        reader.functions.isTransferLockedNonceUsed.return_value.call = AsyncMock(return_value=False)
+        settle_service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
+        await settle_service.transfer_locked_funds(self._make_payload(nonce=5 + 255))
+        settle_service._submit.assert_called_once()
 
     # The first result is unseen, so a resend that doesn't join submits again.
     @pytest.mark.asyncio
