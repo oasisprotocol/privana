@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 # Entries are lowercase initial 4-byte function selectors without the 0x prefix.
 _PLAINTEXT_TX_SELECTOR_ALLOWLIST: Final[frozenset[str]] = frozenset()
 
+# appd queues writes without a time limit, so in a burst a write waits minutes for its turn.
+_APPD_TIMEOUT_SECONDS: Final[float] = 600.0
+
 
 @dataclass
 class RoflSubmissionResult:
@@ -123,7 +126,7 @@ class RoflAppdClient:
         """
         if cls._instance is None:
             cls._instance = super(RoflAppdClient, cls).__new__(cls)
-            cls._instance._client = AsyncRoflClient()
+            cls._instance._client = AsyncRoflClient(timeout=_APPD_TIMEOUT_SECONDS)
         return cls._instance
 
     async def get_keypair(self, key_id: str = ROFL_QUERY_SIGNER_KEY):
