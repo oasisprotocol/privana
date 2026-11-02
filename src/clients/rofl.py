@@ -245,9 +245,10 @@ class RoflAppdClient:
 
         except TransactionRevertedError:
             raise
+        except ValueError as e:
+            logger.error("ROFL submission exception: %s", str(e), exc_info=True)
+            # appd has submitted before it replies. Routes read ValueError as nothing sent (400).
+            raise RuntimeError(f"Invalid ROFL response: {e}") from e
         except Exception as e:
             logger.error("ROFL submission exception: %s", str(e), exc_info=True)
-            if isinstance(e, ValueError):
-                # appd has submitted before it replies. Routes read ValueError as nothing sent (400).
-                raise RuntimeError(f"Invalid ROFL response: {e}") from e
             raise
