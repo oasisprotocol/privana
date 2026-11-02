@@ -175,6 +175,7 @@ class RoflAppdClient:
         Raises:
             ValueError: If required transaction fields are missing
             TransactionRevertedError: If the on-chain transaction reverted
+            RuntimeError: If appd's reply can't be parsed, after it submitted
             Exception: If submission fails
         """
         if "to" not in tx or "data" not in tx:
@@ -197,10 +198,7 @@ class RoflAppdClient:
 
         try:
             # AsyncRoflClient.sign_submit returns decoded CBOR directly
-            try:
-                result = await self._client.sign_submit(tx, encrypt)
-            except cbor2.CBORDecodeError as e:
-                raise ValueError(f"ROFL appd returned invalid CBOR response: {e}") from e
+            result = await self._client.sign_submit(tx, encrypt)
 
             if "fail" in result:
                 fail_info = result["fail"]
@@ -227,7 +225,7 @@ class RoflAppdClient:
                 )
 
             if "ok" not in result:
-                raise ValueError(
+                raise RuntimeError(
                     f"Invalid ROFL response: missing 'ok' key. Response keys: {list(result.keys())}"
                 )
 
@@ -247,6 +245,10 @@ class RoflAppdClient:
 
         except TransactionRevertedError:
             raise
+        except ValueError as e:
+            logger.error("ROFL submission exception: %s", str(e), exc_info=True)
+            # appd has submitted before it replies. Routes read ValueError as nothing sent (400).
+            raise RuntimeError(f"Invalid ROFL response: {e}") from e
         except Exception as e:
             logger.error("ROFL submission exception: %s", str(e), exc_info=True)
             raise
