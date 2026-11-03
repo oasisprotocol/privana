@@ -674,11 +674,20 @@ def test_transfer_caller_rejects_expired_siwe_token(monkeypatch):
     )
 
 
+def test_caller_with_unverified_bearer_token_is_told_to_refresh():
+    with pytest.raises(HTTPException) as exc_info:
+        routes._require_caller(current_user=None, authorization="Bearer expired", token=None)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid or expired bearer token"
+    assert exc_info.value.headers["WWW-Authenticate"] == "Bearer"
+
+
 def test_transfer_caller_takes_jwt_user_without_minting(monkeypatch):
     auth_token_service = MagicMock()
     monkeypatch.setattr(routes, "get_auth_token_service", lambda: auth_token_service)
 
-    caller = routes._require_caller(current_user=TEST_ADDRESS, token=None)
+    caller = routes._require_caller(current_user=TEST_ADDRESS, authorization=None, token=None)
 
     assert caller == TEST_ADDRESS
     auth_token_service.create_and_encrypt.assert_not_called()

@@ -213,6 +213,12 @@ def _authenticate_caller(
         )
     if current_user:
         return None, current_user
+    if authorization:
+        raise auth_exception(
+            status_code=401,
+            detail="Invalid or expired bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     if not token:
         raise HTTPException(
             status_code=401,

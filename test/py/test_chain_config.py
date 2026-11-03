@@ -313,4 +313,6 @@ def test_deployed_rate_limit_exempt_parses(monkeypatch, env_file):
     assert raw, f"{env_file} has no RATE_LIMIT_EXEMPT"
     monkeypatch.setenv("RATE_LIMIT_EXEMPT", raw)
 
-    assert len(_build_rate_limit_exempt()) == len(raw.split(","))
+    exempt = _build_rate_limit_exempt()
+    assert len(exempt) == len([entry for entry in raw.split(",") if entry.strip()])
+    assert len(set(exempt)) == len(exempt), f"{env_file} lists an address twice"
