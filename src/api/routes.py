@@ -337,7 +337,7 @@ def _rate_limit_caller(name: str, limits: tuple[tuple[int, int], ...]):
 
     def dependency(caller: str = Depends(_require_caller)) -> None:
         caller = Web3.to_checksum_address(caller)
-        if caller in load_settings().transfer_rate_limit_exempt:
+        if caller in load_settings().rate_limit_exempt:
             return
         for limit, window_seconds in limits:
             retry_after = get_auth_rate_limiter().hit(
@@ -1197,7 +1197,7 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
 async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmissionResponse:
     """Transfer funds between accounting balances using a user signature.
 
-    Rate-limited per caller, except for TRANSFER_RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).
+    Rate-limited per caller, except for RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).
     """
 
     try:
