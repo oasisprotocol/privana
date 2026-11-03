@@ -1824,6 +1824,17 @@
           "service_address": {
             "title": "Service Address",
             "type": "string"
+          },
+          "used": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used"
           }
         },
         "required": [
@@ -3790,7 +3801,7 @@
     },
     "/v1/accounting/funds/transfer-locked/nonce/{service_address}": {
       "get": {
-        "description": "Get the lowest unused transferFromLock nonce for a service.",
+        "description": "Get the lowest unused transferFromLock nonce for a service, and whether `nonce` was used.",
         "operationId": "get_transfer_locked_nonce_v1_accounting_funds_transfer_locked_nonce__service_address__get",
         "parameters": [
           {
@@ -3800,6 +3811,25 @@
             "schema": {
               "title": "Service Address",
               "type": "string"
+            }
+          },
+          {
+            "description": "Also return whether this nonce was used",
+            "in": "query",
+            "name": "nonce",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Also return whether this nonce was used",
+              "title": "Nonce"
             }
           }
         ],

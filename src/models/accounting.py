@@ -572,6 +572,7 @@ class TransferLockedNonceResponse(BaseModel):
 
     service_address: str
     nonce: int
+    used: Optional[bool] = None
 
 
 class TransferToLockNonceResponse(BaseModel):

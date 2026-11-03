@@ -1438,12 +1438,21 @@ class AccountingContractService:
         nonce = await contract_reader.functions.modifyLockNonces(checksum_user).call()
         return {"user_address": checksum_user, "nonce": nonce}
 
-    async def get_transfer_locked_nonce(self, service_address: str) -> Dict[str, Any]:
-        """Get the lowest unused transferFromLock nonce for a service."""
+    async def get_transfer_locked_nonce(
+        self, service_address: str, nonce: int | None = None
+    ) -> Dict[str, Any]:
+        """Get the lowest unused transferFromLock nonce for a service, and whether `nonce` was used."""
         checksum_service = self._require_address(service_address, "service_address")
         contract_reader = self._get_reader_contract()
-        nonce = await contract_reader.functions.transferLockedNonces(checksum_service).call()
-        return {"service_address": checksum_service, "nonce": nonce}
+        result = {
+            "service_address": checksum_service,
+            "nonce": await contract_reader.functions.transferLockedNonces(checksum_service).call(),
+        }
+        if nonce is not None:
+            result["used"] = await contract_reader.functions.isTransferLockedNonceUsed(
+                checksum_service, nonce
+            ).call()
+        return result
 
     async def get_transfer_to_lock_nonce(self, service_address: str) -> Dict[str, Any]:
         """Get the current transferToLock nonce for a service."""

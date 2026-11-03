@@ -1194,11 +1194,14 @@ async def get_modify_lock_nonce(user_address: str) -> ModifyLockNonceResponse:
     "/funds/transfer-locked/nonce/{service_address}",
     response_model=TransferLockedNonceResponse,
 )
-async def get_transfer_locked_nonce(service_address: str) -> TransferLockedNonceResponse:
-    """Get the lowest unused transferFromLock nonce for a service."""
+async def get_transfer_locked_nonce(
+    service_address: str,
+    nonce: int | None = Query(None, ge=0, description="Also return whether this nonce was used"),
+) -> TransferLockedNonceResponse:
+    """Get the lowest unused transferFromLock nonce for a service, and whether `nonce` was used."""
 
     try:
-        result = await _service.get_transfer_locked_nonce(service_address)
+        result = await _service.get_transfer_locked_nonce(service_address, nonce)
         return TransferLockedNonceResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

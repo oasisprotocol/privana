@@ -95,6 +95,17 @@ class TestGetTransferLockedNonce:
         result = await service.get_transfer_locked_nonce(SERVICE)
         assert result["nonce"] == 5
         assert "service_address" in result
+        assert "used" not in result
+
+    @pytest.mark.asyncio
+    async def test_returns_whether_a_nonce_was_used(self, service):
+        reader = _mock_reader(service, "transferLockedNonces", 5)
+        reader.functions.isTransferLockedNonceUsed.return_value.call = AsyncMock(return_value=True)
+        result = await service.get_transfer_locked_nonce(SERVICE, 7)
+        assert result["used"] is True
+        reader.functions.isTransferLockedNonceUsed.assert_called_once_with(
+            Web3.to_checksum_address(SERVICE), 7
+        )
 
     @pytest.mark.asyncio
     async def test_rejects_invalid_address(self, service):
