@@ -1195,7 +1195,7 @@ async def get_modify_lock_nonce(user_address: str) -> ModifyLockNonceResponse:
     response_model=TransferLockedNonceResponse,
 )
 async def get_transfer_locked_nonce(service_address: str) -> TransferLockedNonceResponse:
-    """Get the current transferFromLock nonce for a service."""
+    """Get the lowest unused transferFromLock nonce for a service."""
 
     try:
         result = await _service.get_transfer_locked_nonce(service_address)

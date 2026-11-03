@@ -1439,7 +1439,7 @@ class AccountingContractService:
         return {"user_address": checksum_user, "nonce": nonce}
 
     async def get_transfer_locked_nonce(self, service_address: str) -> Dict[str, Any]:
-        """Get the current transferFromLock nonce for a service."""
+        """Get the lowest unused transferFromLock nonce for a service."""
         checksum_service = self._require_address(service_address, "service_address")
         contract_reader = self._get_reader_contract()
         nonce = await contract_reader.functions.transferLockedNonces(checksum_service).call()

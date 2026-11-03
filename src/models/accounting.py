@@ -568,7 +568,7 @@ class ModifyLockNonceResponse(BaseModel):
 
 
 class TransferLockedNonceResponse(BaseModel):
-    """Response containing the current transferFromLock nonce for a service."""
+    """Response containing the lowest unused transferFromLock nonce for a service."""
 
     service_address: str
     nonce: int

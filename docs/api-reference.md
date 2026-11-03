@@ -270,7 +270,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `GET /funds/transfer/nonce/{user}` | Current transfer nonce. |
 | `GET /funds/lock/nonce/{user}` | Current createLock nonce. |
 | `GET /funds/modify-lock/nonce/{user}` | Current modifyLock nonce. |
-| `GET /funds/transfer-locked/nonce/{service}` | Current transferFromLock nonce. |
+| `GET /funds/transfer-locked/nonce/{service}` | Lowest unused transferFromLock nonce. |
 
 ## Auth Endpoints
 

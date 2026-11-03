@@ -1815,7 +1815,7 @@
         "type": "object"
       },
       "TransferLockedNonceResponse": {
-        "description": "Response containing the current transferFromLock nonce for a service.",
+        "description": "Response containing the lowest unused transferFromLock nonce for a service.",
         "properties": {
           "nonce": {
             "title": "Nonce",
@@ -3790,7 +3790,7 @@
     },
     "/v1/accounting/funds/transfer-locked/nonce/{service_address}": {
       "get": {
-        "description": "Get the current transferFromLock nonce for a service.",
+        "description": "Get the lowest unused transferFromLock nonce for a service.",
         "operationId": "get_transfer_locked_nonce_v1_accounting_funds_transfer_locked_nonce__service_address__get",
         "parameters": [
           {
