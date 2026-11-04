@@ -273,12 +273,37 @@ class TestTransferLockedFunds:
         return service
 
     @pytest.mark.asyncio
-    async def test_rejects_when_nonce_does_not_match(self, settle_service):
-        _mock_reader(settle_service, "transferLockedNonces", 5)
-        settle_service._submit = AsyncMock()
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await settle_service.transfer_locked_funds(self._make_payload(nonce=0))
-        settle_service._submit.assert_not_called()
+    async def test_submits_nonce_ahead_of_counter_without_precheck(self, settle_service):
+        # A nonce ahead of the counter must still submit, not be rejected by the
+        # pre-check read, which settles skip.
+        settle_service._get_reader_contract = MagicMock()
+        settle_service._submit = AsyncMock(
+            return_value=SubmissionResult(submission_id="0xabc", status="submitted")
+        )
+        result = await settle_service.transfer_locked_funds(self._make_payload(nonce=7))
+        assert result.status == "submitted"
+        settle_service._submit.assert_awaited_once()
+        settle_service._get_reader_contract.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ahead_nonce_revert_clears_record_so_resend_lands(self, settle_service):
+        # A revert clears the record so an identical resend can land later.
+        settle_service._submit = AsyncMock(
+            side_effect=[
+                TransactionRevertedError("Transaction reverted: InvalidNonce"),
+                SubmissionResult(submission_id="0xabc", status="submitted"),
+            ]
+        )
+        payload = self._make_payload(nonce=7)
+
+        with pytest.raises(TransactionRevertedError):
+            await settle_service.transfer_locked_funds(payload)
+        assert _record(settle_service) is None
+
+        result = await settle_service.transfer_locked_funds(payload)
+        assert result.submission_id == "0xabc"
+        assert _record(settle_service).status == "executed"
+        assert settle_service._submit.call_count == 2
 
     # The first result is unseen, so a resend that doesn't join submits again.
     @pytest.mark.asyncio
@@ -383,6 +408,8 @@ class TestTransferLockedFunds:
         settle_service._accounting_store = AccountingStore(str(tmp_path))
         _mock_reader(settle_service, "transferLockedNonces", 1)
 
+        # The reloaded record means this is a resend, so the counter is read: it
+        # has advanced past the nonce, so the resend is not submitted again.
         with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
             await settle_service.transfer_locked_funds(payload)
 

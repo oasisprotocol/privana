@@ -375,7 +375,13 @@ class AccountingContractService:
             )
 
     async def _submit_signed(
-        self, signer: ChecksumAddress, nonce: int, nonce_fn: str, label: str, data: bytes
+        self,
+        signer: ChecksumAddress,
+        nonce: int,
+        nonce_fn: str,
+        label: str,
+        data: bytes,
+        check_nonce: bool = True,
     ) -> SubmissionResult:
         # Only an exact resend, signature included, shares this key and gets the same outcome.
         key = Web3.to_hex(Web3.keccak(HexBytes(data)))
@@ -387,7 +393,10 @@ class AccountingContractService:
                     return SubmissionResult(
                         submission_id=earlier.submission_id or "", status="submitted"
                     )
-                await self._validate_user_nonce(signer, nonce, nonce_fn, label)
+                # A fresh settle skips the pre-check so an ahead nonce reaches the
+                # chain; a resend still reads the counter to avoid a consumed nonce.
+                if check_nonce or earlier is not None:
+                    await self._validate_user_nonce(signer, nonce, nonce_fn, label)
 
                 self._accounting_store.put(key, AccountingCall(status="pending"))
                 logger.info("Submitting %s %s at nonce %d", label, key, nonce)
@@ -1005,12 +1014,15 @@ class AccountingContractService:
             nonce,
             signature,
         )
+        # A settle's nonce can lead the counter when the caller sends several at
+        # once, so it must reach the chain: an out-of-order one reverts and resends.
         return await self._submit_signed(
             service,
             nonce,
             "transferLockedNonces",
             "transferFromLock",
             fn._encode_transaction_data(),
+            check_nonce=False,
         )
 
     async def transfer_to_lock(self, payload: Dict) -> SubmissionResult:
