@@ -347,7 +347,7 @@ def _rate_limit_caller(name: str, limits: tuple[tuple[int, int], ...]):
             return
         for limit, window_seconds in limits:
             retry_after = get_auth_rate_limiter().hit(
-                bucket=f"{name}_{window_seconds}s",
+                bucket=f"{name}_{limit}_{window_seconds}s",
                 key=caller.lower(),
                 limit=limit,
                 window_seconds=window_seconds,

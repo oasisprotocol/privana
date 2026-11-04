@@ -873,6 +873,8 @@ def test_signed_write_route_maps_unknown_outcome_to_409(monkeypatch, path, metho
         ),
     )
     monkeypatch.setattr(routes, "_service", mock_service)
+    _set_rate_limit_exempt(monkeypatch, ())
+    monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: _RecordingRateLimiter())
 
     response = _make_transfer_client().post(
         f"/v1/accounting/funds/{path}", json={**body, "nonce": 0, "signature": "0xabcd"}
@@ -979,4 +981,4 @@ def test_rate_limit_caller_counts_each_route_in_its_own_buckets(monkeypatch) -> 
     app.dependency_overrides[routes._require_caller] = lambda: BENEFICIARY
 
     assert TestClient(app).get("/limited").status_code == 200
-    assert [(call["bucket"], call["limit"]) for call in limiter.calls] == [("example_60s", 5)]
+    assert [(call["bucket"], call["limit"]) for call in limiter.calls] == [("example_5_60s", 5)]
