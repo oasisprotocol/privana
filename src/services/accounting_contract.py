@@ -363,26 +363,7 @@ class AccountingContractService:
 
         return _to_checksum(signer)
 
-    async def _validate_user_nonce(
-        self, user: ChecksumAddress, nonce: int, nonce_fn: str, label: str
-    ) -> None:
-        contract_reader = self._get_reader_contract()
-        expected_nonce = await getattr(contract_reader.functions, nonce_fn)(user).call()
-        if nonce != expected_nonce:
-            raise ValueError(
-                f"{label} nonce mismatch: got {nonce}, expected {expected_nonce}. "
-                f"The nonce may already have been used by another request."
-            )
-
-    async def _submit_signed(
-        self,
-        signer: ChecksumAddress,
-        nonce: int,
-        nonce_fn: str,
-        label: str,
-        data: bytes,
-        check_nonce: bool = True,
-    ) -> SubmissionResult:
+    async def _submit_signed(self, nonce: int, label: str, data: bytes) -> SubmissionResult:
         # Only an exact resend, signature included, shares this key and gets the same outcome.
         key = Web3.to_hex(Web3.keccak(HexBytes(data)))
 
@@ -393,8 +374,6 @@ class AccountingContractService:
                     return SubmissionResult(
                         submission_id=earlier.submission_id or "", status="submitted"
                     )
-                if check_nonce:
-                    await self._validate_user_nonce(signer, nonce, nonce_fn, label)
 
                 self._accounting_store.put(key, AccountingCall(status="pending"))
                 logger.info("Submitting %s %s at nonce %d", label, key, nonce)
@@ -892,24 +871,6 @@ class AccountingContractService:
         expiry = self._require_positive(payload["expiry"], "expiry")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-        user = await self._recover_eip712_signer(
-            "Lock",
-            [
-                {"name": "serviceAddress", "type": "address"},
-                {"name": "tokenId", "type": "bytes32"},
-                {"name": "amount", "type": "uint256"},
-                {"name": "expiry", "type": "uint256"},
-                {"name": "nonce", "type": "uint256"},
-            ],
-            {
-                "serviceAddress": service,
-                "tokenId": _to_prefixed_hex(token),
-                "amount": amount,
-                "expiry": expiry,
-                "nonce": nonce,
-            },
-            signature,
-        )
 
         fn = self.contract.functions.createLock(
             service,
@@ -919,9 +880,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit_signed(
-            user, nonce, "createLockNonces", "createLock", fn._encode_transaction_data()
-        )
+        return await self._submit_signed(nonce, "createLock", fn._encode_transaction_data())
 
     async def modify_lock(self, payload: Dict) -> SubmissionResult:
         lock_id = self._require_positive(payload["lock_id"], "lock_id")
@@ -929,22 +888,6 @@ class AccountingContractService:
         new_expiry = self._require_positive(payload["new_expiry"], "new_expiry")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-        user = await self._recover_eip712_signer(
-            "ModifyLock",
-            [
-                {"name": "lockId", "type": "uint256"},
-                {"name": "amount", "type": "uint256"},
-                {"name": "newExpiry", "type": "uint256"},
-                {"name": "nonce", "type": "uint256"},
-            ],
-            {
-                "lockId": lock_id,
-                "amount": amount,
-                "newExpiry": new_expiry,
-                "nonce": nonce,
-            },
-            signature,
-        )
 
         fn = self.contract.functions.modifyLock(
             lock_id,
@@ -953,9 +896,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit_signed(
-            user, nonce, "modifyLockNonces", "modifyLock", fn._encode_transaction_data()
-        )
+        return await self._submit_signed(nonce, "modifyLock", fn._encode_transaction_data())
 
     async def transfer_funds(self, payload: Dict) -> SubmissionResult:
         to_addr = self._require_address(payload["to_address"], "to_address")
@@ -965,22 +906,6 @@ class AccountingContractService:
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-        user = await self._recover_eip712_signer(
-            "Transfer",
-            [
-                {"name": "toAddress", "type": "address"},
-                {"name": "tokenId", "type": "bytes32"},
-                {"name": "amount", "type": "uint256"},
-                {"name": "nonce", "type": "uint256"},
-            ],
-            {
-                "toAddress": to_addr,
-                "tokenId": _to_prefixed_hex(token),
-                "amount": amount,
-                "nonce": nonce,
-            },
-            signature,
-        )
 
         fn = self.contract.functions.transferBalance(
             to_addr,
@@ -989,9 +914,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        return await self._submit_signed(
-            user, nonce, "transferNonces", "Transfer", fn._encode_transaction_data()
-        )
+        return await self._submit_signed(nonce, "Transfer", fn._encode_transaction_data())
 
     async def transfer_locked_funds(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
@@ -1000,7 +923,6 @@ class AccountingContractService:
         if str(to_addr).lower() == ADDRESS_ZERO:
             raise ValueError("to_address must not be the zero address")
         amount = self._require_positive(payload["amount"], "amount")
-        service = self._require_address(payload["service_address"], "service_address")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
 
@@ -1012,16 +934,7 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        # A caller orders its settle nonces and needn't wait for each to land, so this
-        # nonce can be ahead of the counter.
-        return await self._submit_signed(
-            service,
-            nonce,
-            "transferLockedNonces",
-            "transferFromLock",
-            fn._encode_transaction_data(),
-            check_nonce=False,
-        )
+        return await self._submit_signed(nonce, "transferFromLock", fn._encode_transaction_data())
 
     async def transfer_to_lock(self, payload: Dict) -> SubmissionResult:
         user = self._require_address(payload["user_address"], "user_address")
@@ -1029,23 +942,6 @@ class AccountingContractService:
         amount = self._require_positive(payload["amount"], "amount")
         nonce = self._require_positive(payload["nonce"], "nonce", allow_zero=True)
         signature = self._require_hex(payload["signature"], "signature")
-        service = await self._recover_eip712_signer(
-            "TransferToLock",
-            [
-                {"name": "userAddress", "type": "address"},
-                {"name": "lockId", "type": "uint256"},
-                {"name": "amount", "type": "uint256"},
-                {"name": "nonce", "type": "uint256"},
-            ],
-            {
-                "userAddress": user,
-                "lockId": lock_id,
-                "amount": amount,
-                "nonce": nonce,
-            },
-            signature,
-        )
-        await self._validate_user_nonce(service, nonce, "transferToLockNonces", "transferToLock")
 
         fn = self.contract.functions.transferToLock(
             user,
@@ -1129,7 +1025,6 @@ class AccountingContractService:
             },
             signature,
         )
-        await self._validate_user_nonce(user, nonce, "withdrawalNonces", "Withdrawal")
 
         # Validate token and destination chain before on-chain submission
         context = await self._get_token_context(token)

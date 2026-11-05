@@ -1782,11 +1782,6 @@
             "title": "Nonce",
             "type": "integer"
           },
-          "service_address": {
-            "minLength": 1,
-            "title": "Service Address",
-            "type": "string"
-          },
           "signature": {
             "title": "Signature",
             "type": "string"
@@ -1807,7 +1802,6 @@
           "lock_id",
           "to_address",
           "amount",
-          "service_address",
           "nonce",
           "signature"
         ],

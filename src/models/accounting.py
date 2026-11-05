@@ -224,7 +224,6 @@ class TransferLockedFundsRequest(BaseModel):
     lock_id: int = Field(..., ge=1)
     to_address: str = Field(..., min_length=1)
     amount: int = Field(..., gt=0)
-    service_address: str = Field(..., min_length=1)
     nonce: int = Field(..., ge=0)
     signature: str
 
