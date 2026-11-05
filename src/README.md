@@ -19,8 +19,7 @@ src/
 │   ├── routes.py              #   Deposits, locks, transfers, withdrawals
 │   └── auth_routes.py         #   SIWE login, OAuth-style code/token exchange
 ├── services/                  # Business logic
-│   ├── deposit_processor.py   #   Orchestrates verify → sweep → credit
-│   ├── deposit_verifier.py    #   RPC-based source-chain verification
+│   ├── deposit_processor.py   #   Orchestrates sweep → credit
 │   ├── sweep_engine.py        #   Per-deposit state machine, persistence, recovery
 │   ├── withdrawal_processor.py#   Polls Sapphire, resolves, broadcasts
 │   ├── accounting_contract.py #   Sapphire client (ROFL or direct-key path)
@@ -58,35 +57,27 @@ src/
 
 ### Deposit Flow
 
-Triggered by `POST /deposits/check`. The processor returns within ~2-3 s with `status="pending"` and a `deposit_id`; the actual sweep continues in a background task. Clients poll `GET /deposits/status/{deposit_id}`.
+Triggered by `POST /deposits/check`. The processor returns within ~2-3 s with the in-flight deposits as a list of pending statuses with their `deposit_id` (empty when there is none); the actual sweep continues in a background task. Clients poll `GET /deposits/status/{deposit_id}`.
+
+Every asset is claimed by balance (the request names a registered `token_id`, which fixes the source chain and the asset; without one every configured token is checked, their balances read in parallel). `claim_balance` reads the balance at `latest − finality_depth` (capped by the current balance) and saves a `PENDING` record with a random `deposit_id`. Neither the amount nor the nonce is fixed when the sweep is scheduled: the sweep decides both when it signs, taking the deposit address's current nonce under the address lock, so sweeps of one address simply run one after another. At most one unfinished sweep per (address, asset) exists, so a repeated claim reports the one in flight (or `busy` while a sweep holds the address lock). Native sweeps are paid for by the operator: a fresh gas budget is funded per claim, the swept amount leaves that budget behind, and the leftover is credited with the next claim.
 
 ```
 Client                       DepositProcessor              SweepEngine                Sapphire
   │                                 │                          │                         │
   │── /deposits/check ─────────────▶│                          │                         │
-  │  (chain_id, tx_hash, amount,    │                          │                         │
-  │   log_index, version, siwe)     │                          │                         │
-  │                                 │                          │                         │
-  │                                 │── verify_deposit ───── (source-chain RPC) ─▶       │
-  │                                 │   (status=1, finality,   │                         │
-  │                                 │    matching Transfer/    │                         │
-  │                                 │    tx.value)             │                         │
-  │                                 │                          │                         │
-  │                                 │── compute_deposit_id ────│                         │
-  │                                 │── is_deposit_processed ─────────────────────────▶  │
-  │                                 │                          │                         │
-  │                                 │── create background ────▶│                         │
-  │                                 │   sweep task             │                         │
+  │  (token_id, siwe)               │                          │                         │
+  │                                 │── claim_balance ────────▶│ (finalized balance,     │
+  │                                 │                          │  random deposit_id,     │
+  │                                 │                          │  saved as PENDING)      │
   │◀── {pending, deposit_id} ───────│                          │                         │
-  │                                 │                          │                         │
-  │                                 │                          │── sweep_native/erc20    │
-  │                                 │                          │   (state machine)       │
+  │                                 │── sweep_native/erc20 ───▶│                         │
+  │                                 │                          │── sweep (state machine) │
   │                                 │                          │── creditDeposit ───────▶│
   │                                 │                          │                         │
   │── /deposits/status/{id} ───────▶│ (returns "credited" once on-chain, else "pending") │
 ```
 
-Key files: `services/deposit_processor.py`, `services/deposit_verifier.py`, `services/sweep_engine.py`.
+Key files: `services/deposit_processor.py`, `services/sweep_engine.py`.
 
 ### On-Ramp Flow
 
@@ -95,7 +86,7 @@ Key files: `services/deposit_processor.py`, `services/deposit_verifier.py`, `ser
 1. `POST /onramp/intent` binds the authenticated user, freshly derived deposit address, registered token, chain, provider, and asset.
 2. MoonPay uses `POST /onramp/sign-url`; Transak uses backend-only `POST /onramp/session` with the real client IP, sourced either from a trusted proxy-owned header (`header` mode) or from an edge-signed attestation the request carries (`attested` mode); see `TRANSAK_CLIENT_IP_MODE`. The browser must preserve `Referer` when it opens the returned opaque URL—never use `noreferrer` or `no-referrer`.
 3. `GET /onramp/pending` performs bounded provider reads and returns only strictly admitted completed orders with an on-chain transaction hash.
-4. The client submits the matching transfer-log amount to `/deposits/check`; only the existing verifier → sweep → ROFL credit path changes balances.
+4. The client claims the token with `/deposits/check`; only the existing sweep → ROFL credit path changes balances.
 
 Recovery is stateless. The selected provider supplies wallet bootstrap, while explicitly supplied signed intents dispatch exact recovery to their encoded provider. Transak Partner Access Tokens are cached in memory using returned `expiresAt`, refreshed single-flight, and retried once only after an explicit `401`. Webhooks are verified, redacted observability signals and never create local order state or credit.
 
@@ -104,37 +95,26 @@ Key files: `services/onramp_intent.py`, `services/onramp.py`, `services/transak.
 ### Sweep State Machine
 
 ```
-            sweep_native              gas-fund            sweep tx mined
-              starts                  succeeds            (receipt.status=1)
-   (no record) ──────▶ PENDING ────────▶ GAS_FUNDED ────────▶ SWEPT
-                          │                                       │
-                          │                                       │
-                          ├──▶ (native: skip GAS_FUNDED if ───────┤
-                          │     deposit-addr balance covers       │
-                          │     gas + amount)                     │
-                          │                                       ▼
-                          │                                   creditDeposit
-                          │                                       │
-                          │                                       ▼
-                          │                                  record deleted
-                          │
-                          └─ on failure: stay in current state, error stored,
-                             recovery loop retries
+ (no record) ──▶ PENDING ──▶ GAS_FUNDED ──▶ SWEPT ──▶ creditDeposit ──▶ record deleted
+                    │             ▲
+                    └─────────────┘
+                (gas already on hand: skip funding)
 ```
 
 Concurrency:
-- One `asyncio.Lock` per `(deposit_address, chain_id)` — concurrent claims for the same address queue.
+- One `asyncio.Lock` per `(deposit_address, chain_id)` — concurrent claims and recovery passes for the same address queue.
+- Every driver of a record (the original sweep task, startup resume, the periodic loop) takes that lock and re-reads the record from disk before acting, so a record another driver already settled is gone and is never swept a second time.
 - One global lock around gas-tank nonce reads (prevents concurrent sweeps from reusing the same nonce on the gas tank).
 
-Persistence: one JSON file per active sweep at `/data/sweep-engine/sweep_<deposit_id>.json` (matches `SweepRecord` dataclass; keyed by the unique deposit_id so same-address deposits never clobber each other). On startup, `resume_incomplete_sweeps()` migrates any legacy `sweep_<address>_<chain_id>.json` files to the deposit_id key and re-drives any `PENDING` / `GAS_FUNDED` records.
+Persistence: one JSON file per active sweep at `/data/sweep-engine/sweep_<deposit_id>.json` (matches `SweepRecord` dataclass; at most one unfinished sweep exists per asset and address, which `claim_balance` finds by scanning the records). On startup, `resume_incomplete_sweeps()` re-drives every incomplete record.
 
 Recovery semantics:
-- `SWEPT` records → retry `creditDeposit` (idempotent via `DepositAlreadyProcessed` revert).
-- `GAS_FUNDED` with a mined sweep tx → promote to `SWEPT`, then credit.
-- `PENDING` / `GAS_FUNDED` without a sweep tx → re-run sweep from scratch (no nonce-collision risk because no tx was broadcast).
-- `GAS_FUNDED` with an unmined / dropped / reverted sweep tx → logged for manual inspection (the gas-tank nonce may be encumbered).
+- `SWEPT` → retry `creditDeposit` (idempotent via `DepositAlreadyProcessed` revert).
+- Sweeping → look up the receipt of every recorded sweep hash. Mined → promote to `SWEPT`, then credit. Known to the node but unmined → wait for it. Neither: if the deposit-address nonce still equals the recorded sweep nonce nothing consumed it, so re-sign at that same nonce (at most one attempt can execute).
+- Sweeping with a reverted sweep, a consumed nonce, or a legacy record with no recorded nonce → logged for manual investigation; never re-signed automatically.
+- No sweep tx yet (`PENDING`, gas funding in flight, `GAS_FUNDED`) → top up gas if short, then sign and send a fresh sweep.
 
-A periodic recovery loop (`SWEEP_RECOVERY_INTERVAL = 60s`) retries any `SWEPT` records whose credit failed.
+A periodic recovery loop (`SWEEP_RECOVERY_INTERVAL = 60s`) drives every incomplete record through the same path.
 
 Key file: `services/sweep_engine.py`.
 
@@ -290,7 +270,6 @@ Notable test files:
 
 | File | Covers |
 |------|--------|
-| `test_deposit_verifier.py` | RPC-side verification (status, finality, log matching, balance-delta fallback) |
 | `test_deposit_processor.py` | Orchestration, idempotency, background-task lifecycle |
 | `test_sweep_engine.py` | State machine, persistence, gas-tank concurrency |
 | `test_sweep_recovery.py` | Restart recovery for each `SweepState` |

@@ -40,11 +40,6 @@ class ChainConfig:
     # Gas-price floor, set per chain: backstop for a bad RPC, not a pricing knob.
     min_sweep_gas_price_wei: int
     l2_type: L2Type = L2Type.NONE
-    # Deposit discovery (GET /deposits/pending) scan bounds, in blocks.
-    # Defaults suit ~12s blocks; override per chain for faster block times.
-    discovery_lookback_blocks: int = 300  # ~1h default scan window
-    discovery_max_lookback_blocks: int = 7_200  # ~24h clamp for client requests
-    discovery_scan_chunk_blocks: int = 5_000  # per eth_getLogs call (Alchemy-safe)
 
     def __post_init__(self):
         if self.gas_funding_amount_wei >= self.min_deposit_native_wei:
@@ -55,13 +50,6 @@ class ChainConfig:
                 "otherwise a gas-funding transfer could satisfy the min-deposit "
                 "threshold and be claimed via /deposits/check after restart."
             )
-        if not (0 < self.discovery_lookback_blocks <= self.discovery_max_lookback_blocks):
-            raise ValueError(
-                f"chain {self.chain_id}: discovery_lookback_blocks must be in "
-                f"[1, discovery_max_lookback_blocks]"
-            )
-        if self.discovery_scan_chunk_blocks <= 0:
-            raise ValueError(f"chain {self.chain_id}: discovery_scan_chunk_blocks must be positive")
         if self.min_sweep_gas_price_wei <= 0:
             raise ValueError(f"chain {self.chain_id}: min_sweep_gas_price_wei must be positive")
         # Cap must cover a floor-priced ERC-20 sweep at the funding headroom the
@@ -98,11 +86,6 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
             gas_funding_amount_wei=20_000_000_000_000_000,  # cap: 0.02 ROSE (65k gas * 2x * ~150 gwei)
             min_sweep_gas_price_wei=100_000_000_000,  # 100 gwei, Sapphire's minimum gas price
             l2_type=L2Type.NONE,
-            discovery_scan_chunk_blocks=100,  # Sapphire gateway caps eth_getLogs at 100 blocks
-            discovery_lookback_blocks=640,  # ~1h at ~5.7s blocks
-            # ~1.6h at ~5.7s blocks: caps one client request at 10 chunked getLogs
-            # calls against the free public gateway.
-            discovery_max_lookback_blocks=1_000,
         ),
         84532: ChainConfig(
             chain_id=84532,
@@ -112,8 +95,6 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
             gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 ETH
             min_sweep_gas_price_wei=100_000_000,  # 0.1 gwei
             l2_type=L2Type.OP_STACK,
-            discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
-            discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
         ),
         11155111: ChainConfig(
             chain_id=11155111,
@@ -131,8 +112,6 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
             gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 ETH
             min_sweep_gas_price_wei=5_000_000,  # Base's pinned minimum base fee
             l2_type=L2Type.OP_STACK,
-            discovery_lookback_blocks=1_800,  # ~1h at 2s blocks
-            discovery_max_lookback_blocks=43_200,  # ~24h at 2s blocks
         ),
         1: ChainConfig(
             chain_id=1,
@@ -149,8 +128,6 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
             min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
             gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 HYPE
             min_sweep_gas_price_wei=100_000_000,  # 0.1 gwei
-            discovery_lookback_blocks=3_600,  # ~1h at 1s small blocks
-            discovery_max_lookback_blocks=86_400,  # ~24h at 1s small blocks
         ),
     }
 
@@ -166,9 +143,6 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
 CHAIN_CONFIGS: Dict[int, ChainConfig] = _build_chain_configs()
 
 DEFAULT_FINALITY_DEPTH = 32
-
-# ERC20 Transfer event topic
-TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 # ─── Derived dicts for backward compat ──────────────────────────────────
 
