@@ -52,10 +52,6 @@ def _mock_reader(service_obj, fn_name, return_value):
     return mock_reader
 
 
-def _setup_user_nonce(service_obj, fn_name, expected_nonce=0):
-    return _mock_reader(service_obj, fn_name, expected_nonce)
-
-
 class TestGetLockNonce:
     @pytest.mark.asyncio
     async def test_returns_nonce_for_valid_address(self, service):
@@ -144,16 +140,7 @@ class TestLockFundsSubmission:
         }
 
     @pytest.mark.asyncio
-    async def test_rejects_when_recovered_signer_nonce_does_not_match(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "createLockNonces", expected_nonce=5)
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await service.lock_funds(self._make_payload(nonce=0))
-
-    @pytest.mark.asyncio
-    async def test_submits_when_recovered_signer_nonce_matches(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "createLockNonces", expected_nonce=0)
+    async def test_submits_without_reading_the_nonce(self, service):
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.lock_funds(self._make_payload(nonce=0))
         service._submit.assert_called_once()
@@ -171,16 +158,7 @@ class TestModifyLockSubmission:
         }
 
     @pytest.mark.asyncio
-    async def test_rejects_when_recovered_signer_nonce_does_not_match(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "modifyLockNonces", expected_nonce=3)
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await service.modify_lock(self._make_payload(nonce=0))
-
-    @pytest.mark.asyncio
-    async def test_submits_when_recovered_signer_nonce_matches(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "modifyLockNonces", expected_nonce=0)
+    async def test_submits_without_reading_the_nonce(self, service):
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.modify_lock(self._make_payload(nonce=0))
         service._submit.assert_called_once()
@@ -198,16 +176,7 @@ class TestTransferFundsSubmission:
         }
 
     @pytest.mark.asyncio
-    async def test_rejects_when_recovered_signer_nonce_does_not_match(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "transferNonces", expected_nonce=2)
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await service.transfer_funds(self._make_payload(nonce=0))
-
-    @pytest.mark.asyncio
-    async def test_submits_when_recovered_signer_nonce_matches(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "transferNonces", expected_nonce=0)
+    async def test_submits_without_reading_the_nonce(self, service):
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.transfer_funds(self._make_payload(nonce=0))
         service._submit.assert_called_once()
@@ -224,16 +193,9 @@ class TestRequestWithdrawalSubmission:
         }
 
     @pytest.mark.asyncio
-    async def test_rejects_when_recovered_signer_nonce_does_not_match(self, service):
+    async def test_submits_without_reading_the_nonce(self, service):
         service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "withdrawalNonces", expected_nonce=4)
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await service.request_withdrawal(self._make_payload(nonce=0))
-
-    @pytest.mark.asyncio
-    async def test_submits_when_recovered_signer_nonce_matches(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=USER)
-        _setup_user_nonce(service, "withdrawalNonces", expected_nonce=0)
+        service._locate_withdrawal_index = AsyncMock(return_value=None)
         service.settings.chain_rpc_urls = {84532: "https://example"}
         service._get_token_context = AsyncMock(
             return_value=TokenContext(chain_id=84532, token_address=None, is_native=True)
@@ -262,7 +224,6 @@ class TestTransferLockedFunds:
             "lock_id": 1,
             "to_address": USER,
             "amount": 1000,
-            "service_address": SERVICE,
             "nonce": nonce,
             "signature": "0x" + "ab" * 65,
         }
@@ -273,12 +234,14 @@ class TestTransferLockedFunds:
         return service
 
     @pytest.mark.asyncio
-    async def test_rejects_when_nonce_does_not_match(self, settle_service):
-        _mock_reader(settle_service, "transferLockedNonces", 5)
-        settle_service._submit = AsyncMock()
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await settle_service.transfer_locked_funds(self._make_payload(nonce=0))
-        settle_service._submit.assert_not_called()
+    async def test_submits_nonce_ahead_of_counter(self, settle_service):
+        settle_service._submit = AsyncMock(
+            return_value=SubmissionResult(submission_id="0xabc", status="submitted")
+        )
+        result = await settle_service.transfer_locked_funds(self._make_payload(nonce=7))
+        assert result.status == "submitted"
+        settle_service._submit.assert_awaited_once()
+        settle_service._get_reader_contract.assert_not_called()
 
     # The first result is unseen, so a resend that doesn't join submits again.
     @pytest.mark.asyncio
@@ -381,14 +344,14 @@ class TestTransferLockedFunds:
         with pytest.raises(SubmissionOutcomeUnknownError):
             await settle_service.transfer_locked_funds(payload)
         settle_service._accounting_store = AccountingStore(str(tmp_path))
-        _mock_reader(settle_service, "transferLockedNonces", 1)
 
         with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
             await settle_service.transfer_locked_funds(payload)
 
-        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
         assert _record(settle_service).status == "pending"
-        settle_service._submit.assert_called_once()
+        assert settle_service._submit.call_count == 2
+        settle_service._get_reader_contract.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_failure_to_record_pending_prevents_submission(self, settle_service):
@@ -445,16 +408,7 @@ class TestTransferToLockSubmission:
         }
 
     @pytest.mark.asyncio
-    async def test_rejects_when_recovered_signer_nonce_does_not_match(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=SERVICE)
-        _setup_user_nonce(service, "transferToLockNonces", expected_nonce=5)
-        with pytest.raises(ValueError, match="nonce mismatch"):
-            await service.transfer_to_lock(self._make_payload(nonce=0))
-
-    @pytest.mark.asyncio
-    async def test_submits_when_recovered_signer_nonce_matches(self, service):
-        service._recover_eip712_signer = AsyncMock(return_value=SERVICE)
-        _setup_user_nonce(service, "transferToLockNonces", expected_nonce=0)
+    async def test_submits_without_reading_the_nonce(self, service):
         service._submit = AsyncMock(return_value=MagicMock(submission_id="0xabc"))
         await service.transfer_to_lock(self._make_payload(nonce=0))
         service._submit.assert_called_once()
@@ -462,29 +416,20 @@ class TestTransferToLockSubmission:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "method, payload, nonce_fn",
+    "method, payload",
     [
-        ("lock_funds", TestLockFundsSubmission._make_payload(), "createLockNonces"),
-        ("modify_lock", TestModifyLockSubmission._make_payload(), "modifyLockNonces"),
-        ("transfer_funds", TestTransferFundsSubmission._make_payload(), "transferNonces"),
-        (
-            "transfer_locked_funds",
-            TestTransferLockedFunds._make_payload(),
-            "transferLockedNonces",
-        ),
+        ("lock_funds", TestLockFundsSubmission._make_payload()),
+        ("modify_lock", TestModifyLockSubmission._make_payload()),
+        ("transfer_funds", TestTransferFundsSubmission._make_payload()),
+        ("transfer_locked_funds", TestTransferLockedFunds._make_payload()),
     ],
     ids=["lock", "modify-lock", "transfer", "transfer-locked"],
 )
-async def test_resend_after_execution_replays_without_reading_the_nonce(
-    service, method, payload, nonce_fn
-):
-    service._recover_eip712_signer = AsyncMock(return_value=USER)
-    _setup_user_nonce(service, nonce_fn)
+async def test_resend_after_execution_replays(service, method, payload):
     service._submit = AsyncMock(
         return_value=SubmissionResult(submission_id="0xabc", status="submitted")
     )
     await getattr(service, method)(payload)
-    service._get_reader_contract = MagicMock(side_effect=RuntimeError("RPC down"))
 
     result = await getattr(service, method)(payload)
 

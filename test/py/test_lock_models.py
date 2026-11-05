@@ -84,20 +84,7 @@ def test_transfer_locked_requires_nonce():
         )
 
 
-def test_transfer_locked_requires_service_address():
-    with pytest.raises(ValidationError):
-        TransferLockedFundsRequest(
-            user_address="0x1234567890123456789012345678901234567890",
-            lock_id=1,
-            to_address="0x1234567890123456789012345678901234567890",
-            amount=1000000,
-            nonce=0,
-            signature="0xabcd",
-            # service_address intentionally missing
-        )
-
-
-def test_transfer_locked_accepts_nonce_and_service():
+def test_transfer_locked_accepts_nonce_and_ignores_service():
     req = TransferLockedFundsRequest(
         user_address="0x1234567890123456789012345678901234567890",
         lock_id=1,
@@ -108,7 +95,7 @@ def test_transfer_locked_accepts_nonce_and_service():
         signature="0xabcd",
     )
     assert req.nonce == 3
-    assert req.service_address == "0xabcdef1234567890abcdef1234567890abcdef12"
+    assert not hasattr(req, "service_address")
 
 
 def test_lock_nonce_response():

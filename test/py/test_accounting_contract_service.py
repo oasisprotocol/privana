@@ -742,7 +742,6 @@ async def test_transfer_locked_funds_rejects_zero_to_address() -> None:
                 "lock_id": 1,
                 "to_address": "0x0000000000000000000000000000000000000000",
                 "amount": 10,
-                "service_address": USER_A,
                 "nonce": 0,
                 "signature": "0x1234",
             }
