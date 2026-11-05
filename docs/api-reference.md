@@ -79,7 +79,6 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `POST /deposits/address` | required | `Authorization: Bearer …` or `X-SIWE-Token` |
 | `POST /deposits/check` | required | same |
 | `GET /deposits/status/{id}` | required | same |
-| `GET /deposits/pending` | required | same |
 | `POST /funds/withdraw-from-lock` | required | same |
 | `POST /funds/transfer` | required | same |
 | `GET /balances/{token_id}` | required | same |
@@ -117,42 +116,38 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 
 ## Deposit Flow
 
-The deposit path is **address-based**: the contract derives a per-user address (one per `chain_type` × `version`), the user funds it directly, and the backend verifies + sweeps + credits.
+The deposit path is **address-based**: the contract derives a per-user address (one per `chain_type` × `version`), the user funds it directly, and the backend sweeps + credits.
 
 ```
 1. POST /deposits/address           → returns the user's per-user deposit address
                                       (auth-gated — only the user can learn it)
 2. user sends funds to that address on the source chain
-3. POST /deposits/check             → backend verifies the tx, returns 202
-                                      with status="pending" and a deposit_id
+3. POST /deposits/check             → {chain_id, token_address}
+                                      returns 202 with status="pending" and a deposit_id
+                                      (200 with status="none" when nothing is claimable)
 4. GET /deposits/status/{deposit_id}  → poll until status="credited"
 ```
 
-For **external-wallet deposits** the client does not know the tx hash (no
-wallet callback, no webhook). `GET /deposits/pending?chain_id=…` scans
-finalized source-chain ERC20 Transfer logs to the caller's deposit address and
-returns uncredited candidates carrying exactly the fields `POST
-/deposits/check` consumes (`chain_id`, `tx_hash`, `amount`, `log_index`,
-`version`). Candidates with a sweep already in flight come back as
-`status="processing"` with their `deposit_id` — poll `GET
-/deposits/status/{deposit_id}` instead of re-submitting. The scan window
-defaults to ~1 hour and is clamped to ~24 hours via `lookback_blocks`
-(rounded up to full scan chunks); an optional `token_address` narrows the
-scan to one registered token. Results are cached for up to 30 seconds, so a
-just-submitted candidate may briefly reappear, possibly still marked
-`discovered` — re-submitting it to `/deposits/check` is harmless (the
-endpoint is idempotent). `scanned_from_block` reports the oldest block
-actually examined: when a scan stops early at its internal candidate caps it
-is higher than the requested window bottom, so treat only
-`[scanned_from_block, scanned_to_block]` as covered. In the extreme case
-where the caps trip inside the newest block, `scanned_from_block` is
-`scanned_to_block + 1`: the interval is empty and no block is fully covered. Native transfers
-emit no logs and are not discoverable — submit their tx hash to
-`/deposits/check` directly.
+**Deposits are claimed by balance.** `POST /deposits/check` with `chain_id` and
+`token_address` — an ERC20 contract, or the zero address for the chain's native asset; no tx
+hash, no amount — sweeps and credits everything of that asset that has reached finality at the
+deposit address. The amount is decided by the sweep itself when it signs. Because nothing about
+the deposit has to be known, a client can call it for every supported asset when the user logs
+in and again periodically. Responses:
+
+- `202` `status="pending"` with a `deposit_id`: a sweep was started, or the one already in
+  flight for this asset is reported (repeated claims never start a second sweep).
+- `202` `status="pending"` with a null `deposit_id`: another sweep holds the address; check
+  again shortly.
+- `200` `status="none"`: nothing claimable — no finalized balance, or less than the chain's
+  minimum deposit (`detail` says which).
+
+Native sweeps are paid for by the operator: gas is funded to the deposit address for each claim,
+and whatever it leaves behind stays there and is credited with the next claim.
 
 Behavior notes:
 
-- `POST /deposits/check` is **idempotent**. If the same `(chain_id, tx_hash, log_index)` is submitted twice, the second call short-circuits — returning `200` with `status="credited"` once the credit has landed on Sapphire, or `202` with `status="pending"` while the sweep is still running.
+- `POST /deposits/check` is **idempotent**. A claim made while a sweep holds the deposit address returns `pending` with a null `deposit_id` (check again shortly); a claim made while an unfinished sweep of that asset exists but is not running returns that sweep; once it has settled, a repeat finds nothing left (`status="none"`).
 - Sweeps run as background tasks. The processor returns within ~2-3s. Don't block on the response — poll `GET /deposits/status/{deposit_id}`.
 - The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
 - The `min_deposit` field of the address response is a per-chain map — clients should use it to gate the UI.
@@ -307,7 +302,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `429 Too Many Requests` | An auth/on-ramp/transfer rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
 | `502 Bad Gateway` | A configured provider API is unavailable, malformed, or rejects an authenticated server request. |
 | `500 Internal Server Error` | Unexpected failure in the service layer. Errors are logged with stack traces — file an issue with the request id. |
-| `503 Service Unavailable` | A required integration is unavailable or fail-closed — intent keys, provider configuration, registered Transak asset, cached Transak webhook verification token, or the source-chain RPC used by `GET /deposits/pending`. |
+| `503 Service Unavailable` | A required integration is unavailable or fail-closed — intent keys, provider configuration, registered Transak asset, cached Transak webhook verification token. |
 
 ## Schemas
 

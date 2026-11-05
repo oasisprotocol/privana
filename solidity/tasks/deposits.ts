@@ -71,8 +71,10 @@ task("getDepositAddress")
   });
 
 task("checkDeposit")
-  .addParam("txhash", "Transaction hash on source chain")
-  .addParam("amount", "Deposit amount in base units (e.g. wei)")
+  .addParam(
+    "token",
+    "Asset to claim: an ERC20 contract, or the zero address for the native asset",
+  )
   .addOptionalParam(
     "apiurl",
     "API base URL",
@@ -80,10 +82,15 @@ task("checkDeposit")
   )
   .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
   .addOptionalParam("sourcechainid", "Source chain ID where deposit was made", "84532")
-  .addOptionalParam("logindex", "Log index for ERC20 deposits", "0")
   .addOptionalParam("chaintype", "Chain type", "evm")
   .addOptionalParam("keyversion", "Key derivation version", "0")
-  .setDescription("Check/trigger deposit verification and sweep (requires SIWE authentication)")
+  .addFlag(
+    "nowait",
+    "Return once the sweep is started instead of waiting until it is credited",
+  )
+  .setDescription(
+    "Claim a deposit: sweep and credit everything finalized at your deposit address (requires SIWE authentication)",
+  )
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
@@ -92,7 +99,7 @@ task("checkDeposit")
 
     console.log("User address:", userAddress);
     console.log("API URL:", apiBaseUrl);
-    console.log("Tx hash:", args.txhash);
+    console.log("Token:", args.token);
     console.log("Source chain:", args.sourcechainid);
 
     console.log("\nAuthenticating with SIWE...");
@@ -116,9 +123,7 @@ task("checkDeposit")
         body: JSON.stringify({
           chain_type: args.chaintype,
           chain_id: parseInt(args.sourcechainid),
-          tx_hash: args.txhash,
-          amount: args.amount,
-          log_index: parseInt(args.logindex),
+          token_address: args.token,
           version: parseInt(args.keyversion),
         }),
       },
@@ -133,6 +138,40 @@ task("checkDeposit")
     if (data.deposit_id) console.log("Deposit id:", data.deposit_id);
     if (data.amount) console.log("Amount:", data.amount);
     if (data.token_address) console.log("Token:", data.token_address);
+    if (data.detail) console.log("Detail:", data.detail);
 
-    return data;
+    // The sweep and credit run in the background: poll until the deposit is credited.
+    let result: Record<string, unknown> = data;
+    if (
+      !args.nowait &&
+      result.status === "pending" &&
+      typeof result.deposit_id === "string"
+    ) {
+      console.log("\nWaiting for the deposit to be credited...");
+      for (
+        let attempt = 0;
+        attempt < 60 && result.status === "pending";
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        const status = await fetchJson(
+          `${apiBaseUrl}/v1/accounting/deposits/status/${result.deposit_id}`,
+          { headers: { Authorization: `Bearer ${jwtAccessToken}` } },
+        );
+        if (!isJsonObject(status)) {
+          throw new Error("Unexpected response from API");
+        }
+        result = status;
+        console.log("Status:", result.status);
+      }
+      if (result.status === "credited") {
+        console.log("Deposit credited.");
+      } else if (result.status === "error") {
+        console.log("Sweep failed:", result.detail);
+      } else {
+        console.log("Still pending; check again later with the same command.");
+      }
+    }
+
+    return result;
   });

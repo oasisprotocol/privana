@@ -11,7 +11,6 @@ reset it again themselves.
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
@@ -20,8 +19,6 @@ from web3.providers import AsyncHTTPProvider
 from yarl import URL
 
 import src.services.rpc_identity as rpc_identity
-from src.services.deposit_discovery import DepositDiscoveryService, DiscoveryNotConfiguredError
-from src.services.deposit_verifier import DepositVerifier
 from src.services.rpc_identity import (
     NoVerifiedChainsError,
     SapphireEndpointUnverifiedError,
@@ -234,33 +231,21 @@ async def test_consumers_refuse_an_excluded_chain(monkeypatch):
     settings = _settings({GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL})
     await initialize_verified_chain_rpc_urls(settings)
 
-    # Services built with the pre-check mapping still fail closed: the
-    # verified set, not the caller's dict key, decides what is served.
+    # A mapping built before the check still fails closed: the verified set,
+    # not the caller's dict key, decides what is served.
     stale = {GOOD_CHAIN: GOOD_URL, SAPPHIRE_CHAIN: SAPPHIRE_URL}
-    verifier = DepositVerifier(dict(stale))
-    discovery = DepositDiscoveryService(
-        accounting_service=MagicMock(list_all_tokens=AsyncMock(return_value=[])),
-        sweep_engine=MagicMock(),
-        chain_rpc_urls=dict(stale),
-    )
-
-    with pytest.raises(ValueError, match=f"No verified RPC endpoint for chain {SAPPHIRE_CHAIN}"):
-        verifier._get_web3(SAPPHIRE_CHAIN)
-    with pytest.raises(DiscoveryNotConfiguredError, match="No verified RPC endpoint"):
-        discovery._get_web3(SAPPHIRE_CHAIN)
-
-    assert verifier._get_web3(GOOD_CHAIN) is discovery._get_web3(GOOD_CHAIN)
+    assert verified_web3(GOOD_CHAIN, stale) is not None
+    assert verified_web3(SAPPHIRE_CHAIN, stale) is None
 
 
 async def test_consumers_fall_back_to_configured_urls_when_check_never_ran():
     # Unit tests and one-off scripts never run the startup check; with the
     # `allow_unverified_urls` opt-out set (see `test/conftest.py`) and no verified
     # set to gate on, the injected mapping is used as-is.
-    verifier = DepositVerifier({GOOD_CHAIN: GOOD_URL})
+    configured = {GOOD_CHAIN: GOOD_URL}
 
-    assert verifier._get_web3(GOOD_CHAIN) is not None
-    with pytest.raises(ValueError, match="No verified RPC endpoint"):
-        verifier._get_web3(SAPPHIRE_CHAIN)
+    assert verified_web3(GOOD_CHAIN, configured) is not None
+    assert verified_web3(SAPPHIRE_CHAIN, configured) is None
 
 
 async def test_nothing_is_served_before_the_check_runs():
@@ -269,8 +254,6 @@ async def test_nothing_is_served_before_the_check_runs():
     reset_verified_chain_rpc_urls()
 
     assert verified_web3(GOOD_CHAIN, {GOOD_CHAIN: GOOD_URL}) is None
-    with pytest.raises(ValueError, match="No verified RPC endpoint"):
-        DepositVerifier({GOOD_CHAIN: GOOD_URL})._get_web3(GOOD_CHAIN)
 
 
 async def test_opt_out_lapses_once_the_check_commits(monkeypatch):
