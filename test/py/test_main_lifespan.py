@@ -29,7 +29,7 @@ def _lifespan_settings() -> SimpleNamespace:
         chain_rpc_urls={LIFESPAN_CHAIN: LIFESPAN_RPC_URL},
         sapphire_rpc_url="",
         sapphire_rpc_headers={},
-        token_infos=[{"chain_id": LIFESPAN_CHAIN, "token_address": None}],
+        token_infos={"0x" + "11" * 32: {"chain_id": LIFESPAN_CHAIN, "token_address": None}},
         gas_prices_wei={LIFESPAN_CHAIN: 3_000_000_000},
     )
 
@@ -64,7 +64,6 @@ def _wire_lifespan(
         start=step("withdrawal_start"), stop=step("withdrawal_stop")
     )
     deposit_processor = SimpleNamespace(
-        resume_incomplete_sweeps=step("resume_sweeps"),
         start_recovery_loop=MagicMock(side_effect=lambda: steps.append("recovery_loop")),
         stop=step("processor_stop"),
     )
@@ -348,7 +347,6 @@ async def test_lifespan_verifies_rpc_identity_before_touching_any_chain(monkeypa
         "gas_prices",
         "withdrawal_start",
         "deposit_processor",
-        "resume_sweeps",
         "recovery_loop",
     ]
     # Shutdown stops the prober before the processors it feeds.

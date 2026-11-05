@@ -22,6 +22,7 @@ from src.config.chain_config import (
     MIN_DEPOSIT_NATIVE_WEI,
     ChainConfig,
     _build_chain_configs,
+    get_block_time_seconds,
     get_finality_depth,
 )
 
@@ -35,9 +36,23 @@ def _make_config(**overrides) -> ChainConfig:
         min_deposit_erc20_wei=1_000_000,
         gas_funding_amount_wei=200_000,
         min_sweep_gas_price_wei=1,  # keep gas_limit * floor * headroom under the cap
+        block_time_seconds=12.0,
     )
     params.update(overrides)
     return ChainConfig(**params)
+
+
+def test_block_time_is_configured_per_chain():
+    assert get_block_time_seconds(1) == 12.0  # Ethereum
+    assert get_block_time_seconds(8453) == 0.2  # Base
+    assert get_block_time_seconds(999_999) == 12.0  # unknown chain: conservative default
+    assert all(c.block_time_seconds > 0 for c in CHAIN_CONFIGS.values())
+
+
+@pytest.mark.parametrize("block_time", [0, -1.0])
+def test_block_time_must_be_positive(block_time):
+    with pytest.raises(ValueError, match="block_time_seconds must be positive"):
+        _make_config(block_time_seconds=block_time)
 
 
 def test_known_chain_finality():
@@ -91,32 +106,7 @@ def test_ethereum_sepolia_runtime_metadata():
 
 
 def test_valid_config_constructs():
-    cfg = _make_config()
-    assert cfg.discovery_lookback_blocks == 300
-    assert cfg.discovery_lookback_blocks <= cfg.discovery_max_lookback_blocks
-
-
-def test_zero_lookback_rejected():
-    with pytest.raises(ValueError, match="discovery_lookback_blocks"):
-        _make_config(discovery_lookback_blocks=0)
-
-
-def test_lookback_above_max_rejected():
-    with pytest.raises(ValueError, match="discovery_lookback_blocks"):
-        _make_config(
-            discovery_lookback_blocks=1_001,
-            discovery_max_lookback_blocks=1_000,
-        )
-
-
-def test_zero_scan_chunk_rejected():
-    with pytest.raises(ValueError, match="discovery_scan_chunk_blocks"):
-        _make_config(discovery_scan_chunk_blocks=0)
-
-
-def test_negative_scan_chunk_rejected():
-    with pytest.raises(ValueError, match="discovery_scan_chunk_blocks"):
-        _make_config(discovery_scan_chunk_blocks=-1)
+    assert _make_config().chain_id
 
 
 def test_gas_funding_not_below_min_deposit_rejected():
@@ -159,7 +149,7 @@ USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 def test_build_token_infos_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ACCOUNTING_TOKEN_INFO", raising=False)
 
-    assert _build_token_infos() == []
+    assert _build_token_infos() == {}
 
 
 def test_build_token_infos_parses_native_and_erc20(monkeypatch):
@@ -168,9 +158,20 @@ def test_build_token_infos_parses_native_and_erc20(monkeypatch):
         f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}"}}]',
     )
 
-    assert _build_token_infos() == [
+    assert list(_build_token_infos().values()) == [
         {"chain_id": 84532, "token_address": None},
         {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA},
+    ]
+
+
+def test_token_infos_are_keyed_by_the_contract_token_id(monkeypatch):
+    monkeypatch.setenv(
+        "ACCOUNTING_TOKEN_INFO", f'[{{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}"}}]'
+    )
+
+    # keccak256(abi.encode(ERC20, abi.encodePacked(chainId, tokenAddress))), as in Accounting.E2E.ts
+    assert list(_build_token_infos()) == [
+        "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
     ]
 
 
@@ -228,11 +229,8 @@ def test_sapphire_testnet_runtime_metadata():
 def test_sapphire_testnet_chain_config_m6_1():
     assert 23295 in CHAIN_CONFIGS
     cfg = CHAIN_CONFIGS[23295]
-    assert cfg.discovery_scan_chunk_blocks <= 100
     assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
-    assert cfg.discovery_lookback_blocks == 640
-    assert cfg.discovery_max_lookback_blocks == 1_000
 
 
 def test_sapphire_localnet_absent_on_testnet(monkeypatch):
@@ -248,7 +246,6 @@ def test_sapphire_localnet_chain_config(monkeypatch):
 
     assert 23293 in configs
     cfg = configs[23293]
-    assert cfg.discovery_scan_chunk_blocks <= 100
     assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
 
