@@ -91,32 +91,7 @@ def test_ethereum_sepolia_runtime_metadata():
 
 
 def test_valid_config_constructs():
-    cfg = _make_config()
-    assert cfg.discovery_lookback_blocks == 300
-    assert cfg.discovery_lookback_blocks <= cfg.discovery_max_lookback_blocks
-
-
-def test_zero_lookback_rejected():
-    with pytest.raises(ValueError, match="discovery_lookback_blocks"):
-        _make_config(discovery_lookback_blocks=0)
-
-
-def test_lookback_above_max_rejected():
-    with pytest.raises(ValueError, match="discovery_lookback_blocks"):
-        _make_config(
-            discovery_lookback_blocks=1_001,
-            discovery_max_lookback_blocks=1_000,
-        )
-
-
-def test_zero_scan_chunk_rejected():
-    with pytest.raises(ValueError, match="discovery_scan_chunk_blocks"):
-        _make_config(discovery_scan_chunk_blocks=0)
-
-
-def test_negative_scan_chunk_rejected():
-    with pytest.raises(ValueError, match="discovery_scan_chunk_blocks"):
-        _make_config(discovery_scan_chunk_blocks=-1)
+    assert _make_config().chain_id
 
 
 def test_gas_funding_not_below_min_deposit_rejected():
@@ -228,11 +203,8 @@ def test_sapphire_testnet_runtime_metadata():
 def test_sapphire_testnet_chain_config_m6_1():
     assert 23295 in CHAIN_CONFIGS
     cfg = CHAIN_CONFIGS[23295]
-    assert cfg.discovery_scan_chunk_blocks <= 100
     assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
-    assert cfg.discovery_lookback_blocks == 640
-    assert cfg.discovery_max_lookback_blocks == 1_000
 
 
 def test_sapphire_localnet_absent_on_testnet(monkeypatch):
@@ -248,7 +220,6 @@ def test_sapphire_localnet_chain_config(monkeypatch):
 
     assert 23293 in configs
     cfg = configs[23293]
-    assert cfg.discovery_scan_chunk_blocks <= 100
     assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
 

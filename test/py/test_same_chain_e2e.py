@@ -11,8 +11,6 @@ from eth_abi import encode
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
-import src.services.deposit_processor as deposit_processor
-import src.services.deposit_verifier as deposit_verifier
 import src.services.rpc_identity as rpc_identity
 import src.services.sweep_engine as sweep_engine
 from src.config.chain_config import (
@@ -20,13 +18,11 @@ from src.config.chain_config import (
     GAS_FUNDING_HEADROOM,
     SWEEP_GAS_LIMIT_ERC20,
     SWEEP_GAS_LIMIT_NATIVE,
-    TRANSFER_EVENT_TOPIC,
     ChainConfig,
     L2Type,
 )
 from src.models.private_read import PrivateReadAuth
 from src.services.deposit_processor import DepositProcessor
-from src.services.deposit_verifier import DepositVerifier
 from src.services.rpc_identity import initialize_verified_chain_rpc_urls
 from src.services.sweep_engine import SweepEngine
 from src.services.withdrawal_processor import WithdrawalProcessor
@@ -44,8 +40,7 @@ GAS_TANK_ADDRESS = Web3.to_checksum_address("0x" + "d4" * 20)
 WITHDRAWAL_TO_ADDRESS = Web3.to_checksum_address("0x" + "e5" * 20)
 EVM_SIGNER_ADDRESS = Web3.to_checksum_address("0x" + "f6" * 20)
 
-ERC20_DEPOSIT_TX = "0x" + "11" * 32
-NATIVE_DEPOSIT_TX = "0x" + "22" * 32
+NATIVE_TOKEN = "0x" + "00" * 20
 GAS_FUNDING_TX_HASH = b"\xa0" * 32
 SWEEP_TX_HASH = b"\xb0" * 32
 WITHDRAWAL_SIGNED_TX = b"\xc0" * 64
@@ -91,19 +86,6 @@ def _hash_lookup(known: dict) -> AsyncMock:
     return AsyncMock(side_effect=_lookup)
 
 
-def _erc20_transfer_log(amount: int, log_index: int = 3) -> dict:
-    return {
-        "address": TOKEN_ADDRESS,
-        "topics": [
-            bytes.fromhex(TRANSFER_EVENT_TOPIC[2:]),
-            bytes(12) + bytes.fromhex("de" * 20),
-            bytes(12) + bytes.fromhex(DEPOSIT_ADDRESS[2:]),
-        ],
-        "data": amount.to_bytes(32, "big"),
-        "logIndex": log_index,
-    }
-
-
 def _single_chain_node(
     *,
     receipts: dict,
@@ -146,9 +128,6 @@ def same_chain_config() -> ChainConfig:
         gas_funding_amount_wei=20_000_000_000_000_000,
         min_sweep_gas_price_wei=SAPPHIRE_GAS_PRICE,
         l2_type=L2Type.NONE,
-        discovery_scan_chunk_blocks=100,
-        discovery_lookback_blocks=640,
-        discovery_max_lookback_blocks=3_800,
     )
 
 
@@ -157,12 +136,12 @@ def injected_chain(monkeypatch, same_chain_config) -> ChainConfig:
     """Override module-level minimums and lookups with isolated test config."""
     cfg = same_chain_config
     monkeypatch.setattr(
-        deposit_processor,
+        sweep_engine,
         "MIN_DEPOSIT_NATIVE_WEI",
         {cfg.chain_id: cfg.min_deposit_native_wei},
     )
     monkeypatch.setattr(
-        deposit_processor,
+        sweep_engine,
         "MIN_DEPOSIT_ERC20_WEI",
         {cfg.chain_id: cfg.min_deposit_erc20_wei},
     )
@@ -176,11 +155,11 @@ def injected_chain(monkeypatch, same_chain_config) -> ChainConfig:
         "MIN_SWEEP_GAS_PRICE_WEI",
         {cfg.chain_id: cfg.min_sweep_gas_price_wei},
     )
-    monkeypatch.setattr(
-        deposit_verifier,
-        "get_finality_depth",
-        lambda chain_id: cfg.finality_depth if chain_id == cfg.chain_id else DEFAULT_FINALITY_DEPTH,
-    )
+
+    def finality_depth(chain_id):
+        return cfg.finality_depth if chain_id == cfg.chain_id else DEFAULT_FINALITY_DEPTH
+
+    monkeypatch.setattr(sweep_engine, "get_finality_depth", finality_depth)
 
     async def _no_l1_data_fee(w3, chain_id, is_erc20):
         # Sapphire posts no calldata to L1; gas funding is purely L2 execution.
@@ -239,24 +218,15 @@ def engine(tmp_path, mock_accounting) -> SweepEngine:
 
 
 @pytest.fixture
-def verifier() -> DepositVerifier:
-    return DepositVerifier({SAME_CHAIN_ID: SAME_CHAIN_RPC_URL})
-
-
-@pytest.fixture
-def processor(verifier, engine, mock_accounting) -> DepositProcessor:
+def processor(engine, mock_accounting) -> DepositProcessor:
     return DepositProcessor(
-        verifier=verifier,
         sweep_engine=engine,
         accounting_service=mock_accounting,
     )
 
 
-def _serve_node(verifier: DepositVerifier, engine: SweepEngine, node: AsyncMock):
-    return (
-        patch.object(verifier, "_get_web3", return_value=node),
-        patch.object(engine, "_get_web3", return_value=node),
-    )
+def _serve_node(engine: SweepEngine, node: AsyncMock):
+    return patch.object(engine, "_get_web3", return_value=node)
 
 
 async def _drain_background_sweeps(processor: DepositProcessor) -> None:
@@ -267,34 +237,24 @@ async def _drain_background_sweeps(processor: DepositProcessor) -> None:
 
 
 @pytest.mark.asyncio
-async def test_erc20_deposit_on_the_accounting_chain_is_verified_swept_and_credited(
-    processor, verifier, engine, mock_accounting, injected_chain
+async def test_erc20_deposit_on_the_accounting_chain_is_swept_and_credited(
+    processor, engine, mock_accounting, injected_chain
 ):
     node = _single_chain_node(
-        receipts={
-            ERC20_DEPOSIT_TX: {
-                "status": 1,
-                "blockNumber": DEPOSIT_BLOCK,
-                "to": TOKEN_ADDRESS,
-                "logs": [_erc20_transfer_log(ONE_HONOR)],
-            }
-        },
+        receipts={},
         broadcast_hashes=(GAS_FUNDING_TX_HASH, SWEEP_TX_HASH),
     )
-    verifier_patch, engine_patch = _serve_node(verifier, engine, node)
+    engine_patch = _serve_node(engine, node)
 
     with (
-        verifier_patch,
         engine_patch,
         patch.object(engine, "_get_erc20_balance", new_callable=AsyncMock, return_value=ONE_HONOR),
     ):
         result = await processor.process_deposit(
             chain_type="evm",
             chain_id=SAME_CHAIN_ID,
-            tx_hash=ERC20_DEPOSIT_TX,
-            amount=ONE_HONOR,
-            log_index=3,
             version=0,
+            token_address=TOKEN_ADDRESS,
             auth=PRIVATE_READ_AUTH,
         )
 
@@ -323,34 +283,24 @@ async def test_erc20_deposit_on_the_accounting_chain_is_verified_swept_and_credi
 
 @pytest.mark.asyncio
 async def test_erc20_sweep_funds_gas_from_the_injected_chain_price(
-    processor, verifier, engine, mock_accounting, injected_chain
+    processor, engine, mock_accounting, injected_chain
 ):
     """Gas funding is priced off this chain's node and stays under its cap."""
     node = _single_chain_node(
-        receipts={
-            ERC20_DEPOSIT_TX: {
-                "status": 1,
-                "blockNumber": DEPOSIT_BLOCK,
-                "to": TOKEN_ADDRESS,
-                "logs": [_erc20_transfer_log(ONE_HONOR)],
-            }
-        },
+        receipts={},
         broadcast_hashes=(GAS_FUNDING_TX_HASH, SWEEP_TX_HASH),
     )
-    verifier_patch, engine_patch = _serve_node(verifier, engine, node)
+    engine_patch = _serve_node(engine, node)
 
     with (
-        verifier_patch,
         engine_patch,
         patch.object(engine, "_get_erc20_balance", new_callable=AsyncMock, return_value=ONE_HONOR),
     ):
         await processor.process_deposit(
             chain_type="evm",
             chain_id=SAME_CHAIN_ID,
-            tx_hash=ERC20_DEPOSIT_TX,
-            amount=ONE_HONOR,
-            log_index=3,
             version=0,
+            token_address=TOKEN_ADDRESS,
             auth=PRIVATE_READ_AUTH,
         )
         await _drain_background_sweeps(processor)
@@ -368,37 +318,28 @@ async def test_erc20_sweep_funds_gas_from_the_injected_chain_price(
 
 @pytest.mark.asyncio
 async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
-    processor, verifier, engine, mock_accounting, injected_chain
+    processor, engine, mock_accounting, injected_chain
 ):
     node = _single_chain_node(
-        receipts={
-            NATIVE_DEPOSIT_TX: {
-                "status": 1,
-                "blockNumber": DEPOSIT_BLOCK,
-                "to": DEPOSIT_ADDRESS,
-                "logs": [],
-            }
-        },
-        transactions={
-            NATIVE_DEPOSIT_TX: {
-                "to": DEPOSIT_ADDRESS,
-                "value": TWO_ROSE,
-                "from": "0x" + "de" * 20,
-            }
-        },
+        receipts={},
         native_balance=TWO_ROSE,
         broadcast_hashes=(GAS_FUNDING_TX_HASH, SWEEP_TX_HASH),
     )
-    verifier_patch, engine_patch = _serve_node(verifier, engine, node)
+    # The gas funding lands in the current balance; the finalized block does not see it.
+    funded = SWEEP_GAS_LIMIT_NATIVE * SWEEP_GAS_PRICE * GAS_FUNDING_HEADROOM
+    node.eth.get_balance = AsyncMock(
+        side_effect=lambda _addr, block_identifier=None: (
+            TWO_ROSE if block_identifier is not None else TWO_ROSE + funded
+        )
+    )
+    engine_patch = _serve_node(engine, node)
 
-    with verifier_patch, engine_patch:
+    with engine_patch:
         result = await processor.process_deposit(
             chain_type="evm",
             chain_id=SAME_CHAIN_ID,
-            tx_hash=NATIVE_DEPOSIT_TX,
-            amount=TWO_ROSE,
-            log_index=0,
             version=0,
+            token_address=NATIVE_TOKEN,
             auth=PRIVATE_READ_AUTH,
         )
         assert result["status"] == "pending"
@@ -422,81 +363,29 @@ async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
 
 
 @pytest.mark.asyncio
-async def test_deposit_below_the_injected_erc20_floor_is_rejected(
-    processor, verifier, engine, injected_chain
+async def test_deposit_below_the_injected_erc20_floor_is_not_claimed(
+    processor, engine, injected_chain
 ):
     short = injected_chain.min_deposit_erc20_wei - 1
     node = _single_chain_node(
-        receipts={
-            ERC20_DEPOSIT_TX: {
-                "status": 1,
-                "blockNumber": DEPOSIT_BLOCK,
-                "to": TOKEN_ADDRESS,
-                "logs": [_erc20_transfer_log(short)],
-            }
-        },
+        receipts={},
     )
-    verifier_patch, engine_patch = _serve_node(verifier, engine, node)
-
-    with verifier_patch, engine_patch, pytest.raises(ValueError, match="minimum"):
-        await processor.process_deposit(
-            chain_type="evm",
-            chain_id=SAME_CHAIN_ID,
-            tx_hash=ERC20_DEPOSIT_TX,
-            amount=short,
-            log_index=3,
-            version=0,
-            auth=PRIVATE_READ_AUTH,
-        )
-
-
-@pytest.mark.asyncio
-async def test_gas_funding_tx_cannot_be_claimed_as_a_deposit_on_the_same_chain(
-    processor, verifier, engine, injected_chain
-):
-    """Native transfer to deposit address from gas tank must not trigger self-deposit."""
-    node = _single_chain_node(
-        receipts={
-            ERC20_DEPOSIT_TX: {
-                "status": 1,
-                "blockNumber": DEPOSIT_BLOCK,
-                "to": TOKEN_ADDRESS,
-                "logs": [_erc20_transfer_log(ONE_HONOR)],
-            }
-        },
-        broadcast_hashes=(GAS_FUNDING_TX_HASH, SWEEP_TX_HASH),
-    )
-    verifier_patch, engine_patch = _serve_node(verifier, engine, node)
+    engine_patch = _serve_node(engine, node)
 
     with (
-        verifier_patch,
         engine_patch,
-        patch.object(engine, "_get_erc20_balance", new_callable=AsyncMock, return_value=ONE_HONOR),
+        patch.object(engine, "_get_erc20_balance", new_callable=AsyncMock, return_value=short),
     ):
-        await processor.process_deposit(
+        result = await processor.process_deposit(
             chain_type="evm",
             chain_id=SAME_CHAIN_ID,
-            tx_hash=ERC20_DEPOSIT_TX,
-            amount=ONE_HONOR,
-            log_index=3,
             version=0,
+            token_address=TOKEN_ADDRESS,
             auth=PRIVATE_READ_AUTH,
         )
-        await _drain_background_sweeps(processor)
 
-        gas_tx_hex = "0x" + GAS_FUNDING_TX_HASH.hex()
-        assert gas_tx_hex.lower() in engine.gas_funding_tx_hashes
-
-        with pytest.raises(ValueError, match="[Gg]as funding"):
-            await processor.process_deposit(
-                chain_type="evm",
-                chain_id=SAME_CHAIN_ID,
-                tx_hash=gas_tx_hex,
-                amount=injected_chain.gas_funding_amount_wei,
-                log_index=0,
-                version=0,
-                auth=PRIVATE_READ_AUTH,
-            )
+    assert result["status"] == "none"
+    assert "minimum" in result["detail"]
 
 
 # ─── Withdrawal back out over the same chain ────────────────────────────
@@ -615,10 +504,10 @@ async def test_pending_withdrawal_for_the_accounting_chain_is_grouped_and_eligib
 
 
 @pytest.mark.asyncio
-async def test_one_verified_endpoint_serves_deposits_sweeps_and_withdrawals(
+async def test_one_verified_endpoint_serves_sweeps_and_withdrawals(
     monkeypatch, mock_accounting, withdrawal_accounting, tmp_path
 ):
-    """Single verified endpoint is shared across verifier, engine, and withdrawals."""
+    """Single verified endpoint is shared across engine and withdrawals."""
 
     async def probe(url: str, timeout: float) -> int:
         if url == SAME_CHAIN_RPC_URL:
@@ -635,7 +524,6 @@ async def test_one_verified_endpoint_serves_deposits_sweeps_and_withdrawals(
     )
     assert served == {SAME_CHAIN_ID: SAME_CHAIN_RPC_URL}
 
-    verifier = DepositVerifier(dict(configured))
     engine = SweepEngine(
         accounting_service=mock_accounting,
         chain_rpc_urls=dict(configured),
@@ -643,12 +531,10 @@ async def test_one_verified_endpoint_serves_deposits_sweeps_and_withdrawals(
     )
     withdrawals = _build_withdrawal_processor(withdrawal_accounting, configured)
 
-    client = verifier._get_web3(SAME_CHAIN_ID)
-    assert engine._get_web3(SAME_CHAIN_ID) is client
+    client = engine._get_web3(SAME_CHAIN_ID)
     assert withdrawals._get_destination_web3(SAME_CHAIN_ID) is client
 
     for resolve in (
-        lambda: verifier._get_web3(FOREIGN_CHAIN_ID),
         lambda: engine._get_web3(FOREIGN_CHAIN_ID),
         lambda: withdrawals._get_destination_web3(FOREIGN_CHAIN_ID),
     ):
