@@ -606,61 +606,33 @@ class DepositAddressResponse(BaseModel):
 
 
 class DepositCheckRequest(BaseModel):
-    """Request to check/trigger deposit verification for a specific tx."""
+    """Request to claim funds that arrived at the caller's deposit address.
 
-    chain_type: Literal["evm"] = Field("evm", description="Chain family (v1: 'evm' only)")
-    chain_id: int = Field(..., description="Source chain ID where the deposit was made")
-    tx_hash: str = Field(..., description="Transaction hash of the deposit on the source chain")
-    amount: int = Field(..., gt=0, description="Claimed deposit amount in base units (e.g. wei)")
-    log_index: int = Field(0, description="Log index for ERC20 deposits (0 for native)")
+    ``token_id`` names the asset to claim; without it every registered asset is
+    checked. Everything at the deposit address is swept, and credited once the sweep is final.
+    """
+
+    token_id: Optional[str] = Field(
+        None,
+        description="Bytes32 token identifier (hex string); omit to check every configured token",
+    )
     version: int = Field(0, description="Deposit address derivation version")
 
-    @field_validator("amount", mode="before")
-    def _parse_amount(cls, value: int | str | float) -> int:
-        return _parse_int_amount(value)
-
-    @field_validator("tx_hash")
-    def _normalise_tx_hash(cls, value: str) -> str:
-        return _normalise_hex(value)
+    @field_validator("token_id")
+    def _normalise_optional_token_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
 
 
 class DepositCheckResponse(BaseModel):
     """Response for deposit check status."""
 
-    status: Literal["credited", "pending", "error"]
+    status: Literal["credited", "pending", "error", "none"]
     deposit_id: str | None = None
     amount: str | None = None
     token_address: str | None = None
     detail: str | None = None
-
-
-class PendingDeposit(BaseModel):
-    """Uncredited inbound ERC20 transfer discovered on a source chain.
-
-    Carries the POST /deposits/check submission fields unchanged, plus display
-    metadata (token, block, status). status "processing" means a sweep is
-    already in flight — poll GET /deposits/status/{deposit_id} instead of
-    re-submitting.
-    """
-
-    chain_id: int
-    tx_hash: str
-    log_index: int
-    amount: str  # base units
-    token_address: str
-    token_id: str
-    block_number: int
-    version: int
-    status: Literal["discovered", "processing"]
-    deposit_id: str | None = None  # set when status == "processing"
-
-
-class PendingDepositsResponse(BaseModel):
-    """Finalized, uncredited external-wallet deposits to the caller's deposit address."""
-
-    pending: list[PendingDeposit]
-    scanned_from_block: int
-    scanned_to_block: int
 
 
 class SignOnRampUrlRequest(BaseModel):

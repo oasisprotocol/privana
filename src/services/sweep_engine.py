@@ -1,7 +1,7 @@
 """Sweep engine: state machine for sweeping deposit addresses to the encumbered wallet.
 
-State machine per deposit (records keyed by the unique 32-byte deposit_id;
-sweeps for the same address serialize on the per-address lock):
+State machine per deposit (one record per token and deposit address, with a random
+32-byte deposit_id; sweeps for the same address serialize on the per-address lock):
     (no record) → PENDING → GAS_FUNDED → SWEPT → (credit) → record deleted
 
     SWEPT is only set after the sweep tx is confirmed on-chain (receipt status=1).
@@ -11,9 +11,9 @@ sweeps for the same address serialize on the per-address lock):
       - GAS_FUNDED with mined sweep_tx_hash → promoted to SWEPT, then credit.
       - PENDING / GAS_FUNDED with NO sweep_tx_hash → re-run sweep from scratch
         (no broadcast tx means no nonce-collision risk).
-      - GAS_FUNDED with a sweep_tx_hash that reconciliation couldn't resolve
-        (unmined, dropped from mempool, or reverted) → logged for manual
-        investigation; the nonce may still be encumbered.
+      - GAS_FUNDED with a sweep_tx_hash the node does not know → the same signed tx
+        is broadcast again; the hash is never cleared and the sweep never re-signed.
+        A reverted tx → logged for manual investigation.
 
 State persisted to JSON files so sweeps survive ROFL restarts.
 """
@@ -26,18 +26,21 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Set, runtime_checkable
+from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
-from web3 import AsyncWeb3
+from web3 import AsyncWeb3, Web3
 from web3.exceptions import TransactionNotFound
 
 from src.clients.rofl import TransactionRevertedError
 from src.config.chain_config import (
     GAS_FUNDING_AMOUNT_WEI,
     GAS_FUNDING_HEADROOM,
+    MIN_DEPOSIT_ERC20_WEI,
+    MIN_DEPOSIT_NATIVE_WEI,
     MIN_SWEEP_GAS_PRICE_WEI,
     SWEEP_GAS_LIMIT_ERC20,
     SWEEP_GAS_LIMIT_NATIVE,
+    get_finality_depth,
 )
 from src.services.l2_fee_estimator import estimate_l1_data_fee
 from src.services.rpc_identity import require_verified_web3
@@ -66,7 +69,7 @@ SWEEP_RECOVERY_INTERVAL = 60
 class DepositAccountingProtocol(Protocol):
     """Interface expected by deposit processing from AccountingContractService.
 
-    Formalizes the 10 methods used by SweepEngine and DepositProcessor.
+    Formalizes the 8 methods used by SweepEngine and DepositProcessor.
     """
 
     async def generate_sweep_native(
@@ -111,16 +114,12 @@ class DepositAccountingProtocol(Protocol):
         deposit_id: bytes,
     ) -> Any: ...
 
-    async def get_token_id(self, chain_id: int, token_address: str | None) -> bytes: ...
-
     async def get_deposit_address(
         self,
         chain_type: str,
         version: int,
         siwe_token: bytes,
     ) -> str: ...
-
-    async def is_token_registered(self, token_id: bytes) -> bool: ...
 
     async def is_deposit_processed(self, deposit_id: bytes) -> bool: ...
 
@@ -130,6 +129,34 @@ def _to_hex(value) -> str:
     if isinstance(value, bytes):
         return "0x" + value.hex()
     return value
+
+
+class BalanceClaimStatus(str, Enum):
+    """Outcome of claim_balance().
+
+    STARTED:   a new sweep record was created; the caller drives it.
+    IN_FLIGHT: an unfinished sweep of this asset already exists.
+    BUSY:      another sweep holds the address lock; try again shortly.
+    NONE:      nothing claimable.
+    """
+
+    STARTED = "started"
+    IN_FLIGHT = "in_flight"
+    BUSY = "busy"
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class BalanceClaim:
+    """Result of claim_balance().
+
+    ``amount`` is the balance seen, for the response only (the sweep decides
+    its own).
+    """
+
+    status: BalanceClaimStatus
+    record: Optional["SweepRecord"] = None
+    amount: int = 0
 
 
 DEFAULT_STATE_DIR = os.getenv("SWEEP_STATE_DIR", "/data/sweep-engine")
@@ -151,13 +178,14 @@ class SweepRecord:
     beneficiary: str
     chain_type: str
     version: int
-    amount: int = 0
+    amount: Optional[int] = None  # populated when the sweep is complete
     token_id_hex: str = ""  # hex-encoded bytes32
     token_address: Optional[str] = None  # None for native
     deposit_id_hex: str = ""  # hex-encoded bytes32
     source_tx_hash: str = ""  # deposit tx on source chain
     deposit_index: int = 0
-    sweep_tx_hash: Optional[str] = None
+    sweep_tx: Optional[str] = None  # signed raw sweep tx, rebroadcast if the node loses it
+    sweep_tx_hash: Optional[str] = None  # used for convenience
     gas_funding_tx_hash: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     retry_count: int = 0
@@ -207,8 +235,6 @@ class SweepEngine:
         self._address_locks: Dict[str, asyncio.Lock] = {}
         # Global lock: serializes gas tank nonce reads across all concurrent sweeps
         self._gas_tank_lock = asyncio.Lock()
-        # Track gas funding tx hashes to exclude from deposit verification
-        self._gas_funding_tx_hashes: Set[str] = set()
         # Recovery loop state
         self._recovery_running = False
         self._recovery_task: Optional[asyncio.Task] = None
@@ -219,11 +245,6 @@ class SweepEngine:
         if key not in self._address_locks:
             self._address_locks[key] = asyncio.Lock()
         return self._address_locks[key]
-
-    @property
-    def gas_funding_tx_hashes(self) -> Set[str]:
-        """Set of gas funding tx hashes — exclude these from deposit claims."""
-        return self._gas_funding_tx_hashes
 
     def _get_web3(self, chain_id: int) -> AsyncWeb3:
         """Get the chain's startup-verified client (see `rpc_identity`).
@@ -288,6 +309,20 @@ class SweepEngine:
     def _delete_record(self, deposit_id_hex: str) -> None:
         self._record_path(deposit_id_hex).unlink(missing_ok=True)
 
+    def get_record(self, token_id_hex: str, deposit_address: str) -> Optional[SweepRecord]:
+        """The unfinished sweep of one token at one deposit address, if any."""
+        for path in self._state_dir.glob("sweep_*.json"):
+            try:
+                record = SweepRecord.from_dict(json.loads(path.read_text()))
+            except Exception:
+                continue  # load_incomplete_sweeps quarantines corrupt files
+            if (
+                record.token_id_hex.lower() == token_id_hex.lower()
+                and record.deposit_address.lower() == deposit_address.lower()
+            ):
+                return record
+        return None
+
     def get_record_by_deposit_id(self, deposit_id_hex: str) -> Optional[SweepRecord]:
         """Look up a SweepRecord by deposit_id_hex (used by polling endpoint).
 
@@ -331,139 +366,175 @@ class SweepEngine:
         record.error = error
         self._save_record(record)
 
-    async def sweep_native(
+    async def _get_balance(self, w3: AsyncWeb3, token_address: Optional[str], holder: str) -> int:
+        """Balance of ``holder``; ``token_address`` None is the native balance."""
+        if token_address is None:
+            return await w3.eth.get_balance(holder)
+        return await self._get_erc20_balance(w3, token_address, holder)
+
+    async def claim_balance(
         self,
+        *,
         deposit_address: str,
         beneficiary: str,
         chain_type: str,
         version: int,
         chain_id: int,
+        token_address: Optional[str],  # None for the native token
         token_id: bytes,
-        amount: int,
-        deposit_id: bytes,
-    ) -> None:
-        """Execute full native sweep: gas fund → sweep → confirm → credit.
+    ) -> BalanceClaim:
+        """Schedule a sweep of the whole balance of one asset at a deposit address."""
+        if self._get_address_lock(deposit_address, chain_id).locked():
+            # A sweep (maybe of another token) holds the address; waiting for it would
+            # keep the request open for the whole sweep.
+            return BalanceClaim(BalanceClaimStatus.BUSY)
 
-        Uses the same 2-step gas-tank pattern as ERC20 sweeps: fund gas
-        externally so the full verified amount is swept and credited.
+        w3 = self._get_web3(chain_id)
+        sweepable = await self._get_balance(w3, token_address, deposit_address)
 
-        Concurrency: acquires per-address lock so concurrent claims queue.
-        Zero-balance: if balance=0 after another sweep, skips straight to credit.
-        """
-        lock = self._get_address_lock(deposit_address, chain_id)
+        # No await from here to the save, so no other claim can schedule the same asset meanwhile.
+        existing = self.get_record(_to_hex(token_id), deposit_address)
+        if existing is not None:
+            if not existing.error or existing.sweep_tx_hash:
+                return BalanceClaim(BalanceClaimStatus.IN_FLIGHT, existing)
+            # Failed before any sweep tx existed: nothing on-chain to orphan, clean it up and create a new one below.
+            self._delete_record(existing.deposit_id_hex)
+
+        minimums = MIN_DEPOSIT_NATIVE_WEI if token_address is None else MIN_DEPOSIT_ERC20_WEI
+        if sweepable == 0 or sweepable < minimums.get(chain_id, 0):
+            return BalanceClaim(BalanceClaimStatus.NONE, amount=sweepable)
+
+        record = SweepRecord(
+            deposit_address=deposit_address,
+            chain_id=chain_id,
+            state=SweepState.PENDING,
+            beneficiary=beneficiary,
+            chain_type=chain_type,
+            version=version,
+            token_id_hex=_to_hex(token_id),
+            token_address=token_address,
+            deposit_id_hex=_to_hex(os.urandom(32)),
+        )
+        self._save_record(record)
+        return BalanceClaim(BalanceClaimStatus.STARTED, record, amount=sweepable)
+
+    async def sweep(self, deposit_id: bytes) -> None:
+        """Execute the full sweep of a deposit: gas fund → sweep → confirm → credit."""
+        deposit_id_hex = _to_hex(deposit_id)
+        record = self.get_record_by_deposit_id(deposit_id_hex)
+        if record is None:
+            return
+        lock = self._get_address_lock(record.deposit_address, record.chain_id)
         async with lock:
+            # Re-read under the lock: a record another driver already settled is gone, and
+            # one that already holds a sweep tx is left to reconciliation.
+            record = self.get_record_by_deposit_id(deposit_id_hex)
+            if record is None or record.state == SweepState.SWEPT or record.sweep_tx_hash:
+                return
+            deposit_address = record.deposit_address
+            chain_id = record.chain_id
             w3 = self._get_web3(chain_id)
+            is_native = record.token_address is None
 
             try:
-                balance = await w3.eth.get_balance(deposit_address)
-
-                if balance == 0:
-                    if await self._accounting.is_deposit_processed(deposit_id):
-                        logger.info(
-                            "Deposit address %s already empty and deposit_id already processed on chain %d",
-                            deposit_address,
-                            chain_id,
-                        )
-                        return
-                    raise ValueError(
-                        f"Native balance is 0 at {deposit_address} on chain {chain_id} "
-                        f"but deposit_id is not yet processed — nothing to sweep"
-                    )
-
-                if balance < amount:
-                    raise ValueError(
-                        f"Native balance ({balance}) < verified amount ({amount}) "
-                        f"at {deposit_address} on chain {chain_id}"
-                    )
-
                 gas_price = await self._get_safe_gas_price(w3, chain_id)
 
-                record = SweepRecord(
-                    deposit_address=deposit_address,
-                    chain_id=chain_id,
-                    state=SweepState.PENDING,
-                    beneficiary=beneficiary,
-                    chain_type=chain_type,
-                    version=version,
-                    amount=amount,
-                    token_id_hex=_to_hex(token_id),
-                    token_address=None,  # native
-                    deposit_id_hex=_to_hex(deposit_id),
-                )
-                self._save_record(record)
-
-                # Step 1: Fund gas to deposit address (same pattern as ERC20).
+                # Step 1: Fund the gas budget once per claim; the operator pays the fee.
                 # Over-fund the expected sweep cost: the sweep re-prices after
                 # funding confirms, so exact funding could fall short and cost a
                 # second round; excess is dust. Capped per chain.
-                l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=False)
+                l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=not is_native)
+                gas_limit = SWEEP_GAS_LIMIT_NATIVE if is_native else SWEEP_GAS_LIMIT_ERC20
                 gas_amount = min(
-                    SWEEP_GAS_LIMIT_NATIVE * gas_price * GAS_FUNDING_HEADROOM + l1_data_fee,
+                    gas_limit * gas_price * GAS_FUNDING_HEADROOM + l1_data_fee,
                     GAS_FUNDING_AMOUNT_WEI[chain_id],
                 )
 
-                # Hold the gas tank lock through receipt confirmation.
-                # Releasing after broadcast would let a concurrent sweep read
-                # the same nonce before this tx is mined — get_transaction_count
-                # defaults to "latest" (confirmed), and even "pending" has an
-                # RPC-to-submit race window. Serializing until the receipt
-                # arrives is correct at the cost of gas-funding throughput.
-                async with self._gas_tank_lock:
-                    gas_tank_nonce = await w3.eth.get_transaction_count(
-                        await self._get_gas_tank_address(), "pending"
+                if not record.gas_funding_tx_hash:
+                    # Hold the gas tank lock through receipt confirmation.
+                    # Releasing after broadcast would let a concurrent sweep read
+                    # the same nonce before this tx is mined — get_transaction_count
+                    # defaults to "latest" (confirmed), and even "pending" has an
+                    # RPC-to-submit race window. Serializing until the receipt
+                    # arrives is correct at the cost of gas-funding throughput.
+                    async with self._gas_tank_lock:
+                        gas_tank_nonce = await w3.eth.get_transaction_count(
+                            await self._get_gas_tank_address(), "pending"
+                        )
+
+                        gas_tx = await self._accounting.generate_gas_funding_tx(
+                            to_deposit_address=deposit_address,
+                            chain_id=chain_id,
+                            gas_amount=gas_amount,
+                            gas_tank_nonce=gas_tank_nonce,
+                            gas_price=gas_price,
+                        )
+
+                        self._recheck_served(chain_id)
+                        gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
+
+                        gas_tx_hash_hex = _to_hex(gas_tx_hash)
+                        record.gas_funding_tx_hash = gas_tx_hash_hex
+                        record.state = SweepState.GAS_FUNDED
+                        self._save_record(record)
+
+                        logger.info(
+                            "Gas funding broadcast: chain=%d tx=%s", chain_id, gas_tx_hash_hex
+                        )
+
+                        gas_receipt = await self._wait_for_receipt(w3, gas_tx_hash)
+                        if gas_receipt["status"] != 1:
+                            raise ValueError(f"Gas funding tx reverted: {gas_tx_hash_hex}")
+
+                # Step 2: Sweep (re-read gas price — may have changed). The amount is decided
+                # now: the whole balance, native leaving the gas budget behind to pay the fee.
+                amount = await self._get_balance(w3, record.token_address, deposit_address)
+                if is_native:
+                    amount -= gas_amount
+                if amount <= 0:
+                    self._delete_record(deposit_id_hex)
+                    raise ValueError(
+                        f"Nothing to sweep at {deposit_address} on chain {chain_id}; claim again"
                     )
-
-                    gas_tx = await self._accounting.generate_gas_funding_tx(
-                        to_deposit_address=deposit_address,
-                        chain_id=chain_id,
-                        gas_amount=gas_amount,
-                        gas_tank_nonce=gas_tank_nonce,
-                        gas_price=gas_price,
-                    )
-
-                    self._recheck_served(chain_id)
-                    gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
-
-                    gas_tx_hash_hex = _to_hex(gas_tx_hash)
-                    self._gas_funding_tx_hashes.add(gas_tx_hash_hex.lower())
-                    record.gas_funding_tx_hash = gas_tx_hash_hex
-                    record.state = SweepState.GAS_FUNDED
-                    self._save_record(record)
-
-                    logger.info(
-                        "Native gas funding broadcast: chain=%d tx=%s", chain_id, gas_tx_hash_hex
-                    )
-
-                    gas_receipt = await self._wait_for_receipt(w3, gas_tx_hash)
-                    if gas_receipt["status"] != 1:
-                        raise ValueError(f"Gas funding tx reverted: {gas_tx_hash_hex}")
-
-                # Step 2: Sweep full verified amount (re-read gas price — may have changed)
                 gas_price = await self._get_safe_gas_price(w3, chain_id)
 
                 nonce = await w3.eth.get_transaction_count(deposit_address)
 
-                signed_tx = await self._accounting.generate_sweep_native(
-                    beneficiary=beneficiary,
-                    chain_type=chain_type,
-                    version=version,
-                    chain_id=chain_id,
-                    amount=amount,
-                    nonce=nonce,
-                    gas_price=gas_price,
-                )
+                if is_native:
+                    signed_tx = await self._accounting.generate_sweep_native(
+                        beneficiary=record.beneficiary,
+                        chain_type=record.chain_type,
+                        version=record.version,
+                        chain_id=chain_id,
+                        amount=amount,
+                        nonce=nonce,
+                        gas_price=gas_price,
+                    )
+                else:
+                    signed_tx = await self._accounting.generate_sweep_erc20(
+                        beneficiary=record.beneficiary,
+                        chain_type=record.chain_type,
+                        version=record.version,
+                        chain_id=chain_id,
+                        token_address=record.token_address,
+                        amount=amount,
+                        nonce=nonce,
+                        gas_price=gas_price,
+                    )
 
+                record.amount = amount
+                record.sweep_tx = _to_hex(signed_tx)
+                record.sweep_tx_hash = _to_hex(Web3.keccak(signed_tx))
+                self._save_record(record)
+
+                logger.info("Sweep broadcasting: chain=%d tx=%s", chain_id, record.sweep_tx_hash)
                 self._recheck_served(chain_id)
-                tx_hash = await w3.eth.send_raw_transaction(signed_tx)
-                tx_hash_hex = _to_hex(tx_hash)
-                record.sweep_tx_hash = tx_hash_hex
-                self._save_record(record)  # persist tx hash for crash recovery (still GAS_FUNDED)
+                sweep_tx_hash = await w3.eth.send_raw_transaction(signed_tx)
+                logger.info("Sweep broadcast: chain=%d tx=%s", chain_id, _to_hex(sweep_tx_hash))
 
-                logger.info("Native sweep broadcast: chain=%d tx=%s", chain_id, tx_hash_hex)
-
-                receipt = await self._wait_for_receipt(w3, tx_hash)
+                receipt = await self._wait_for_final_receipt(w3, sweep_tx_hash, chain_id)
                 if receipt["status"] != 1:
-                    raise ValueError(f"Sweep tx reverted: {tx_hash_hex}")
+                    raise ValueError(f"Sweep tx reverted: {record.sweep_tx_hash}")
 
                 self._recheck_served(chain_id)
                 record.state = SweepState.SWEPT
@@ -472,22 +543,22 @@ class SweepEngine:
                 # Step 3: Credit
                 try:
                     await self._idempotent_credit(
-                        beneficiary=beneficiary,
-                        token_id=token_id,
+                        beneficiary=record.beneficiary,
+                        token_id=bytes.fromhex(record.token_id_hex.removeprefix("0x")),
                         amount=amount,
                         deposit_id=deposit_id,
                     )
                 except Exception as exc:
                     logger.exception(
-                        "Credit failed after successful native sweep for %s on chain %d",
+                        "Credit failed after successful sweep for %s on chain %d",
                         deposit_address,
                         chain_id,
                     )
                     raise SweepCreditPendingError(record.deposit_id_hex, exc) from exc
 
                 logger.info(
-                    "Deposit credited after native sweep: beneficiary=%s amount=%d",
-                    beneficiary,
+                    "Deposit credited after sweep: beneficiary=%s amount=%d",
+                    record.beneficiary,
                     amount,
                 )
 
@@ -498,176 +569,7 @@ class SweepEngine:
             except SweepCreditPendingError:
                 raise
             except Exception:
-                logger.exception(
-                    "Native sweep failed for %s on chain %d", deposit_address, chain_id
-                )
-                raise
-
-    async def sweep_erc20(
-        self,
-        deposit_address: str,
-        beneficiary: str,
-        chain_type: str,
-        version: int,
-        chain_id: int,
-        token_address: str,
-        token_id: bytes,
-        amount: int,
-        deposit_id: bytes,
-    ) -> None:
-        """Execute full ERC20 sweep: gas fund → sweep → confirm → credit.
-
-        Concurrency: acquires per-address lock so concurrent claims queue.
-        Zero-balance: if ERC20 balance=0 after another sweep, skips straight to credit.
-        """
-        lock = self._get_address_lock(deposit_address, chain_id)
-        async with lock:
-            w3 = self._get_web3(chain_id)
-
-            try:
-                erc20_balance = await self._get_erc20_balance(w3, token_address, deposit_address)
-                if erc20_balance == 0:
-                    if await self._accounting.is_deposit_processed(deposit_id):
-                        logger.info(
-                            "ERC20 %s balance=0 at %s on chain %d and deposit_id already processed",
-                            token_address,
-                            deposit_address,
-                            chain_id,
-                        )
-                        return
-                    raise ValueError(
-                        f"ERC20 {token_address} balance is 0 at {deposit_address} on chain {chain_id} "
-                        f"but deposit_id is not yet processed — nothing to sweep"
-                    )
-
-                if erc20_balance < amount:
-                    raise ValueError(
-                        f"ERC20 balance ({erc20_balance}) < verified amount ({amount}) "
-                        f"for {token_address} at {deposit_address} on chain {chain_id}. "
-                        f"Possible fee-on-transfer token — not supported."
-                    )
-
-                gas_price = await self._get_safe_gas_price(w3, chain_id)
-
-                record = SweepRecord(
-                    deposit_address=deposit_address,
-                    chain_id=chain_id,
-                    state=SweepState.PENDING,
-                    beneficiary=beneficiary,
-                    chain_type=chain_type,
-                    version=version,
-                    amount=amount,
-                    token_id_hex=_to_hex(token_id),
-                    token_address=token_address,
-                    deposit_id_hex=_to_hex(deposit_id),
-                )
-                self._save_record(record)
-
-                # Step 1: Fund gas to deposit address.
-                # Over-fund the expected sweep cost: the sweep re-prices after
-                # funding confirms, so exact funding could fall short and cost a
-                # second round; excess is dust. Capped per chain.
-                l1_data_fee = await estimate_l1_data_fee(w3, chain_id, is_erc20=True)
-                gas_amount = min(
-                    SWEEP_GAS_LIMIT_ERC20 * gas_price * GAS_FUNDING_HEADROOM + l1_data_fee,
-                    GAS_FUNDING_AMOUNT_WEI[chain_id],
-                )
-
-                # Hold the gas tank lock through receipt confirmation.
-                # Releasing after broadcast would let a concurrent sweep read
-                # the same nonce before this tx is mined — get_transaction_count
-                # defaults to "latest" (confirmed), and even "pending" has an
-                # RPC-to-submit race window. Serializing until the receipt
-                # arrives is correct at the cost of gas-funding throughput.
-                async with self._gas_tank_lock:
-                    gas_tank_nonce = await w3.eth.get_transaction_count(
-                        await self._get_gas_tank_address(), "pending"
-                    )
-
-                    gas_tx = await self._accounting.generate_gas_funding_tx(
-                        to_deposit_address=deposit_address,
-                        chain_id=chain_id,
-                        gas_amount=gas_amount,
-                        gas_tank_nonce=gas_tank_nonce,
-                        gas_price=gas_price,
-                    )
-
-                    self._recheck_served(chain_id)
-                    gas_tx_hash = await w3.eth.send_raw_transaction(gas_tx)
-
-                    gas_tx_hash_hex = _to_hex(gas_tx_hash)
-                    self._gas_funding_tx_hashes.add(gas_tx_hash_hex.lower())
-                    record.gas_funding_tx_hash = gas_tx_hash_hex
-                    record.state = SweepState.GAS_FUNDED
-                    self._save_record(record)
-
-                    logger.info("Gas funding broadcast: chain=%d tx=%s", chain_id, gas_tx_hash_hex)
-
-                    gas_receipt = await self._wait_for_receipt(w3, gas_tx_hash)
-                    if gas_receipt["status"] != 1:
-                        raise ValueError(f"Gas funding tx reverted: {gas_tx_hash_hex}")
-
-                # Step 2: Sweep ERC20 (re-read gas price — may have changed during gas funding)
-                gas_price = await self._get_safe_gas_price(w3, chain_id)
-
-                deposit_nonce = await w3.eth.get_transaction_count(deposit_address)
-
-                signed_tx = await self._accounting.generate_sweep_erc20(
-                    beneficiary=beneficiary,
-                    chain_type=chain_type,
-                    version=version,
-                    chain_id=chain_id,
-                    token_address=token_address,
-                    amount=amount,
-                    nonce=deposit_nonce,
-                    gas_price=gas_price,
-                )
-
-                self._recheck_served(chain_id)
-                sweep_tx_hash = await w3.eth.send_raw_transaction(signed_tx)
-                sweep_hash_hex = _to_hex(sweep_tx_hash)
-                record.sweep_tx_hash = sweep_hash_hex
-                self._save_record(record)  # persist tx hash for crash recovery (still GAS_FUNDED)
-
-                logger.info("ERC20 sweep broadcast: chain=%d tx=%s", chain_id, sweep_hash_hex)
-
-                receipt = await self._wait_for_receipt(w3, sweep_tx_hash)
-                if receipt["status"] != 1:
-                    raise ValueError(f"ERC20 sweep tx reverted: {sweep_hash_hex}")
-
-                self._recheck_served(chain_id)
-                record.state = SweepState.SWEPT
-                self._save_record(record)
-
-                # Step 3: Credit
-                try:
-                    await self._idempotent_credit(
-                        beneficiary=beneficiary,
-                        token_id=token_id,
-                        amount=amount,
-                        deposit_id=deposit_id,
-                    )
-                except Exception as exc:
-                    logger.exception(
-                        "Credit failed after successful ERC20 sweep for %s on chain %d",
-                        deposit_address,
-                        chain_id,
-                    )
-                    raise SweepCreditPendingError(record.deposit_id_hex, exc) from exc
-
-                logger.info(
-                    "Deposit credited after ERC20 sweep: beneficiary=%s amount=%d",
-                    beneficiary,
-                    amount,
-                )
-
-                # Only clean up on full success
-                self._delete_record(record.deposit_id_hex)
-
-            except SweepCreditPendingError:
-                raise
-            except Exception:
-                logger.exception("ERC20 sweep failed for %s on chain %d", deposit_address, chain_id)
+                logger.exception("Sweep failed for %s on chain %d", deposit_address, chain_id)
                 raise
 
     async def _get_gas_tank_address(self) -> str:
@@ -717,9 +619,6 @@ class SweepEngine:
     def load_incomplete_sweeps(self) -> list[SweepRecord]:
         """Load all non-idle sweep records (for restart recovery).
 
-        Also re-populates gas_funding_tx_hashes from persisted records
-        to prevent gas funding txs from being claimed as deposits after restart.
-
         Migrates legacy address-keyed files (sweep_<address>_<chain>.json) to
         the deposit_id key, unlinking the old path so it can't resurrect on
         the next restart.
@@ -742,8 +641,6 @@ class SweepEngine:
                         continue
                     path.rename(expected)
                 records.append(record)
-                if record.gas_funding_tx_hash:
-                    self._gas_funding_tx_hashes.add(record.gas_funding_tx_hash.lower())
             except Exception as exc:
                 raw = path.read_text()
                 logger.critical(
@@ -756,10 +653,10 @@ class SweepEngine:
         return records
 
     async def _reconcile_sweep_tx(self, record: SweepRecord) -> None:
-        """Promote a record to SWEPT if its sweep tx already mined on-chain.
+        """Promote a record to SWEPT if its sweep tx is already mined and final on-chain.
 
         Closes the crash window between sweep broadcast and the state flip:
-        sweep_native/sweep_erc20 persist sweep_tx_hash *before* flipping state
+        sweep persists sweep_tx_hash *before* flipping state
         to SWEPT (see the "persist tx hash for crash recovery" save). A crash
         during _wait_for_receipt would otherwise leave the record as GAS_FUNDED
         with a valid, possibly-mined tx hash — and without reconciliation the
@@ -777,9 +674,34 @@ class SweepEngine:
 
         try:
             w3 = self._get_web3(record.chain_id)
+            latest = (await w3.eth.get_block("latest"))["number"]
             receipt = await w3.eth.get_transaction_receipt(record.sweep_tx_hash)
             self._recheck_served(record.chain_id)
+            if latest - receipt["blockNumber"] < get_finality_depth(record.chain_id):
+                return  # Mined but not final yet: a later pass credits it.
         except TransactionNotFound:
+            # The node does not know the tx. Send the same signed tx again: it keeps its hash,
+            # amount and nonce, so it cannot collide with another sweep, and a node that
+            # already has it just says so. Clearing the hash and re-signing could credit
+            # nothing if the first tx mines after all.
+            if record.sweep_tx:
+                try:
+                    self._recheck_served(record.chain_id)
+                    await w3.eth.send_raw_transaction(
+                        bytes.fromhex(record.sweep_tx.removeprefix("0x"))
+                    )
+                    logger.warning(
+                        "Reconcile: rebroadcast sweep tx %s for %s on chain %d",
+                        record.sweep_tx_hash,
+                        record.deposit_address,
+                        record.chain_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Reconcile: rebroadcast of sweep tx %s failed: %s",
+                        record.sweep_tx_hash,
+                        exc,
+                    )
             return
         except Exception:
             logger.exception(
@@ -823,36 +745,12 @@ class SweepEngine:
     async def _resume_sweep_from_pending(self, record: SweepRecord) -> None:
         """Re-run sweep for a PENDING/GAS_FUNDED record with no broadcast sweep tx.
 
-        Safe because no tx was broadcast: no nonce-collision risk, and
-        sweep_native/sweep_erc20 short-circuit on balance=0 + is_deposit_processed
-        if the original task resolved it concurrently.
+        Safe because no tx was broadcast: no nonce-collision risk, and the sweep re-reads
+        the record under the lock, so one another driver already settled is skipped.
         """
-        token_id = bytes.fromhex(record.token_id_hex.removeprefix("0x"))
         deposit_id = bytes.fromhex(record.deposit_id_hex.removeprefix("0x"))
 
-        if record.token_address is None:
-            await self.sweep_native(
-                deposit_address=record.deposit_address,
-                beneficiary=record.beneficiary,
-                chain_type=record.chain_type,
-                version=record.version,
-                chain_id=record.chain_id,
-                token_id=token_id,
-                amount=record.amount,
-                deposit_id=deposit_id,
-            )
-        else:
-            await self.sweep_erc20(
-                deposit_address=record.deposit_address,
-                beneficiary=record.beneficiary,
-                chain_type=record.chain_type,
-                version=record.version,
-                chain_id=record.chain_id,
-                token_address=record.token_address,
-                token_id=token_id,
-                amount=record.amount,
-                deposit_id=deposit_id,
-            )
+        await self.sweep(deposit_id)
 
     async def resume_incomplete_sweeps(self) -> None:
         """Resume incomplete sweeps after ROFL restart.
@@ -905,13 +803,13 @@ class SweepEngine:
                         record.chain_id,
                     )
                 else:
-                    # Unmined or reverted sweep tx still owns the deposit-address
-                    # nonce — re-sweeping risks collision.
-                    failed += 1
-                    logger.warning(
-                        "Incomplete sweep in state %s with pending sweep_tx=%s for %s on chain %d — requires manual investigation",
-                        record.state.value,
+                    # The sweep tx was broadcast: reconciliation credits it once it is final
+                    # (and rebroadcasts it if the node lost it), so it is never re-signed.
+                    # A reverted tx is reported by the reconciliation.
+                    logger.info(
+                        "Sweep tx %s in state %s for %s on chain %d is not credited yet - the recovery loop checks it again",
                         record.sweep_tx_hash,
+                        record.state.value,
                         record.deposit_address,
                         record.chain_id,
                     )
@@ -963,17 +861,17 @@ class SweepEngine:
             for record in records:
                 await self._reconcile_sweep_tx(record)
 
-            # sweep_tx_hash is persisted BEFORE the SWEPT flip, so a non-SWEPT
-            # record with sweep_tx_hash set means the deposit nonce is encumbered.
+            # sweep_tx_hash is persisted BEFORE the SWEPT flip, so a non-SWEPT record with
+            # sweep_tx_hash set is a broadcast sweep that reconciliation has not credited yet.
             swept = [r for r in records if r.state == SweepState.SWEPT]
             resumable = [r for r in records if r.state != SweepState.SWEPT and not r.sweep_tx_hash]
-            stuck = [r for r in records if r.state != SweepState.SWEPT and r.sweep_tx_hash]
+            waiting = [r for r in records if r.state != SweepState.SWEPT and r.sweep_tx_hash]
 
-            for record in stuck:
-                logger.warning(
-                    "Recovery loop: stuck sweep in state %s with pending sweep_tx=%s for %s on chain %d — requires manual investigation",
-                    record.state.value,
+            for record in waiting:
+                logger.info(
+                    "Recovery loop: sweep tx %s in state %s for %s on chain %d is not credited yet",
                     record.sweep_tx_hash,
+                    record.state.value,
                     record.deposit_address,
                     record.chain_id,
                 )
@@ -1050,6 +948,30 @@ class SweepEngine:
                 pass
             self._recovery_task = None
         logger.info("Sweep recovery loop stopped")
+
+    async def _wait_for_final_receipt(self, w3: AsyncWeb3, tx_hash, chain_id: int):
+        """Poll for the receipt of ``tx_hash`` until its block is ``finality_depth`` deep.
+
+        The credit that follows a sweep cannot be undone, so it must not rest on a block
+        that can still be reorged out: with the sweep final, the deposit it spends is too.
+        """
+        depth = get_finality_depth(chain_id)
+        deadline = time.time() + 120 + depth * 12
+        last_error = None
+        while time.time() < deadline:
+            try:
+                latest = (await w3.eth.get_block("latest"))["number"]
+                receipt = await w3.eth.get_transaction_receipt(tx_hash)
+                if receipt is not None and latest - receipt["blockNumber"] >= depth:
+                    return receipt
+            except (ConnectionError, TimeoutError, OSError, ValueError, TransactionNotFound) as exc:
+                last_error = exc
+                logger.warning("RPC error polling receipt for %s: %s", tx_hash, exc)
+            await asyncio.sleep(2)
+        msg = f"Transaction {tx_hash} not final within the timeout"
+        if last_error:
+            msg += f" (last RPC error: {last_error})"
+        raise TimeoutError(msg)
 
     async def _wait_for_receipt(self, w3: AsyncWeb3, tx_hash, timeout: int = 120):
         """Poll for transaction receipt with timeout."""

@@ -20,13 +20,12 @@ def state_dir(tmp_path):
 
 def _write_record(state_dir, record):
     """Helper to persist a SweepRecord to the state directory."""
-    key = record.deposit_id_hex.lower().removeprefix("0x")
-    path = Path(state_dir) / f"sweep_{key}.json"
+    path = Path(state_dir) / f"sweep_{record.deposit_id_hex.removeprefix('0x')}.json"
     path.write_text(json.dumps(record.to_dict()))
 
 
 def _write_legacy_record(state_dir, record):
-    """Persist a record under the pre-deposit_id address-keyed filename."""
+    """Persist a record under the old address-keyed filename."""
     path = Path(state_dir) / f"sweep_{record.deposit_address.lower()}_{record.chain_id}.json"
     path.write_text(json.dumps(record.to_dict()))
     return path
@@ -179,7 +178,12 @@ def _seed_web3(engine: SweepEngine, chain_id: int, receipt_outcome) -> AsyncMock
     else:
         get_receipt.side_effect = receipt_outcome
 
-    w3 = SimpleNamespace(eth=SimpleNamespace(get_transaction_receipt=get_receipt))
+    w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_block=AsyncMock(return_value={"number": 1000}),
+            get_transaction_receipt=get_receipt,
+        )
+    )
     engine._web3_cache[chain_id] = w3
     return get_receipt
 
@@ -214,12 +218,42 @@ async def test_resume_gas_funded_with_mined_sweep_tx_is_promoted_and_credited(st
         chain_rpc_urls={84532: "https://fake"},
         state_dir=state_dir,
     )
-    _seed_web3(engine, 84532, {"status": 1})
+    _seed_web3(engine, 84532, {"status": 1, "blockNumber": 100})
 
     await engine.resume_incomplete_sweeps()
 
     mock_accounting.credit_deposit.assert_called_once()
     assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_credit_a_sweep_that_is_not_final_yet(state_dir):
+    record = SweepRecord(
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        amount=10**18,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+    )
+    _write_record(state_dir, record)
+    mock_accounting = AsyncMock()
+    engine = SweepEngine(
+        accounting_service=mock_accounting,
+        chain_rpc_urls={84532: "https://fake"},
+        state_dir=state_dir,
+    )
+    # Mined at block 995 with 1000 as the latest block: 5 of the 15 confirmations required.
+    _seed_web3(engine, 84532, {"status": 1, "blockNumber": 995})
+
+    await engine.resume_incomplete_sweeps()
+
+    mock_accounting.credit_deposit.assert_not_called()
+    assert engine.get_record_by_deposit_id("0x" + "22" * 32).state == SweepState.GAS_FUNDED
 
 
 @pytest.mark.asyncio
@@ -247,9 +281,14 @@ async def test_resume_does_not_credit_a_receipt_read_while_the_chain_was_dropped
     async def receipt(_tx_hash):
         answers[url] = 1  # the endpoint drifts to another chain mid-call
         await rpc_identity.reverify_chain_rpc_urls(settings)
-        return {"status": 1}
+        return {"status": 1, "blockNumber": 100}
 
-    w3 = SimpleNamespace(eth=SimpleNamespace(get_transaction_receipt=receipt))
+    w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_block=AsyncMock(return_value={"number": 1000}),
+            get_transaction_receipt=receipt,
+        )
+    )
     monkeypatch.setitem(rpc_identity._clients, url, w3)
 
     record = SweepRecord(
@@ -340,7 +379,7 @@ async def test_resume_gas_funded_with_reverted_sweep_tx_not_promoted(state_dir):
         chain_rpc_urls={84532: "https://fake"},
         state_dir=state_dir,
     )
-    _seed_web3(engine, 84532, {"status": 0})
+    _seed_web3(engine, 84532, {"status": 0, "blockNumber": 100})
 
     await engine.resume_incomplete_sweeps()
 
@@ -372,22 +411,16 @@ async def test_resume_pending_without_sweep_tx_reruns_sweep(state_dir):
         chain_rpc_urls={84532: "https://fake"},
         state_dir=state_dir,
     )
-    engine.sweep_native = AsyncMock()
-    engine.sweep_erc20 = AsyncMock()
+    engine.sweep = AsyncMock()
 
     await engine.resume_incomplete_sweeps()
 
-    engine.sweep_native.assert_called_once()
-    call_kwargs = engine.sweep_native.call_args.kwargs
-    assert call_kwargs["deposit_address"] == "0x" + "aa" * 20
-    assert call_kwargs["beneficiary"] == "0x" + "bb" * 20
-    assert call_kwargs["amount"] == 10**18
-    engine.sweep_erc20.assert_not_called()
+    engine.sweep.assert_called_once_with(b"\x22" * 32)
 
 
 @pytest.mark.asyncio
 async def test_resume_gas_funded_without_sweep_tx_reruns_sweep(state_dir):
-    """GAS_FUNDED with no broadcast sweep tx re-runs — sweep_native is idempotent."""
+    """GAS_FUNDED with no broadcast sweep tx re-runs — sweep is idempotent."""
     record = SweepRecord(
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
@@ -408,44 +441,11 @@ async def test_resume_gas_funded_without_sweep_tx_reruns_sweep(state_dir):
         chain_rpc_urls={84532: "https://fake"},
         state_dir=state_dir,
     )
-    engine.sweep_native = AsyncMock()
+    engine.sweep = AsyncMock()
 
     await engine.resume_incomplete_sweeps()
 
-    engine.sweep_native.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_resume_pending_erc20_routes_to_sweep_erc20(state_dir):
-    """PENDING ERC20 record recovery dispatches to sweep_erc20 with token_address."""
-    token_addr = "0x" + "cc" * 20
-    record = SweepRecord(
-        deposit_address="0x" + "aa" * 20,
-        chain_id=84532,
-        state=SweepState.PENDING,
-        beneficiary="0x" + "bb" * 20,
-        chain_type="evm",
-        version=0,
-        amount=50 * 10**6,
-        token_id_hex="0x" + "11" * 32,
-        deposit_id_hex="0x" + "22" * 32,
-        token_address=token_addr,
-    )
-    _write_record(state_dir, record)
-
-    engine = SweepEngine(
-        accounting_service=AsyncMock(),
-        chain_rpc_urls={84532: "https://fake"},
-        state_dir=state_dir,
-    )
-    engine.sweep_native = AsyncMock()
-    engine.sweep_erc20 = AsyncMock()
-
-    await engine.resume_incomplete_sweeps()
-
-    engine.sweep_erc20.assert_called_once()
-    assert engine.sweep_erc20.call_args.kwargs["token_address"] == token_addr
-    engine.sweep_native.assert_not_called()
+    engine.sweep.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -512,22 +512,20 @@ async def test_recovery_loop_resumes_pending_record(state_dir, monkeypatch):
         chain_rpc_urls={84532: "https://fake"},
         state_dir=state_dir,
     )
-    engine.sweep_native = AsyncMock()
-    engine.sweep_erc20 = AsyncMock()
+    engine.sweep = AsyncMock()
 
     engine.start_recovery_loop()
     try:
         for _ in range(100):  # up to 1s
-            if engine.sweep_native.called:
+            if engine.sweep.called:
                 break
             await asyncio.sleep(0.01)
         else:
-            pytest.fail("Recovery loop did not call sweep_native within 1s")
+            pytest.fail("Recovery loop did not call sweep within 1s")
     finally:
         await engine.stop_recovery_loop()
 
-    assert engine.sweep_native.called
-    engine.sweep_erc20.assert_not_called()
+    assert engine.sweep.called
 
 
 @pytest.mark.asyncio
@@ -554,12 +552,12 @@ async def test_recovery_loop_persists_error_for_pending_record(state_dir, monkey
         chain_rpc_urls={84532: "https://fake"},
         state_dir=state_dir,
     )
-    engine.sweep_native = AsyncMock(side_effect=RuntimeError("gas tank empty"))
+    engine.sweep = AsyncMock(side_effect=RuntimeError("gas tank empty"))
 
     engine.start_recovery_loop()
     try:
         for _ in range(100):
-            if engine.sweep_native.called:
+            if engine.sweep.called:
                 break
             await asyncio.sleep(0.01)
     finally:
@@ -603,3 +601,42 @@ async def test_resume_does_not_overwrite_sweep_tx_hash_on_error(state_dir):
     assert persisted is not None
     assert persisted.error is None, "error must not overwrite a record that has sweep_tx_hash"
     assert persisted.sweep_tx_hash == "0x" + "dd" * 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_error", [None, RuntimeError("already known")])
+async def test_reconcile_rebroadcasts_a_sweep_tx_the_node_lost_and_keeps_its_hash(
+    state_dir, send_error
+):
+    """The node does not know the tx: resend the same signed tx and never re-sign."""
+    record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_tx_hash="0x" + "dd" * 32,
+        sweep_tx="0x010203",
+    )
+    _write_record(state_dir, record)
+    engine = SweepEngine(
+        accounting_service=AsyncMock(), chain_rpc_urls={84532: "https://fake"}, state_dir=state_dir
+    )
+    send = AsyncMock(side_effect=send_error)
+    engine._web3_cache[84532] = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_block=AsyncMock(return_value={"number": 1000}),
+            get_transaction_receipt=AsyncMock(side_effect=TransactionNotFound("lost")),
+            send_raw_transaction=send,
+        )
+    )
+
+    await engine._reconcile_sweep_tx(record)
+
+    send.assert_awaited_once_with(b"\x01\x02\x03")
+    assert (
+        engine.get_record_by_deposit_id(record.deposit_id_hex).sweep_tx_hash == record.sweep_tx_hash
+    )

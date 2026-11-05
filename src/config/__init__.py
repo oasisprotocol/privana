@@ -3,9 +3,10 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from dotenv import load_dotenv
+from eth_abi import encode
 from web3 import Web3
 
 from src.models.types import Settings
@@ -217,8 +218,19 @@ def _build_gas_prices() -> Dict[int, int]:
     return gas_prices
 
 
-def _build_token_infos() -> List[Dict[str, Any]]:
+def get_token_id(chain_id: int, token_address: Optional[str]) -> str:
+    """The contract's tokenId for a native (no address) or ERC20 token."""
+    data = chain_id.to_bytes(32, "big")
+    if token_address is None:
+        return Web3.to_hex(Web3.keccak(encode(["uint8", "bytes"], [0, data])))
+    data += bytes.fromhex(token_address.removeprefix("0x"))
+    return Web3.to_hex(Web3.keccak(encode(["uint8", "bytes"], [1, data])))
+
+
+def _build_token_infos() -> Dict[str, Dict[str, Any]]:
     """Parse the ACCOUNTING_TOKEN_INFO env var: a JSON array of token descriptors.
+
+    Returns the descriptors keyed by their tokenId.
 
     Each entry is ``{"chain_id": <int>}`` for a native token, or
     {"chain_id": <int>, "token_address": "0x..."}`` for an ERC20 token
@@ -231,7 +243,7 @@ def _build_token_infos() -> List[Dict[str, Any]]:
     """
     raw = os.getenv("ACCOUNTING_TOKEN_INFO")
     if not raw:
-        return []
+        return {}
 
     try:
         parsed = json.loads(raw)
@@ -241,7 +253,7 @@ def _build_token_infos() -> List[Dict[str, Any]]:
     if not isinstance(parsed, list):
         raise ValueError("ACCOUNTING_TOKEN_INFO must be a JSON array of token descriptors")
 
-    token_infos: List[Dict[str, Any]] = []
+    token_infos: Dict[str, Dict[str, Any]] = {}
     for index, entry in enumerate(parsed):
         if not isinstance(entry, dict):
             raise ValueError(f"ACCOUNTING_TOKEN_INFO entry {index} must be a JSON object")
@@ -262,7 +274,10 @@ def _build_token_infos() -> List[Dict[str, Any]]:
                     f"ACCOUNTING_TOKEN_INFO entry {index} token_address is not a valid address"
                 )
 
-        token_infos.append({"chain_id": chain_id, "token_address": token_address})
+        token_infos[get_token_id(chain_id, token_address)] = {
+            "chain_id": chain_id,
+            "token_address": token_address,
+        }
 
     return token_infos
 
