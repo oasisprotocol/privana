@@ -81,6 +81,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 | `GET /deposits/status/{id}` | required | same |
 | `GET /deposits/pending` | required | same |
 | `POST /funds/withdraw-from-lock` | required | same |
+| `POST /funds/transfer` | required | same |
 | `GET /balances/{token_id}` | required | same |
 | `POST /balances/batch` | required | same |
 | `GET /funds/locked` | required | same |
@@ -241,7 +242,9 @@ GET  /funds/transfer/nonce/{user}     → current Transfer nonce
 POST /funds/transfer                  → {to_address, token_id, amount, nonce, signature}
 ```
 
-The signature is an EIP-712 `Transfer` from the source user.
+The signature is an EIP-712 `Transfer` from the source user. The caller must be authenticated, but need not be the signer: services relay transfers their users signed.
+
+The relayer pays the gas, so each caller is limited to 10 transfers per minute and 100 per day (`429` with `Retry-After` above that). Callers listed in `RATE_LIMIT_EXEMPT` (comma-separated addresses: the swap LP and Honoroll, which transfer for many users) are exempt.
 
 ## Private Read Endpoints
 
@@ -301,7 +304,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | `409 Conflict` | A lock, lock change or transfer was submitted and its outcome is unknown. **Resends** under Conventions says how to tell whether it landed. |
 | `413 Payload Too Large` | A provider webhook body exceeds the 1 MiB cap. |
 | `422 Unprocessable Entity` | FastAPI/Pydantic request-model validation, or a contract revert after a parsed request reaches the chain. Contract-revert responses carry the revert reason when available. |
-| `429 Too Many Requests` | An auth/on-ramp rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
+| `429 Too Many Requests` | An auth/on-ramp/transfer rate limit or Transak upstream rate limit tripped. Honour `Retry-After` when present. |
 | `502 Bad Gateway` | A configured provider API is unavailable, malformed, or rejects an authenticated server request. |
 | `500 Internal Server Error` | Unexpected failure in the service layer. Errors are logged with stack traces — file an issue with the request id. |
 | `503 Service Unavailable` | A required integration is unavailable or fail-closed — intent keys, provider configuration, registered Transak asset, cached Transak webhook verification token, or the source-chain RPC used by `GET /deposits/pending`. |
