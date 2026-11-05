@@ -393,9 +393,7 @@ class AccountingContractService:
                     return SubmissionResult(
                         submission_id=earlier.submission_id or "", status="submitted"
                     )
-                # A fresh settle skips the pre-check so an ahead nonce reaches the
-                # chain; a resend still reads the counter to avoid a consumed nonce.
-                if check_nonce or earlier is not None:
+                if check_nonce:
                     await self._validate_user_nonce(signer, nonce, nonce_fn, label)
 
                 self._accounting_store.put(key, AccountingCall(status="pending"))
@@ -1014,8 +1012,8 @@ class AccountingContractService:
             nonce,
             signature,
         )
-        # A settle's nonce can lead the counter when the caller sends several at
-        # once, so it must reach the chain: an out-of-order one reverts and resends.
+        # A caller orders its settle nonces and needn't wait for each to land, so this
+        # nonce can be ahead of the counter.
         return await self._submit_signed(
             service,
             nonce,
