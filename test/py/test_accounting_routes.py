@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from web3 import Web3
 from web3.exceptions import ContractCustomError
@@ -966,19 +966,3 @@ def test_transfer_route_skips_rate_limit_for_exempt_caller(monkeypatch) -> None:
     assert response.status_code == 200
     assert limiter.calls == []
     mock_service.transfer_funds.assert_awaited_once()
-
-
-def test_rate_limit_caller_counts_each_route_in_its_own_buckets(monkeypatch) -> None:
-    _set_rate_limit_exempt(monkeypatch, ())
-    limiter = _RecordingRateLimiter()
-    monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: limiter)
-    app = FastAPI()
-
-    @app.get("/limited", dependencies=[Depends(routes._rate_limit_caller("example", ((5, 60),)))])
-    def limited() -> None:
-        return None
-
-    app.dependency_overrides[routes._require_caller] = lambda: BENEFICIARY
-
-    assert TestClient(app).get("/limited").status_code == 200
-    assert [(call["bucket"], call["limit"]) for call in limiter.calls] == [("example_5_60s", 5)]

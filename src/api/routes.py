@@ -334,32 +334,25 @@ def _enforce_auth_rate_limit(request: Request, bucket: str, limit: int) -> None:
         )
 
 
-def _rate_limit_caller(name: str, limits: tuple[tuple[int, int], ...]):
-    """Build a dependency that authenticates the caller and rate-limits them on ``name``.
+def _transfer_rate_limit_caller(caller: str = Depends(_require_caller)) -> None:
+    """Rate-limit relayed transfers per caller, so one account can't drain relayer gas."""
 
-    ``limits`` holds (requests, window seconds) pairs, each counted separately. Exempt callers
-    skip the limit. Add it to a route with ``dependencies=[Depends(_rate_limit_caller(...))]``.
-    """
-
-    def dependency(caller: str = Depends(_require_caller)) -> None:
-        caller = Web3.to_checksum_address(caller)
-        if caller in load_settings().rate_limit_exempt:
-            return
-        for limit, window_seconds in limits:
-            retry_after = get_auth_rate_limiter().hit(
-                bucket=f"{name}_{limit}_{window_seconds}s",
-                key=caller.lower(),
-                limit=limit,
-                window_seconds=window_seconds,
+    caller = Web3.to_checksum_address(caller)
+    if caller in load_settings().rate_limit_exempt:
+        return
+    for limit, window_seconds in _TRANSFER_RATE_LIMITS:
+        retry_after = get_auth_rate_limiter().hit(
+            bucket=f"transfer_{limit}_{window_seconds}s",
+            key=caller.lower(),
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        if retry_after is not None:
+            raise auth_exception(
+                status_code=429,
+                detail="Too many transfer requests. Please retry later.",
+                headers={"Retry-After": str(retry_after)},
             )
-            if retry_after is not None:
-                raise auth_exception(
-                    status_code=429,
-                    detail=f"Too many {name} requests. Please retry later.",
-                    headers={"Retry-After": str(retry_after)},
-                )
-
-    return dependency
 
 
 def _enforce_onramp_user_rate_limit(user_address: str, bucket: str, limit: int) -> None:
@@ -1198,13 +1191,10 @@ async def modify_lock(payload: ModifyLockRequest) -> TransactionSubmissionRespon
 @router.post(
     "/funds/transfer",
     response_model=TransactionSubmissionResponse,
-    dependencies=[Depends(_rate_limit_caller("transfer", _TRANSFER_RATE_LIMITS))],
+    dependencies=[Depends(_transfer_rate_limit_caller)],
 )
 async def transfer_funds(payload: TransferFundsRequest) -> TransactionSubmissionResponse:
-    """Transfer funds between accounting balances using a user signature.
-
-    Rate-limited per caller, except for RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).
-    """
+    """Transfer funds between accounting balances using a user signature."""
 
     try:
         submission = await _service.transfer_funds(payload.model_dump())

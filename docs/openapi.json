@@ -3706,7 +3706,7 @@
     },
     "/v1/accounting/funds/transfer": {
       "post": {
-        "description": "Transfer funds between accounting balances using a user signature.\n\nRate-limited per caller, except for RATE_LIMIT_EXEMPT callers (swap LP, Honoroll).",
+        "description": "Transfer funds between accounting balances using a user signature.",
         "operationId": "transfer_funds_v1_accounting_funds_transfer_post",
         "parameters": [
           {
