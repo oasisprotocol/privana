@@ -2,11 +2,12 @@
 then settles every lock back to the funder, first all at once, then the rest
 one after another.
 
-Wallets come from BENCH_MNEMONIC. Index 0 funds the players and gets the
-settled funds back, and index 1 is the service. The players are new each run:
-they start at index 1000 plus the funder's transfer nonce, which every funding
-transfer moves on. Nothing else signs for these wallets, and a signature is
-valid at one nonce only, so a nonce step on one of them is our write landing.
+Wallets come from BENCH_MNEMONIC. Index BENCH_FUNDER_INDEX, 0 unless set, funds
+the players and gets the settled funds back, and the next index is the service.
+The players are new each run: they start at index 1000 plus the funder's
+transfer nonce, which every funding transfer moves on. Nothing else signs for
+these wallets, and a signature is valid at one nonce only, so a nonce step on
+one of them is our write landing.
 """
 
 from __future__ import annotations
@@ -28,11 +29,22 @@ from eth_account.signers.local import LocalAccount
 from .chain import Chain, host_of
 from .config import Config, PreflightError, indexed_wallets, wallets
 from .privana import Privana, Reply
-from .transfers import REFUSED_WAIT_S, Journal, Transfer, _said, check_settled, run_transfers
+from .transfers import (
+    REFUSED_WAIT_S,
+    Journal,
+    Transfer,
+    _resent,
+    _said,
+    check_settled,
+    run_transfers,
+)
 
 PLAYER_INDEX = 1000
 LOCK_TTL_S = 2 * 3600  # settling does not check expiry, so this only bounds a stuck lock
 SETTLE_S = 12.0  # two blocks, so reads on a lagging RPC node see the last landings
+# Burst locks queue behind Privana's one signer, so a lost reply proves nothing while
+# others still land. The longest gap seen between two landings in one burst is 55 s.
+QUIET_S = 90.0
 LOCK_NONCES = "createLockNonces"
 SETTLE_NONCES = "transferLockedNonces"
 PHASES = {
@@ -61,6 +73,17 @@ def _done(a: Action, last_read: float, refused_wait_s: float) -> bool:
     )
 
 
+def _lost(a: Action) -> bool:
+    """Whether `a` goes out again: its reply was lost, and it has not landed while
+    its wallet's nonce is still its own."""
+    return (
+        a.landed_at is None
+        and a.reply is not None
+        and a.reply.kind == "unknown"
+        and a.seen_nonce == a.nonce
+    )
+
+
 async def burst(
     actions: list[Action],
     send: Callable[[Action], Awaitable[Reply]],
@@ -69,28 +92,47 @@ async def burst(
     max_wait_s: float,
     refused_wait_s: float,
     journal: Journal | None = None,
+    quiet_s: float | None = None,
 ) -> None:
-    """Send every action at once, each exactly once, and read their wallets'
-    nonces until each landed or was refused `refused_wait_s` ago, or until
-    `max_wait_s` passed. Anything else stays unresolved: it can still land."""
+    """Send every action at once and read their wallets' nonces until each
+    landed or was refused `refused_wait_s` ago, or until `max_wait_s` passed.
+    Anything else stays unresolved: it can still land.
+
+    With `quiet_s`: each time none has landed or been answered for that long,
+    every action whose reply was lost goes out again, the same signed write.
+    A resend that Privana refuses is the action's reply."""
     start = time.time()
     for a in actions:
         a.due_at = start
         if journal is not None:
             journal.write("send", k=a.k, nonce=a.nonce, wallet=a.wallet, due_at=start)
 
+    async def reply_to(a: Action) -> Reply:
+        try:
+            return await send(a)
+        except Exception as exc:
+            return Reply("unknown", None, type(exc).__name__)
+
     async def one(a: Action) -> None:
         a.sent_at = time.time()
-        try:
-            a.reply = await send(a)
-        except Exception as exc:
-            a.reply = Reply("unknown", None, type(exc).__name__)
+        a.reply = await reply_to(a)
         a.reply_at = time.time()
         a.sent_at += a.reply.retry_s  # the try that went out
 
-    sends = asyncio.gather(*(one(a) for a in actions))
+    async def again(a: Action) -> None:
+        a.resends += 1
+        if journal is not None:
+            journal.write("resend", k=a.k, nonce=a.nonce, at=time.time())
+        reply = await reply_to(a)
+        if journal is not None:
+            journal.write("resend reply", k=a.k, nonce=a.nonce, at=time.time(), reply=asdict(reply))
+        # A resend that never reached Privana says nothing about the first try.
+        if reply.kind == "refused" and reply.status is not None:
+            a.reply, a.reply_at = reply, time.time()
+
+    tries = [asyncio.create_task(one(a)) for a in actions]
     wallets = sorted({a.wallet for a in actions})
-    last_read, shown = 0.0, (0, 0)
+    last_read, news, shown = 0.0, start, (0, 0)
     try:
         while True:
             try:
@@ -102,13 +144,13 @@ async def burst(
                         a.landed_at, a.block = last_read, block
                 counts = (
                     sum(a.landed_at is not None for a in actions),
-                    sum(a.reply is not None for a in actions),
+                    sum(t.done() for t in tries),
                 )
                 if counts != shown:
-                    shown = counts
+                    shown, news = counts, last_read
                     print(
                         f"  {last_read - start:5.0f} s, block {block}: {counts[0]} of "
-                        f"{len(actions)} landed, {counts[1]} replied",
+                        f"{len(actions)} landed, {counts[1]} of {len(tries)} replied",
                         flush=True,
                     )
             except Exception:
@@ -117,22 +159,31 @@ async def burst(
                 break
             if time.time() >= start + max_wait_s:
                 break
+            # Quiet: every try is answered, and no read since showed a landing or a reply.
+            # Privana joins a resend to a submission it still holds, for up to 10 minutes,
+            # so a lost write keeps going out until the watch ends.
+            quiet = quiet_s is not None and last_read >= news + quiet_s
+            if quiet and shown[1] == len(tries):
+                tries += [asyncio.create_task(again(a)) for a in actions if _lost(a)]
             await asyncio.sleep(poll_s)
-        await sends  # every reply is back within 3 SDK timeouts
+        await asyncio.gather(*tries)  # every reply is back within 3 SDK timeouts
     finally:
-        sends.cancel()
+        for t in tries:
+            t.cancel()
         for a in actions:
             a.done_at = time.time()
             if a.landed_at is not None:
                 a.outcome = "landed"
                 if a.reply and a.reply.kind != "ok":
-                    a.note = f"the reply said it failed ({_said(a.reply)}), but it landed"
+                    a.note = (
+                        f"the reply said it failed ({_said(a.reply)}), but it landed{_resent(a)}"
+                    )
             elif a.reply and _done(a, last_read, refused_wait_s):
                 a.outcome = "refused"
-                a.note = _said(a.reply)
+                a.note = _said(a.reply) + _resent(a)
             else:
                 reply = f", reply {_said(a.reply)}" if a.reply and a.reply.kind != "ok" else ""
-                a.note = f"not landed when the watch ended{reply}, so it can still land"
+                a.note = f"not landed when the watch ended{reply}{_resent(a)}, so it can still land"
             if journal is not None:
                 journal.write("outcome", **asdict(a))
 
@@ -168,7 +219,7 @@ async def plan(
     results: Path,
 ) -> Plan:
     """Public reads only: the players are new, and no earlier write can still land."""
-    funder, service = wallets(cfg.mnemonic)
+    funder, service = wallets(cfg.mnemonic, cfg.funder_index)
     first = PLAYER_INDEX + funder_nonce
     players = indexed_wallets(cfg.mnemonic, first, n)
     _, lock_nonces = await chain.nonces(LOCK_NONCES, [p.address for p in players])
@@ -283,6 +334,7 @@ async def _phases(
             args.max_wait,
             REFUSED_WAIT_S,
             journal,
+            QUIET_S,
         )
     finally:
         journal.close()
@@ -415,10 +467,13 @@ def summarize(ts: Sequence[Transfer]) -> dict[str, Any]:
     sends = [t.sent_at for t in ts if t.sent_at]
     landings = [t.landed_at for t in landed if t.landed_at is not None]
     span = max(landings) - min(sends) if landings else None
+    unresent = [t.landed_at for t in landed if t.landed_at is not None and not t.resends]
     unresolved = sum(t.outcome == "unresolved" for t in ts)
     return {
         "sent": len(ts),
         "landed": len(landed),
+        "landed_without_resend": len(unresent),
+        "last_landing_without_resend_s": _round(max(unresent) - min(sends) if unresent else None),
         "refused": sum(t.outcome == "refused" for t in ts),
         "unresolved": unresolved,
         "replies": dict(Counter(_label(t.reply) for t in ts if t.reply)),
@@ -461,6 +516,12 @@ def to_markdown(
         )
     lines += [
         "",
+        "Landed without a resend: "
+        + "; ".join(
+            f"{n} {s['landed_without_resend']} in {cell(s['last_landing_without_resend_s'], ' s')}"
+            for n, s in summaries.items()
+        )
+        + ".",
         "Replies: " + "; ".join(f"{n} {s['replies']}" for n, s in summaries.items()) + ".",
         "Failed replies that landed: "
         + "; ".join(f"{n} {s['failed_replies_that_landed']}" for n, s in summaries.items())
@@ -513,6 +574,7 @@ def describe(
     cfg: Config,
     p: Plan,
     args: argparse.Namespace,
+    network: str,
     contract_version: int,
     symbol: str,
     commit: str,
@@ -526,7 +588,7 @@ def describe(
         "funder": p.funder.address,
         "service": p.service.address,
         "players": f"indices {p.first} to {p.first + len(p.players) - 1}",
-        "network": "Sapphire Testnet",
+        "network": network,
         "api": cfg.api_url,
         "accounting": cfg.accounting,
         "token_id": cfg.token_id,

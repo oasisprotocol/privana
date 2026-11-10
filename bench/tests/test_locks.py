@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -12,7 +13,7 @@ import pytest
 from privana_bench import cli, locks
 from privana_bench.config import Config, PreflightError, indexed_wallets, wallets
 from privana_bench.locks import Action, burst, summarize
-from privana_bench.privana import Reply
+from privana_bench.privana import NEVER_SENT, Reply
 from privana_bench.transfers import Journal, unsettled
 
 MNEMONIC = "test test test test test test test test test test test junk"
@@ -33,6 +34,7 @@ class World:
     next_lock: int = 1
     block: int = 100
     calls: list[str] = field(default_factory=list)
+    network: str = "testnet"
 
     def nonce(self, getter: str, address: str) -> int:
         return self.nonces.get((getter, address), 0)
@@ -270,6 +272,128 @@ async def test_burst_outcomes(tmp_path: Path) -> None:
     assert "can still land" in actions[3].note
     events = [json.loads(line)["event"] for line in (tmp_path / "j.jsonl").read_text().splitlines()]
     assert events == ["send"] * 4 + ["outcome"] * 4
+
+
+async def test_a_lost_write_goes_out_again_once_the_burst_is_quiet(tmp_path: Path) -> None:
+    nonces = {"0xA": 0, "0xB": 0}
+    sent: list[tuple[str, float]] = []
+
+    async def send(a: Action) -> Reply:
+        sent.append((a.wallet, time.time()))
+        if a.wallet == "0xA":
+            await asyncio.sleep(0.2)  # still queued when 0xB's reply is cut
+        elif len(sent) == 2:
+            return Reply("unknown", None, "network: RemoteProtocolError")
+        nonces[a.wallet] += 1
+        return Reply("ok", 200)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        return 7, {w: nonces[w] for w in wallets}
+
+    actions = [Action(k, 0, 0.0, wallet=w) for k, w in enumerate(nonces)]
+    journal = Journal(tmp_path / "j.jsonl")
+    await burst(
+        actions,
+        send,
+        read,
+        poll_s=0.01,
+        max_wait_s=5.0,
+        refused_wait_s=0.02,
+        journal=journal,
+        quiet_s=0.1,
+    )
+    journal.close()
+    assert [a.outcome for a in actions] == ["landed", "landed"]
+    assert [a.resends for a in actions] == [0, 1]
+    assert actions[1].note.endswith("but it landed, resent 1 time")
+    # Not while 0xA was still landing: only 0.1 s after the last landing or reply.
+    assert [w for w, _ in sent] == ["0xA", "0xB", "0xB"]
+    assert actions[0].landed_at is not None and sent[2][1] >= actions[0].landed_at + 0.1
+    events = [json.loads(line)["event"] for line in (tmp_path / "j.jsonl").read_text().splitlines()]
+    assert events == ["send", "send", "resend", "resend reply", "outcome", "outcome"]
+
+
+async def test_a_write_that_stays_lost_goes_out_again_until_the_watch_ends() -> None:
+    sent: list[str] = []
+    reads = 0
+
+    async def send(a: Action) -> Reply:
+        sent.append(a.wallet)
+        return Reply("unknown", 502)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        nonlocal reads
+        reads += 1
+        # 0xC landed, and only the second read shows it: later ones come from a node behind.
+        return 7, {w: int(w == "0xC" and reads == 2) for w in wallets}
+
+    # 0xB waits for nonce 1 while its wallet is at 0, so a resend could not land.
+    actions = [
+        Action(0, 0, 0.0, wallet="0xA"),
+        Action(1, 1, 0.0, wallet="0xB"),
+        Action(2, 0, 0.0, wallet="0xC"),
+    ]
+    await burst(actions, send, read, poll_s=0.01, max_wait_s=0.4, refused_wait_s=0.02, quiet_s=0.05)
+    assert [a.outcome for a in actions] == ["unresolved", "unresolved", "landed"]
+    resends = actions[0].resends
+    assert resends >= 2 and sent.count("0xA") == 1 + resends
+    assert f"resent {resends} times, so it can still land" in actions[0].note
+    assert (sent.count("0xB"), sent.count("0xC")) == (1, 1)
+
+
+async def test_a_refused_resend_is_the_reply() -> None:
+    replies = [Reply("unknown", 502), Reply("refused", 422, "Transaction reverted: Expired")]
+
+    async def send(a: Action) -> Reply:
+        return replies.pop(0)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        return 7, {w: 0 for w in wallets}
+
+    actions = [Action(0, 0, 0.0, wallet="0xA")]
+    await burst(actions, send, read, poll_s=0.01, max_wait_s=2.0, refused_wait_s=0.02, quiet_s=0.05)
+    assert (actions[0].outcome, actions[0].resends) == ("refused", 1)
+    assert actions[0].note == "422 Transaction reverted: Expired, resent 1 time"
+
+
+async def test_a_resend_that_never_connected_is_no_reply() -> None:
+    replies = [Reply("unknown", 502)]
+
+    async def send(a: Action) -> Reply:
+        return replies.pop(0) if replies else Reply("refused", None, NEVER_SENT)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        return 7, {w: 0 for w in wallets}
+
+    actions = [Action(0, 0, 0.0, wallet="0xA")]
+    await burst(actions, send, read, poll_s=0.01, max_wait_s=0.3, refused_wait_s=0.02, quiet_s=0.05)
+    assert actions[0].outcome == "unresolved" and actions[0].resends >= 1
+    assert "reply 502, resent" in actions[0].note
+
+
+async def test_a_lost_lock_is_recovered_in_a_live_run(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(locks, "QUIET_S", 0.1)
+    lost = indexed_wallets(MNEMONIC, locks.PLAYER_INDEX, 3)[1].address
+    lock, tries = world.lock, 0
+
+    async def lock_after_a_lost_try(account: Any, *args: Any) -> Reply:
+        nonlocal tries
+        if account.address == lost:
+            tries += 1
+            if tries == 1:
+                return Reply("unknown", None, "network: RemoteProtocolError")
+        return await lock(account, *args)
+
+    monkeypatch.setattr(world, "lock", lock_after_a_lost_try)
+    assert await cli.run(CFG, locks_args(live=True)) == 0
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    summary = report["summary"]["locks"]
+    assert (summary["landed"], summary["landed_without_resend"], summary["resends"]) == (3, 2, 1)
+    assert "Landed without a resend: funding 3 in " in (run_dir / "report.md").read_text()
 
 
 async def test_reply_time_counts_from_the_try_that_went_out() -> None:

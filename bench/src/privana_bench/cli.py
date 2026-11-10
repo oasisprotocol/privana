@@ -20,7 +20,7 @@ from privana import AccountingApiError, NetworkError, create_domain
 
 from . import locks
 from .chain import Chain, ChainError, host_of
-from .config import TESTNET_CHAIN_ID, Config, ConfigError, PreflightError, load, wallets
+from .config import ENV_FILE, NETWORKS, Config, ConfigError, PreflightError, load, wallets
 from .privana import SDK_TIMEOUT_S, LoginError, Privana, Reply, safe_detail
 from .report import Balances, summarize, write_report
 from .transfers import Journal, Transfer, check_settled, run_transfers
@@ -41,15 +41,17 @@ class Facts:
     symbol: str
     nonce: int
 
+    @property
+    def network(self) -> str:
+        return NETWORKS[self.chain_id]
+
 
 async def preflight(cfg: Config, chain: Chain, privana: Privana, sender: LocalAccount) -> Facts:
     """Public reads only: the network, the contract, the token and the sender's nonce."""
     chain_id = await chain.chain_id()
-    if chain_id != TESTNET_CHAIN_ID:
-        raise PreflightError(f"SAPPHIRE_RPC_URL is chain {chain_id}, not {TESTNET_CHAIN_ID}")
     contract_version = await chain.version()
     fields, name, domain_version, contract, salt = await chain.eip712_domain()
-    sdk = create_domain("testnet", cfg.accounting)
+    sdk = create_domain(privana.network, cfg.accounting)
     expected = (SALTED_DOMAIN_FIELDS, sdk.name, sdk.version, sdk.verifying_contract, sdk.salt)
     if (fields, name, domain_version, contract, salt) != expected:
         raise PreflightError(
@@ -100,16 +102,16 @@ def _progress(t: Transfer) -> None:
 
 
 async def run(cfg: Config, args: argparse.Namespace) -> int:
-    sender, receiver = wallets(cfg.mnemonic)
+    sender, receiver = wallets(cfg.mnemonic, cfg.funder_index)
     async with httpx.AsyncClient(timeout=20.0) as http:
         chain = Chain(cfg.rpc_url, cfg.accounting, http)
-        privana = Privana(cfg.api_url, cfg.accounting, TESTNET_CHAIN_ID)
+        privana = Privana(cfg.api_url, cfg.accounting, await chain.chain_id())
         try:
             facts = await preflight(cfg, chain, privana, sender)
             if args.command == "locks":
                 return await _locks(cfg, args, chain, privana, facts)
             print(
-                f"Sapphire Testnet, Accounting {cfg.accounting} VERSION {facts.version}, "
+                f"{facts.network}, Accounting {cfg.accounting} VERSION {facts.version}, "
                 f"sender {sender.address} at transfer nonce {facts.nonce}, "
                 f"receiver {receiver.address}."
             )
@@ -156,7 +158,7 @@ async def _live_transfers(
         "sender": sender.address,
         "receiver": receiver.address,
         "benchmark": "transfers",
-        "network": f"Sapphire Testnet ({facts.chain_id})",
+        "network": f"{facts.network} ({facts.chain_id})",
         "api": cfg.api_url,
         "accounting": cfg.accounting,
         "token_id": cfg.token_id,
@@ -218,7 +220,7 @@ async def _locks(
 ) -> int:
     plan = await locks.plan(cfg, chain, privana, facts.nonce, args.n, args.amount, RESULTS)
     print(
-        f"Sapphire Testnet, Accounting {cfg.accounting} VERSION {facts.version}. "
+        f"{facts.network}, Accounting {cfg.accounting} VERSION {facts.version}. "
         f"Funder {plan.funder.address} at transfer nonce {plan.funder_nonce}, service "
         f"{plan.service.address} at settle nonce {plan.service_nonce}, {args.n} new players "
         f"{plan.players[0].address} to {plan.players[-1].address}."
@@ -232,12 +234,13 @@ async def _locks(
     if not args.live:
         print("Dry run, nothing sent. Add --live to log in the funder and send.")
         return 0
-    meta = locks.describe(cfg, plan, args, facts.version, facts.symbol, _commit())
+    meta = locks.describe(cfg, plan, args, facts.network, facts.version, facts.symbol, _commit())
     return await locks.run(cfg, args, chain, privana, plan, amount, meta, RESULTS)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="privana-bench", description=__doc__)
+    parser.add_argument("--env-file", type=Path, default=ENV_FILE, help="settings (default .env)")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("preflight", help="public reads only, sends nothing")
     tr = commands.add_parser("transfers", help="one wallet sends N transfers in a row")
@@ -276,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{SDK_TIMEOUT_S:.0f}, the SDK reply timeout"
         )
     try:
-        return asyncio.run(run(load(), args))
+        return asyncio.run(run(load(args.env_file), args))
     except KeyboardInterrupt:
         print("Interrupted. A write in flight can still land, see the run's journals.")
         return 130
@@ -286,5 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"API {exc.status_code}: {safe_detail(exc.detail)}")
     except (httpx.HTTPError, NetworkError) as exc:
         # No message: an httpx error names the URL, and an RPC URL can hold a key.
-        print(f"{type(exc).__name__}: a network call failed, check the URLs in .env")
+        print(
+            f"{type(exc).__name__}: a network call failed, check the URLs in {args.env_file.name}"
+        )
     return 2
