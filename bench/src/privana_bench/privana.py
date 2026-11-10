@@ -2,7 +2,7 @@
 
 No client gets a token provider, so the SDK never replays a request. A write
 goes out again only when its connection never opened, here, or after a lost
-reply in the one-after-another phases (transfers.py).
+reply (transfers.py and locks.py).
 """
 
 from __future__ import annotations
@@ -13,16 +13,19 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_account.signers.local import LocalAccount
 from privana import (
+    NETWORK_CONFIG,
     AccountingApiError,
     LockFundsRequest,
     LockMessage,
+    Network,
+    NetworkConfig,
     NetworkError,
     PrivanaClient,
     SignLockParams,
@@ -37,6 +40,8 @@ from privana import (
     sign_transfer_locked_message,
     sign_transfer_message,
 )
+
+from .config import NETWORKS, PreflightError
 
 # Above the API's own 60 s wait on the enclave, so its reply is what we see.
 SDK_TIMEOUT_S = 90.0
@@ -141,11 +146,27 @@ def siwe_message(domain: str, address: str, nonce: str, chain_id: int, now: floa
     )
 
 
+def sdk_network(chain_id: int) -> Network:
+    """The SDK's name for a chain the bench writes to. Its signers take the domain
+    salt from its network list, which has no Sapphire Localnet, so that chain is
+    added to the list."""
+    if chain_id not in NETWORKS:
+        known = " or ".join(f"{name} ({known_id})" for known_id, name in NETWORKS.items())
+        raise PreflightError(f"SAPPHIRE_RPC_URL is chain {chain_id}, not {known}")
+    for name, network in NETWORK_CONFIG.items():
+        if network.chain_id == chain_id:
+            return name
+    name = cast(Network, f"chain-{chain_id}")
+    NETWORK_CONFIG[name] = NetworkConfig(chain_id, name, accounting_contract="", api_url="")
+    return name
+
+
 class Privana:
     def __init__(self, api_url: str, accounting: str, chain_id: int) -> None:
         self._api_url = api_url
         self._accounting = accounting
         self._chain_id = chain_id
+        self.network = sdk_network(chain_id)
         self._clients: dict[str, PrivanaClient] = {}
 
     def client(self, address: str) -> PrivanaClient:
@@ -206,7 +227,7 @@ class Privana:
         message = TransferMessage(to_address=to, token_id=token_id, amount=amount, nonce=nonce)
         params = SignTransferParams(
             account=account,
-            network="testnet",
+            network=self.network,
             verifying_contract=self._accounting,
             message=message,
         )
@@ -241,7 +262,7 @@ class Privana:
         )
         params = SignLockParams(
             account=account,
-            network="testnet",
+            network=self.network,
             verifying_contract=self._accounting,
             message=message,
         )
@@ -275,7 +296,7 @@ class Privana:
         )
         params = SignTransferLockedParams(
             account=service,
-            network="testnet",
+            network=self.network,
             verifying_contract=self._accounting,
             message=message,
         )

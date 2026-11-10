@@ -10,12 +10,13 @@ from eth_account.messages import encode_defunct, encode_typed_data
 from privana import AccountingApiError, NetworkError, ValidationError
 
 from privana_bench import privana as module
-from privana_bench.config import TESTNET_CHAIN_ID, wallets
+from privana_bench.config import PreflightError, wallets
 from privana_bench.privana import SDK_TIMEOUT_S, LoginError, Privana, Reply, safe_detail
 
 MNEMONIC = "test test test test test test test test test test test junk"
 ACCOUNTING = "0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f"
 TOKEN = "0x" + "ab" * 32
+TESTNET, LOCALNET = 23295, 23293
 
 
 class FakeClient:
@@ -63,7 +64,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Privana:
     FakeClient.first_errors = []
     FakeClient.login_error = None
     monkeypatch.setattr(module, "PrivanaClient", FakeClient)
-    return Privana("https://api.example", ACCOUNTING, TESTNET_CHAIN_ID)
+    return Privana("https://api.example", ACCOUNTING, TESTNET)
 
 
 def test_safe_detail_drops_inputs_and_masks_secrets() -> None:
@@ -91,15 +92,23 @@ def test_siwe_message() -> None:
     ]
 
 
-def test_transfer_signature_recovers_as_privana_checks_it(api: Privana) -> None:
-    """Privana builds the domain from the contract's ERC-5267 report (fields 0x1b)."""
+def test_no_signing_for_a_chain_outside_the_list() -> None:
+    with pytest.raises(PreflightError, match="chain 23294, not Sapphire Testnet"):
+        Privana("https://api.example", ACCOUNTING, 23294)
+
+
+@pytest.mark.parametrize("chain_id", [TESTNET, LOCALNET])
+def test_transfer_signature_recovers_as_privana_checks_it(chain_id: int) -> None:
+    """Privana builds the domain from the contract's ERC-5267 report (fields 0x1b).
+    The SDK lists no localnet, so the bench adds that chain to sign for it."""
+    api = Privana("https://api.example", ACCOUNTING, chain_id)
     sender, receiver = wallets(MNEMONIC)
     signature = api.sign_transfer(sender, receiver.address, TOKEN, 10_000, 7)
     domain = {
         "name": "AccountingModule",
         "version": "1",
         "verifyingContract": ACCOUNTING,
-        "salt": TESTNET_CHAIN_ID.to_bytes(32, "big"),
+        "salt": chain_id.to_bytes(32, "big"),
     }
     types = [
         {"name": "toAddress", "type": "address"},

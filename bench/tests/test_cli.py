@@ -11,7 +11,7 @@ import pytest
 from privana_bench import cli
 from privana_bench.cli import preflight, to_units
 from privana_bench.config import Config, PreflightError, wallets
-from privana_bench.privana import Reply
+from privana_bench.privana import Reply, sdk_network
 
 MNEMONIC = "test test test test test test test test test test test junk"
 ACCOUNTING = "0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f"
@@ -43,6 +43,7 @@ class FakeChain:
 class FakeApi:
     tokens: dict[str, tuple[int, str]] = field(default_factory=lambda: {TOKEN: (6, "USDC")})
     nonce: int = 3
+    network: str = "testnet"
 
     async def token(self, token_id: str) -> tuple[int, str] | None:
         return self.tokens.get(token_id)
@@ -67,10 +68,15 @@ async def test_preflight_passes() -> None:
     )
 
 
+async def test_preflight_passes_on_localnet() -> None:
+    domain = (0x1B, "AccountingModule", "1", ACCOUNTING, (23293).to_bytes(32, "big"))
+    facts = await check(FakeChain(chain=23293, domain=domain), FakeApi(network=sdk_network(23293)))
+    assert (facts.chain_id, facts.network) == (23293, "Sapphire Localnet")
+
+
 @pytest.mark.parametrize(
     ("chain", "api", "error"),
     [
-        (FakeChain(chain=23294), FakeApi(), "not 23295"),
         (
             FakeChain(domain=(0x0F, "AccountingModule", "1", ACCOUNTING, b"\x00" * 32)),
             FakeApi(),
