@@ -1635,7 +1635,7 @@ async def get_siwe_nonce(address: str, request: Request, response: Response) -> 
     except Exception as exc:
         raise auth_exception(status_code=400, detail="Invalid Ethereum address") from exc
 
-    nonce = token_store.generate_nonce(client_id=client_id)
+    nonce = token_store.generate_nonce()
     response.headers.update(no_store_headers())
     return SiweNonceResponse(
         address=client_id,
