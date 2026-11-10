@@ -163,7 +163,7 @@ class TestSiweLogin:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         # Generate a valid nonce
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _JwtService:
@@ -218,7 +218,7 @@ class TestSiweLogin:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         # Generate a valid nonce
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _JwtService:
@@ -252,6 +252,48 @@ class TestSiweLogin:
 
         assert exc.value.status_code == 400
         assert "Invalid or expired nonce" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_parallel_logins_as_one_address_both_succeed(
+        self, reset_auth_singletons, monkeypatch, tmp_path
+    ):
+        """Two services signing in as one address at once each get a session."""
+        monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(tmp_path / "parallel_test"))
+        monkeypatch.setenv("DISABLE_ROFL_KEYS", "1")
+        src.auth.token_store._token_store_instance = None
+        token_store = TokenStore()
+        src.auth.auth_token_keys._auth_token_key_manager_instance = None
+        src.auth.auth_token_service._auth_token_service_instance = None
+        await _init_key_managers()
+        monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
+
+        class _JwtService:
+            access_token_expiry_seconds = 12 * 3600
+            refresh_token_expiry_seconds = 7 * 24 * 3600
+
+            def create_token(self, address):
+                return "jwt-access-token"
+
+            def create_refresh_token(self, address):
+                return "jwt-refresh-token"
+
+        class _MockAccountingService:
+            def get_siwe_domain(self):
+                return {"domain": "localhost:5173"}
+
+        monkeypatch.setattr(routes, "get_jwt_service", lambda: _JwtService())
+        monkeypatch.setattr(routes, "_service", _MockAccountingService())
+
+        nonces = [(await _call_get_siwe_nonce(TEST_ADDRESS)).nonce for _ in range(2)]
+        with patch.object(SiweMessage, "verify"):
+            for nonce in nonces:
+                response = await _call_siwe_login(
+                    SiweLoginRequest(
+                        siwe_message=_build_siwe_message(TEST_ADDRESS, nonce),
+                        signature="0x" + "ab" * 65,
+                    )
+                )
+                assert response.address == TEST_ADDRESS
 
     @pytest.mark.asyncio
     async def test_rejects_invalid_nonce(self, reset_auth_singletons, monkeypatch, tmp_path):
@@ -459,7 +501,7 @@ class TestSiweValidationEdgeCases:
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
         # Generate a valid nonce but use wrong domain in SIWE message
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, domain="wrong-domain.com")
 
         class _MockAccountingService:
@@ -499,7 +541,7 @@ class TestSiweValidationEdgeCases:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _MockAccountingService:
@@ -535,7 +577,7 @@ class TestSiweValidationEdgeCases:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _MockAccountingService:
@@ -594,7 +636,7 @@ class TestSiweValidationEdgeCases:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _MockAccountingService:
@@ -634,7 +676,7 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
 
         # issued_at 10 minutes ago (beyond 5 min tolerance)
         old_issued_at = datetime.now(timezone.utc) - timedelta(minutes=10)
@@ -676,7 +718,7 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
 
         # expiration_time only 1 hour from now (should be 24h)
         wrong_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -726,7 +768,7 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
 
         # expiration_time 48 hours from now (should be 24h)
         long_expiry = datetime.now(timezone.utc) + timedelta(hours=48)
@@ -766,7 +808,7 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
 
         # Valid timestamps: issued now, expires in 24h
         now = datetime.now(timezone.utc)
@@ -820,7 +862,7 @@ class TestSiweTimestampValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
 
         # issued_at 3 minutes ago (within 5 min tolerance)
         # expiration slightly off but within tolerance
@@ -878,20 +920,6 @@ class TestNonceEndpoint:
         assert response.expires_in > 0
 
     @pytest.mark.asyncio
-    async def test_returns_same_nonce_for_same_address(
-        self, reset_auth_singletons, monkeypatch, tmp_path
-    ):
-        """Test that requesting nonce twice for same address returns the same nonce."""
-        storage_dir = tmp_path / "nonce_same_test"
-        monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
-        src.auth.token_store._token_store_instance = None
-
-        response1 = await _call_get_siwe_nonce(TEST_ADDRESS)
-        response2 = await _call_get_siwe_nonce(TEST_ADDRESS)
-
-        assert response1.nonce == response2.nonce
-
-    @pytest.mark.asyncio
     async def test_returns_different_nonce_for_different_address(
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
@@ -929,13 +957,11 @@ class TestNonceEndpoint:
         lowercase_addr = "0xabcdef1234567890abcdef1234567890abcdef12"
         checksum_addr = Web3.to_checksum_address(lowercase_addr)
 
-        # Both should work and return the same nonce (normalized internally)
         response1 = await _call_get_siwe_nonce(lowercase_addr)
         response2 = await _call_get_siwe_nonce(checksum_addr)
 
         assert response1.address == checksum_addr
         assert response2.address == checksum_addr
-        assert response1.nonce == response2.nonce
 
 
 class TestLoginRetryBehavior:
@@ -958,7 +984,7 @@ class TestLoginRetryBehavior:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _JwtService:
@@ -1016,7 +1042,7 @@ class TestLoginRetryBehavior:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _JwtService:
@@ -1069,7 +1095,7 @@ class TestMissingTimestampFields:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
 
         # Build SIWE message without issued_at (manually construct to omit field)
         now = datetime.now(timezone.utc)
@@ -1130,7 +1156,7 @@ class TestMissingTimestampFields:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         class _MockAccountingService:
@@ -1188,7 +1214,7 @@ class TestChainIdValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         # Omit the destination chain ID entirely.
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, destination_chain_id=None)
 
@@ -1225,7 +1251,7 @@ class TestChainIdValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         # Destination chain ID 999 does not match the configured Sapphire chain ID.
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, destination_chain_id=999)
 
@@ -1262,7 +1288,7 @@ class TestChainIdValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         # Default destination_chain_id matches the configured Sapphire chain ID.
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
@@ -1312,7 +1338,7 @@ class TestChainIdValidation:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce, destination_chain_id=23294)
 
         class _JwtService:
@@ -1370,7 +1396,7 @@ class TestConfigErrors:
 
         monkeypatch.setattr(routes, "get_token_store", lambda: token_store)
 
-        test_nonce = token_store.generate_nonce(client_id=TEST_ADDRESS)
+        test_nonce = token_store.generate_nonce()
         siwe_msg = _build_siwe_message(TEST_ADDRESS, test_nonce)
 
         with pytest.raises(HTTPException) as exc:
@@ -1405,7 +1431,7 @@ class TestLoginAddressNormalization:
 
         # Use a real-looking address that has mixed case in checksum form
         test_addr = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B"
-        test_nonce = token_store.generate_nonce(client_id=test_addr)
+        test_nonce = token_store.generate_nonce()
 
         # Build message with lowercase address (the SIWE library will normalize)
         siwe_msg = _build_siwe_message(test_addr, test_nonce)
