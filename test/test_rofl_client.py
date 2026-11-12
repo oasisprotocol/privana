@@ -1,5 +1,6 @@
 """Tests for RoflAppdClient wrapper."""
 
+import asyncio
 import base64
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -108,6 +109,38 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.submission_id, expected)
         self.assertEqual(result.ok_payload, b"")
         mock_client.sign_submit.assert_awaited_once_with(tx, True)
+
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_sends_calls_in_order_a_gap_apart(self, mock_async_client_class):
+        """Test that calls made together reach appd one by one, in call order."""
+        from src.clients.rofl import _APPD_SUBMIT_GAP_SECONDS, RoflAppdClient
+
+        sent: list[tuple[str, float]] = []
+        all_sent = asyncio.Event()
+
+        async def sign_submit(tx, encrypt):
+            sent.append((tx["data"], asyncio.get_running_loop().time()))
+            if len(sent) == len(txs):
+                all_sent.set()
+            await all_sent.wait()  # appd replies late, so every call is in flight at once
+            return {"ok": b""}
+
+        mock_client = MagicMock()
+        mock_client.sign_submit = sign_submit
+        mock_async_client_class.return_value = mock_client
+
+        client = RoflAppdClient()
+        txs: list[TxParams] = [
+            {"to": "0x0987654321098765432109876543210987654321", "data": f"0x{i:02x}"}
+            for i in range(3)
+        ]
+        await asyncio.wait_for(asyncio.gather(*(client.submit_tx(tx) for tx in txs)), 5)
+
+        self.assertEqual([data for data, _ in sent], [tx["data"] for tx in txs])
+        times = [at for _, at in sent]
+        for earlier, later in zip(times, times[1:]):
+            # A timer fires up to one clock tick early.
+            self.assertGreaterEqual(later - earlier, _APPD_SUBMIT_GAP_SECONDS * 0.9)
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_submit_tx_encrypts_by_default(self, mock_async_client_class):
