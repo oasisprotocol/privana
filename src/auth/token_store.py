@@ -21,7 +21,6 @@ DEFAULT_NONCE_EXPIRY_SECONDS = 300
 # Key prefixes for namespacing
 _REFRESH_PREFIX = "refresh:"
 _NONCE_PREFIX = "nonce:"
-_CLIENT_NONCE_PREFIX = "client_nonce:"
 
 
 class TokenStore:
@@ -149,45 +148,18 @@ class TokenStore:
     # SIWE Nonce operations (API-level replay protection)
     # -------------------------------------------------------------------------
 
-    def generate_nonce(self, client_id: str | None = None) -> str:
+    def generate_nonce(self) -> str:
         """Generate and store a new nonce for SIWE authentication.
 
-        The nonce is stored with an expiration time. Clients must use this
-        nonce in their SIWE message and submit it before expiration.
-
-        If a client_id is provided (e.g., IP address) and that client already
-        has a valid unexpired nonce, the existing nonce is returned instead
-        of generating a new one.
-
-        Args:
-            client_id: Optional client identifier (e.g., IP address) for
-                       nonce reuse within expiration window.
+        Every call gets its own nonce, so parallel logins as one address
+        don't race for the same one. Clients must use the nonce in their
+        SIWE message and submit it before expiration.
 
         Returns:
             A cryptographically secure random nonce string.
         """
-        # If client_id provided, check for existing nonce
-        if client_id:
-            client_key = f"{_CLIENT_NONCE_PREFIX}{client_id}"
-            existing_nonce = self._cache.get(client_key)
-            if existing_nonce is not None:
-                # Verify the nonce itself still exists
-                nonce_key = f"{_NONCE_PREFIX}{existing_nonce}"
-                if nonce_key in self._cache:
-                    return existing_nonce
-
-        # Generate new nonce
         nonce = secrets.token_hex(32)
-        nonce_key = f"{_NONCE_PREFIX}{nonce}"
-
-        # Store nonce with TTL
-        self._cache.set(nonce_key, client_id or "", expire=self._nonce_expiry_seconds)
-
-        # If client_id provided, store mapping for nonce reuse
-        if client_id:
-            client_key = f"{_CLIENT_NONCE_PREFIX}{client_id}"
-            self._cache.set(client_key, nonce, expire=self._nonce_expiry_seconds)
-
+        self._cache.set(f"{_NONCE_PREFIX}{nonce}", True, expire=self._nonce_expiry_seconds)
         return nonce
 
     def consume_nonce(self, nonce: str) -> bool:
@@ -203,18 +175,7 @@ class TokenStore:
         Returns:
             True if the nonce was valid and consumed, False otherwise.
         """
-        nonce_key = f"{_NONCE_PREFIX}{nonce}"
-        client_id = self._cache.pop(nonce_key)
-
-        if client_id is None:
-            return False
-
-        # Also clean up client mapping if it exists
-        if client_id:
-            client_key = f"{_CLIENT_NONCE_PREFIX}{client_id}"
-            self._cache.delete(client_key)
-
-        return True
+        return self._cache.pop(f"{_NONCE_PREFIX}{nonce}") is not None
 
     def is_nonce_valid(self, nonce: str) -> bool:
         """Check if a nonce is valid (exists and not expired).

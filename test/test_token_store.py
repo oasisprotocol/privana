@@ -161,44 +161,6 @@ class TestNonceOperations:
         assert store.is_nonce_valid(nonce) is False
         assert store.consume_nonce(nonce) is False
 
-    def test_same_address_gets_same_nonce(self, reset_auth_singletons, monkeypatch, tmp_path):
-        """Test that same address gets existing nonce instead of new one."""
-        storage_dir = tmp_path / "nonce_client_test"
-        monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
-        token_store_module._token_store_instance = None
-
-        store = TokenStore()
-        address1 = "0x1234567890123456789012345678901234567890"
-
-        nonce1 = store.generate_nonce(client_id=address1)
-        nonce2 = store.generate_nonce(client_id=address1)
-
-        # Same address should get same nonce
-        assert nonce1 == nonce2
-
-        # Different address should get different nonce
-        address2 = "0x0987654321098765432109876543210987654321"
-        nonce3 = store.generate_nonce(client_id=address2)
-        assert nonce3 != nonce1
-
-    def test_address_gets_new_nonce_after_consumption(
-        self, reset_auth_singletons, monkeypatch, tmp_path
-    ):
-        """Test that address gets new nonce after previous one is consumed."""
-        storage_dir = tmp_path / "nonce_consumed_test"
-        monkeypatch.setenv("AUTH_TOKEN_STORAGE_DIR", str(storage_dir))
-        token_store_module._token_store_instance = None
-
-        store = TokenStore()
-        address = "0x1234567890123456789012345678901234567890"
-
-        nonce1 = store.generate_nonce(client_id=address)
-        assert store.consume_nonce(nonce1) is True
-
-        # After consumption, address should get a new nonce
-        nonce2 = store.generate_nonce(client_id=address)
-        assert nonce2 != nonce1
-
     def test_concurrent_nonce_consumption_only_one_succeeds(
         self, reset_auth_singletons, monkeypatch, tmp_path
     ):
