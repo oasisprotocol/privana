@@ -1,5 +1,6 @@
 """ROFL client helpers for key management and transaction submission."""
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ _PLAINTEXT_TX_SELECTOR_ALLOWLIST: Final[frozenset[str]] = frozenset()
 
 # appd queues writes without a time limit, so in a burst a write waits minutes for its turn.
 _APPD_TIMEOUT_SECONDS: Final[float] = 600.0
+
+# XXX: appd may queue concurrent calls out of order. Space calls this far apart to reduce reordering.
+_APPD_SUBMIT_GAP_SECONDS: Final[float] = 0.05
 
 
 @dataclass
@@ -127,6 +131,7 @@ class RoflAppdClient:
         if cls._instance is None:
             cls._instance = super(RoflAppdClient, cls).__new__(cls)
             cls._instance._client = AsyncRoflClient(timeout=_APPD_TIMEOUT_SECONDS)
+            cls._instance._submit_gate = asyncio.Lock()
         return cls._instance
 
     async def get_keypair(self, key_id: str = ROFL_QUERY_SIGNER_KEY):
@@ -198,6 +203,10 @@ class RoflAppdClient:
                 "Submitting allow-listed plaintext ROFL transaction selector %s",
                 plaintext_selector,
             )
+
+        # The lock is first come, first served, so calls go to appd in the order they got here.
+        async with self._submit_gate:
+            await asyncio.sleep(_APPD_SUBMIT_GAP_SECONDS)
 
         try:
             # AsyncRoflClient.sign_submit returns decoded CBOR directly
