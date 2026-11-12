@@ -262,7 +262,7 @@ User-driven escape hatch from a per-user deposit address, with no ROFL involveme
 | `withdraw` / `watchWithdrawal`                              | User-side withdrawal flow                        |
 | `directWithdraw`                                            | Withdraw on-chain without ROFL/API               |
 | `emergencyRequest` / `emergencyExecute` / `emergencyStatus` | Emergency-withdraw flow from deposit address     |
-| `getDepositAddress` / `checkDeposit`                        | User-side deposit helpers                        |
+| `deposits:address` / `deposits:check` / `deposits:check-all` | User-side deposit helpers                        |
 | `accounts`                                                  | List configured signer accounts                  |
 | `getAuthKeyHash` / `sign` / `transfer`                      | Auth/SIWE helpers                                |
 

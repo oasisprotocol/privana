@@ -167,6 +167,41 @@ export async function authenticate(params: SiweLoginParams): Promise<{
   return { jwtAccessToken };
 }
 
+// Signs in with SIWE and returns a function that POSTs JSON to the API as the user.
+export async function login(
+  signer: {
+    address: string;
+    signMessage: (message: string) => Promise<string>;
+  },
+  apiurl: string,
+  chainid: string,
+): Promise<(path: string, body: object) => Promise<unknown>> {
+  const apiBaseUrl = normalizeApiBaseUrl(apiurl);
+
+  console.log("User address:", signer.address);
+  console.log("API URL:", apiBaseUrl);
+
+  console.log("\nAuthenticating with SIWE...");
+  const { jwtAccessToken } = await authenticate({
+    apiBaseUrl,
+    signer,
+    userAddress: signer.address,
+    chainId: parseInt(chainid),
+  });
+  console.log("Authentication successful");
+
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${jwtAccessToken}`,
+  };
+  return (path: string, body: object) =>
+    fetchJson(`${apiBaseUrl}/v1/accounting/${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+}
+
 export async function fetchBalance(params: {
   apiBaseUrl: string;
   userAddress: string;

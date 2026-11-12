@@ -1,10 +1,12 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from web3 import Web3
 
+import src.services.deposit_processor as deposit_processor
 from src.models.private_read import PrivateReadAuth
+from src.services.deposit_funding import FundingTransfer
 from src.services.deposit_processor import DepositProcessor
 from src.services.deposit_verifier import VerifiedDeposit
 from src.services.sweep_engine import SweepRecord, SweepState
@@ -483,3 +485,79 @@ async def test_errored_record_with_sweep_tx_hash_preserves_record(
     assert "detail" not in status
     mock_sweep_engine.cleanup_record.assert_not_called()
     mock_sweep_engine.sweep_native.assert_not_called()
+
+
+NATIVE_ID, ERC20_ID = "0x" + "a1" * 32, "0x" + "b2" * 32
+TOKEN_INFOS = {
+    NATIVE_ID: {"chain_id": 84532, "token_address": None},
+    ERC20_ID: {"chain_id": 84532, "token_address": "0x" + "cc" * 20},
+}
+
+
+async def _check_all(processor, balances, transfers, token_id=None):
+    """Run check_all_deposits with the given balance per token and funding transfers."""
+    settings = MagicMock(token_infos=TOKEN_INFOS, chain_rpc_urls={84532: "https://rpc"})
+
+    async def balance(_w3, token_address, _holder):
+        return balances[token_address]
+
+    async def funding(_w3, _holder, token_address, _balance, _min):
+        return transfers[token_address]
+
+    with (
+        patch.object(deposit_processor, "load_settings", return_value=settings),
+        patch.object(deposit_processor, "verified_web3", return_value=MagicMock()),
+        patch.object(deposit_processor, "get_balance", side_effect=balance),
+        patch.object(deposit_processor, "get_funding_transfers", side_effect=funding),
+    ):
+        return await processor.process_all_deposits(
+            chain_type="evm", version=0, auth=PRIVATE_READ_AUTH, token_id=token_id
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_all_claims_each_funding_transfer_oldest_first(processor):
+    erc20 = "0x" + "cc" * 20
+    transfers = {
+        None: [FundingTransfer("0x" + "01" * 32, ONE_ETH, 0)],
+        erc20: [
+            FundingTransfer("0x" + "02" * 32, FIFTY_USDC, 4),
+            FundingTransfer("0x" + "03" * 32, FIFTY_USDC, 7),
+        ],
+    }
+    processor.process_deposit = AsyncMock(
+        side_effect=lambda **kw: {"status": "pending", "deposit_id": kw["tx_hash"]}
+    )
+
+    result = await _check_all(processor, {None: ONE_ETH, erc20: 2 * FIFTY_USDC}, transfers)
+
+    assert [d["deposit_id"] for d in result] == ["0x" + n * 32 for n in ("01", "02", "03")]
+    claimed = [
+        (c.kwargs["tx_hash"], c.kwargs["log_index"])
+        for c in processor.process_deposit.await_args_list
+    ]
+    assert claimed[1:] == [("0x" + "02" * 32, 4), ("0x" + "03" * 32, 7)]
+
+
+@pytest.mark.asyncio
+async def test_check_all_skips_balances_below_the_minimum_and_failed_transfers(processor):
+    erc20 = "0x" + "cc" * 20
+    transfers = {
+        None: [],
+        erc20: [FundingTransfer("0x" + "02" * 32, 1, 0), FundingTransfer("0x" + "03" * 32, 1, 0)],
+    }
+    processor.process_deposit = AsyncMock(
+        side_effect=[ValueError("Insufficient finality"), {"status": "credited", "deposit_id": "x"}]
+    )
+
+    # Native dust is not looked up at all; a failing or already credited transfer is not reported.
+    result = await _check_all(processor, {None: 1, erc20: FIFTY_USDC}, transfers)
+
+    assert result == []
+    assert processor.process_deposit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_check_all_rejects_an_unconfigured_token(processor):
+    with pytest.raises(ValueError, match="Token not supported"):
+        await _check_all(processor, {}, {}, token_id="0x" + "00" * 32)

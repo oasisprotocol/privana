@@ -21,7 +21,13 @@ from src.config.chain_config import (
 )
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import get_accounting_contract_service
+from src.services.deposit_funding import (
+    UnsupportedChainError,
+    get_balance,
+    get_funding_transfers,
+)
 from src.services.deposit_verifier import DepositVerifier
+from src.services.rpc_identity import verified_web3
 from src.services.sweep_engine import (
     DepositAccountingProtocol,
     SweepCreditPendingError,
@@ -231,6 +237,102 @@ class DepositProcessor:
         return self._deposit_response(
             "pending", deposit_id_hex, verified.amount, verified.token_address
         )
+
+    async def process_all_deposits(
+        self,
+        chain_type: str,
+        version: int,
+        auth: PrivateReadAuth,
+        token_id: str | None,
+    ) -> list[Dict]:
+        """Claim every unclaimed deposit at the user's deposit address.
+
+        For ``token_id`` (default: every configured token) whose balance reaches the minimum
+        deposit, finds the transfers that funded it and runs the /deposits/check logic on
+        each, oldest first. Tokens are checked concurrently; transfers of one token one by
+        one, so their sweeps are scheduled in the order they were made.
+
+        Returns:
+            The pending deposits (started or already in flight); empty when there are none.
+
+        Raises:
+            ValueError: If ``token_id`` is not a configured token.
+        """
+        deposit_address = await self._accounting.get_deposit_address(
+            chain_type, version, auth.token
+        )
+
+        token_infos = load_settings().token_infos
+        if token_id is not None:
+            if token_id not in token_infos:
+                raise ValueError("Token not supported")
+            token_infos = {token_id: token_infos[token_id]}
+
+        results = await asyncio.gather(
+            *(
+                self._process_all_deposits_tx_hash_balance(
+                    info, deposit_address, chain_type, version, auth
+                )
+                for info in token_infos.values()
+            ),
+            return_exceptions=True,
+        )
+        deposits = []
+        for token, result in zip(token_infos, results):
+            if isinstance(result, UnsupportedChainError):
+                logger.info("Token %s: chain has no Transfers API, skipping: %s", token, result)
+            elif isinstance(result, BaseException):
+                logger.warning(
+                    "Skipping token %s for address %s: %s", token, deposit_address, result
+                )
+            else:
+                deposits.extend(result)
+        return deposits
+
+    async def _process_all_deposits_tx_hash_balance(
+        self,
+        info: Dict,
+        deposit_address: str,
+        chain_type: str,
+        version: int,
+        auth: PrivateReadAuth,
+    ) -> list[Dict]:
+        chain_id = info["chain_id"]
+        token_address = info["token_address"]
+        if chain_id not in CHAIN_CONFIGS:
+            raise ValueError(f"Unsupported chain_id {chain_id}")
+        w3 = verified_web3(chain_id, dict(load_settings().chain_rpc_urls))
+        if w3 is None:
+            raise ValueError(f"No verified RPC endpoint for chain {chain_id}")
+
+        balance = await get_balance(w3, token_address, deposit_address)
+        minimums = MIN_DEPOSIT_NATIVE_WEI if token_address is None else MIN_DEPOSIT_ERC20_WEI
+        min_amount = minimums.get(chain_id, 0)
+        if balance == 0 or balance < min_amount:
+            return []
+
+        transfers = await get_funding_transfers(
+            w3, deposit_address, token_address, balance, min_amount
+        )
+        deposits = []
+        for transfer in transfers:
+            try:
+                deposit = await self.process_deposit(
+                    chain_type=chain_type,
+                    chain_id=chain_id,
+                    tx_hash=transfer.tx_hash,
+                    amount=transfer.amount,
+                    log_index=transfer.log_index,
+                    version=version,
+                    auth=auth,
+                )
+            except Exception as exc:
+                # Not finalized yet, a gas funding tx, ...: the rest are still claimed.
+                logger.warning("Skipping deposit tx %s: %s", transfer.tx_hash, exc)
+                continue
+            if deposit["status"] == "pending":
+                deposits.append(deposit)
+        return deposits
 
     async def _background_sweep(
         self,

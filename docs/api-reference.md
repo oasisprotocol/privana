@@ -24,7 +24,7 @@ If this markdown disagrees with `docs/openapi.json`, **trust `docs/openapi.json`
 - **Signatures** are EIP-712 typed-data signatures. User-signed accounting operations are defined in `solidity/contracts/EIP712SignatureVerifier.sol`.
 - **Nonces** are per-operation. User-signed operations key nonces by recovered signer; service-signed lock operations key nonces by service. The contract takes only the signer's next nonce: read it before signing, or count up from it when signing several. A wrong nonce reverts and returns `422`.
 - **Resends** of the same signed body are safe on `POST /funds/lock`, `/funds/modify-lock`, `/funds/transfer` and `/funds/transfer-locked`. A resend joins the write in flight, or returns the original reply for up to seven days after Privana has seen it succeed. Privana keeps these replies on its machine, so a machine replacement drops them. `409` means Privana submitted the write and its outcome is unknown: it landed if the signer's nonce has moved past it and the signer signed nothing else at that nonce. If the nonce has not moved, resend the same body.
-- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `409` for a submitted lock or transfer whose outcome is unknown, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
+- **Status codes** — most submission endpoints return `200 OK` on synchronous success, `202 Accepted` when work continues in the background (currently only `POST /deposits/check` and `POST /deposits/check-all`), `400` for semantic/business validation failures, `401` for missing/invalid auth, `409` for a submitted lock or transfer whose outcome is unknown, `422` for request-model validation or contract reverts, `429` for rate-limit, and `500` for unexpected internal failures.
 
 ### User-Signed EIP-712 Types
 
@@ -78,6 +78,7 @@ POST /auth/token {grant_type=authorization_code, code, code_verifier, …}
 |---|---|---|
 | `POST /deposits/address` | required | `Authorization: Bearer …` or `X-SIWE-Token` |
 | `POST /deposits/check` | required | same |
+| `POST /deposits/check-all` | required | same |
 | `GET /deposits/status/{id}` | required | same |
 | `GET /deposits/pending` | required | same |
 | `POST /funds/withdraw-from-lock` | required | same |
@@ -149,6 +150,13 @@ where the caps trip inside the newest block, `scanned_from_block` is
 `scanned_to_block + 1`: the interval is empty and no block is fully covered. Native transfers
 emit no logs and are not discoverable — submit their tx hash to
 `/deposits/check` directly.
+
+Without knowing any tx hash, `POST /deposits/check-all` claims everything at once. The body takes an optional
+`token_id` (bytes32; default: every configured token) and `version`. For each token it reads the deposit
+address balance and, when it reaches the chain's minimum deposit, asks Alchemy (`alchemy_getAssetTransfers`)
+for the transfers that funded it, newest first until they cover the balance. It then runs the
+`/deposits/check` logic for each of them, oldest first, and returns a list of the pending deposits (`202`;
+`200` with `[]` when there is nothing to claim). Tokens are checked concurrently. Native transfers include internal ones (multisig, forwarding contracts) on chains where Alchemy lists them; elsewhere only transfers sent by an externally owned account are found, and internal ones must be submitted to `/deposits/check`. A transaction is claimed once, as in `/deposits/check`: by its top-level value, else by the sum of its internal transfers. Chains whose endpoint has no Transfers API (Sapphire, HyperEVM testnet) are skipped; submit their tx hashes to `/deposits/check`.
 
 Behavior notes:
 
@@ -296,7 +304,7 @@ A `ContractLogicError` from Sapphire on any of these is mapped to `401 Invalid o
 | Code | Meaning |
 |---|---|
 | `200 OK` | Synchronous success — the response body has the result. |
-| `202 Accepted` | Work continues in the background. Currently only `POST /deposits/check` when a sweep is in flight. Poll the corresponding status endpoint. |
+| `202 Accepted` | Work continues in the background. Currently only `POST /deposits/check` and `POST /deposits/check-all` when a sweep is in flight. Poll the corresponding status endpoint. |
 | `400 Bad Request` | Semantic validation or business rule violation after the request model has parsed (for example malformed signed intent metadata or a modify-lock no-op). |
 | `401 Unauthorized` | Missing or invalid auth — bad SIWE token, expired JWT, both auth headers sent at once, or a provider webhook signature/JWT that fails verification. |
 | `403 Forbidden` | On-ramp record belongs to a different user or deposit address. |

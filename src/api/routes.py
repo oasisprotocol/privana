@@ -40,6 +40,7 @@ from src.models.accounting import (
     CreateOnRampSessionRequest,
     DepositAddressRequest,
     DepositAddressResponse,
+    DepositCheckAllRequest,
     DepositCheckRequest,
     DepositCheckResponse,
     ExpiredLocksResponse,
@@ -554,6 +555,42 @@ async def check_deposit(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to process deposit")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
+
+
+@router.post("/deposits/check-all", response_model=list[DepositCheckResponse])
+async def check_all_deposits(
+    payload: DepositCheckAllRequest,
+    response: Response,
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
+) -> list[DepositCheckResponse]:
+    """Claim every unclaimed deposit at the deposit address, without knowing the tx hashes.
+
+    Checks the balance of ``token_id`` (default: every configured token) and runs the
+    /deposits/check logic for each transfer that funded it. Returns the pending deposits:
+    202 when there are any, 200 with an empty list otherwise. Clients poll
+    GET /deposits/status/{deposit_id} for completion.
+    """
+    try:
+        deposits = await get_deposit_processor().process_all_deposits(
+            chain_type=payload.chain_type,
+            version=payload.version,
+            auth=auth,
+            token_id=payload.token_id,
+        )
+        if deposits:
+            response.status_code = 202
+        return [DepositCheckResponse(**deposit) for deposit in deposits]
+    except ContractLogicError as exc:
+        if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
+            raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+        logger.error("Contract revert in deposit check-all: %s", exc)
+        raise HTTPException(status_code=422, detail="Deposit credit failed") from exc
+    except ValueError as exc:
+        logger.warning("Deposit check-all rejected: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to check deposits")
         raise HTTPException(status_code=500, detail="Internal error") from exc
 
 

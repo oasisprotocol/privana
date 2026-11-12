@@ -285,6 +285,38 @@
         "title": "DepositAddressResponse",
         "type": "object"
       },
+      "DepositCheckAllRequest": {
+        "description": "Request to claim every unclaimed deposit at the deposit address.",
+        "properties": {
+          "chain_type": {
+            "const": "evm",
+            "default": "evm",
+            "description": "Chain family (v1: 'evm' only)",
+            "title": "Chain Type",
+            "type": "string"
+          },
+          "token_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Token id (bytes32) to check; default: every configured token",
+            "title": "Token Id"
+          },
+          "version": {
+            "default": 0,
+            "description": "Deposit address derivation version",
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "title": "DepositCheckAllRequest",
+        "type": "object"
+      },
       "DepositCheckRequest": {
         "description": "Request to check/trigger deposit verification for a specific tx.",
         "properties": {
@@ -3106,6 +3138,75 @@
           }
         ],
         "summary": "Check Deposit",
+        "tags": [
+          "Accounting"
+        ]
+      }
+    },
+    "/v1/accounting/deposits/check-all": {
+      "post": {
+        "description": "Claim every unclaimed deposit at the deposit address, without knowing the tx hashes.\n\nChecks the balance of ``token_id`` (default: every configured token) and runs the\n/deposits/check logic for each transfer that funded it. Returns the pending deposits:\n202 when there are any, 200 with an empty list otherwise. Clients poll\nGET /deposits/status/{deposit_id} for completion.",
+        "operationId": "check_all_deposits_v1_accounting_deposits_check_all_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-SIWE-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Siwe-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepositCheckAllRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DepositCheckResponse"
+                  },
+                  "title": "Response Check All Deposits V1 Accounting Deposits Check All Post",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check All Deposits",
         "tags": [
           "Accounting"
         ]
