@@ -25,6 +25,11 @@ ERC20_A = {"chain_id": CHAIN_A, "token_address": USDC_A}
 NATIVE_B = {"chain_id": CHAIN_B}
 
 
+def _keyed(*entries: dict) -> dict:
+    """Token infos keyed by a (here arbitrary) token id, as ``settings.token_infos``."""
+    return {f"0x{i:064x}": entry for i, entry in enumerate(entries)}
+
+
 def _make_service(data_and_id: dict, registered: set[bytes]) -> AsyncMock:
     """data_and_id maps (chain_id, token_address) -> (data, token_id)."""
     service = AsyncMock()
@@ -46,7 +51,7 @@ async def test_noop_when_no_env_configured() -> None:
     """ACCOUNTING_TOKEN_INFO unset → nothing to sync, no reads or writes."""
     service = _make_service({}, set())
 
-    await bootstrap_token_info(service, [])
+    await bootstrap_token_info(service, {})
 
     service.get_token_data_and_id.assert_not_awaited()
     service.set_token_info.assert_not_awaited()
@@ -58,7 +63,7 @@ async def test_registers_native_token_when_unregistered() -> None:
     token_id = b"\xaa" * 32
     service = _make_service({(CHAIN_A, None): (data, token_id)}, registered=set())
 
-    await bootstrap_token_info(service, [NATIVE_A])
+    await bootstrap_token_info(service, _keyed(NATIVE_A))
 
     service.set_token_info.assert_awaited_once_with(0, data)
 
@@ -69,7 +74,7 @@ async def test_registers_erc20_token_when_unregistered() -> None:
     token_id = b"\xbb" * 32
     service = _make_service({(CHAIN_A, USDC_A): (data, token_id)}, registered=set())
 
-    await bootstrap_token_info(service, [ERC20_A])
+    await bootstrap_token_info(service, _keyed(ERC20_A))
 
     service.set_token_info.assert_awaited_once_with(1, data)
 
@@ -80,7 +85,7 @@ async def test_noop_when_already_registered() -> None:
     token_id = b"\xaa" * 32
     service = _make_service({(CHAIN_A, None): (data, token_id)}, registered={token_id})
 
-    await bootstrap_token_info(service, [NATIVE_A])
+    await bootstrap_token_info(service, _keyed(NATIVE_A))
 
     service.set_token_info.assert_not_awaited()
 
@@ -100,7 +105,7 @@ async def test_registers_multiple_tokens_independently() -> None:
         registered={native_a_id},  # only the first is already registered
     )
 
-    await bootstrap_token_info(service, [NATIVE_A, ERC20_A, NATIVE_B])
+    await bootstrap_token_info(service, _keyed(NATIVE_A, ERC20_A, NATIVE_B))
 
     assert service.set_token_info.await_count == 2
     service.set_token_info.assert_any_await(1, erc20_a_data)
@@ -121,7 +126,7 @@ async def test_one_token_failure_does_not_block_others() -> None:
     service.is_token_registered = AsyncMock(return_value=False)
     service.set_token_info = AsyncMock()
 
-    await bootstrap_token_info(service, [NATIVE_A, NATIVE_B])
+    await bootstrap_token_info(service, _keyed(NATIVE_A, NATIVE_B))
 
     service.set_token_info.assert_awaited_once_with(0, b"\x03" * 32)
 
@@ -134,7 +139,7 @@ async def test_submit_failure_is_retried_until_success() -> None:
     service = _make_service({(CHAIN_A, None): (data, token_id)}, registered=set())
     service.set_token_info = AsyncMock(side_effect=[RuntimeError("rofl-appd unavailable"), None])
 
-    await bootstrap_token_info(service, [NATIVE_A])
+    await bootstrap_token_info(service, _keyed(NATIVE_A))
 
     assert service.set_token_info.await_count == 2
     service.set_token_info.assert_awaited_with(0, data)
@@ -148,6 +153,6 @@ async def test_submit_failure_gives_up_after_max_attempts() -> None:
     service = _make_service({(CHAIN_A, None): (data, token_id)}, registered=set())
     service.set_token_info = AsyncMock(side_effect=RuntimeError("rofl-appd unavailable"))
 
-    await bootstrap_token_info(service, [NATIVE_A])
+    await bootstrap_token_info(service, _keyed(NATIVE_A))
 
     assert service.set_token_info.await_count == _MAX_ATTEMPTS

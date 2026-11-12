@@ -25,7 +25,7 @@ from src.auth.siwe_config import get_siwe_config, get_siwe_configs
 from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
-from src.config import load_settings
+from src.config import get_token_id, load_settings
 from src.config.chain_config import (
     CHAIN_CONFIGS,
     MIN_DEPOSIT_ERC20_WEI,
@@ -383,11 +383,10 @@ async def _registered_transak_token_id(
 
     if requested_chain_id is not None and requested_chain_id != config.chain_id:
         raise OnRampError("chain_id does not match the configured Transak asset")
-    token_id = await _service.get_token_id(config.chain_id, config.token_address)
-    token_id_hex = Web3.to_hex(token_id).lower()
+    token_id_hex = get_token_id(config.chain_id, config.token_address)
     if requested_token_id is not None and requested_token_id.lower() != token_id_hex:
         raise OnRampError("token_id does not match the configured Transak asset")
-    if not await _service.is_token_registered(token_id):
+    if not await _service.is_token_registered(bytes.fromhex(token_id_hex.removeprefix("0x"))):
         raise OnRampNotConfiguredError("The configured Transak asset is not registered")
     return token_id_hex
 
@@ -478,10 +477,14 @@ async def get_deposit_address(
         )
         settings = load_settings()
         native_supported = {
-            entry["chain_id"] for entry in settings.token_infos if not entry.get("token_address")
+            entry["chain_id"]
+            for entry in settings.token_infos.values()
+            if not entry.get("token_address")
         }
         erc20_supported = {
-            entry["chain_id"] for entry in settings.token_infos if entry.get("token_address")
+            entry["chain_id"]
+            for entry in settings.token_infos.values()
+            if entry.get("token_address")
         }
         # Advertise only chains that survived RPC identity verification and have
         # at least one registered asset type.
