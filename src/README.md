@@ -265,11 +265,30 @@ Invalid or incomplete Transak configuration disables its endpoints with `503` wi
 ## Running Locally
 
 ```shell
-# All-in-one local stack (no ROFL needed):
-docker compose -f compose.localnet.yaml up --build
+docker compose -f compose.localnet.yaml up --build -d --wait --wait-timeout 600
 ```
 
-`compose.localnet.yaml` builds with `.env.localnet` and accepts secrets through the runtime environment. When running with `SAPPHIRE_PRIVATE_KEY` set, the ROFL appd code paths are bypassed — the FDC relayer / signer is the EOA derived from that key.
+This starts Sapphire localnet with appd, runs `hardhat deploy`, and starts the
+API with `.env.localnet` at `http://localhost:8000` (`/docs`). RPC is
+`http://localhost:8545`, chain ID `23293`, and the explorer is at
+`http://localhost:8548`. The first build takes several minutes.
+
+Accounts 0, 1 and 2 of the test mnemonic in `solidity/hardhat.config.ts` are the
+admin, service and user. The service and user each hold 100,000 LHONOR in
+Accounting. The service is exempt from per-caller rate limits. Addresses and
+token ID:
+
+```shell
+docker compose -f compose.localnet.yaml exec privana cat /data/deployment.json
+```
+
+API restarts keep local state. Sapphire localnet is ephemeral, so reset the
+whole stack when restarting the chain or changing contracts:
+
+```shell
+docker compose -f compose.localnet.yaml down -v
+docker compose -f compose.localnet.yaml up --build -d --wait --wait-timeout 600
+```
 
 ## Testing
 
