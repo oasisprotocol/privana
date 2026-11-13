@@ -20,13 +20,12 @@ def state_dir(tmp_path):
 
 def _write_record(state_dir, record):
     """Helper to persist a SweepRecord to the state directory."""
-    key = record.deposit_id_hex.lower().removeprefix("0x")
-    path = Path(state_dir) / f"sweep_{key}.json"
+    path = Path(state_dir) / f"sweep_{record.deposit_id_hex.removeprefix('0x')}.json"
     path.write_text(json.dumps(record.to_dict()))
 
 
 def _write_legacy_record(state_dir, record):
-    """Persist a record under the pre-deposit_id address-keyed filename."""
+    """Persist a record under the old address-keyed filename."""
     path = Path(state_dir) / f"sweep_{record.deposit_address.lower()}_{record.chain_id}.json"
     path.write_text(json.dumps(record.to_dict()))
     return path
@@ -41,6 +40,7 @@ def test_load_incomplete_sweeps(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -76,6 +76,7 @@ def test_load_migrates_legacy_address_keyed_record(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -112,6 +113,7 @@ def test_load_dedupes_legacy_and_new_keyed_files(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -141,6 +143,7 @@ async def test_resume_swept_record_credits_and_cleans_up(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -198,6 +201,7 @@ async def test_resume_gas_funded_with_mined_sweep_tx_is_promoted_and_credited(st
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -259,6 +263,7 @@ async def test_resume_does_not_credit_a_receipt_read_while_the_chain_was_dropped
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -290,6 +295,7 @@ async def test_resume_gas_funded_with_unmined_sweep_tx_is_left_alone(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -325,6 +331,7 @@ async def test_resume_gas_funded_with_reverted_sweep_tx_not_promoted(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -360,6 +367,7 @@ async def test_resume_pending_without_sweep_tx_reruns_sweep(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -377,11 +385,7 @@ async def test_resume_pending_without_sweep_tx_reruns_sweep(state_dir):
 
     await engine.resume_incomplete_sweeps()
 
-    engine.sweep_native.assert_called_once()
-    call_kwargs = engine.sweep_native.call_args.kwargs
-    assert call_kwargs["deposit_address"] == "0x" + "aa" * 20
-    assert call_kwargs["beneficiary"] == "0x" + "bb" * 20
-    assert call_kwargs["amount"] == 10**18
+    engine.sweep_native.assert_called_once_with(b"\x22" * 32)
     engine.sweep_erc20.assert_not_called()
 
 
@@ -395,6 +399,7 @@ async def test_resume_gas_funded_without_sweep_tx_reruns_sweep(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -426,6 +431,7 @@ async def test_resume_pending_erc20_routes_to_sweep_erc20(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=50 * 10**6,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -443,8 +449,7 @@ async def test_resume_pending_erc20_routes_to_sweep_erc20(state_dir):
 
     await engine.resume_incomplete_sweeps()
 
-    engine.sweep_erc20.assert_called_once()
-    assert engine.sweep_erc20.call_args.kwargs["token_address"] == token_addr
+    engine.sweep_erc20.assert_called_once_with(b"\x22" * 32)
     engine.sweep_native.assert_not_called()
 
 
@@ -458,6 +463,7 @@ async def test_resume_swept_record_already_processed(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -500,6 +506,7 @@ async def test_recovery_loop_resumes_pending_record(state_dir, monkeypatch):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -542,6 +549,7 @@ async def test_recovery_loop_persists_error_for_pending_record(state_dir, monkey
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -583,6 +591,7 @@ async def test_resume_does_not_overwrite_sweep_tx_hash_on_error(state_dir):
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
+        sweep_nonce=0,
         amount=10**18,
         token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + "22" * 32,
@@ -603,3 +612,42 @@ async def test_resume_does_not_overwrite_sweep_tx_hash_on_error(state_dir):
     assert persisted is not None
     assert persisted.error is None, "error must not overwrite a record that has sweep_tx_hash"
     assert persisted.sweep_tx_hash == "0x" + "dd" * 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("account_nonce", "forgotten"), [(7, True), (8, False)])
+async def test_reconcile_forgets_a_lost_sweep_only_while_its_nonce_is_free(
+    state_dir, account_nonce, forgotten
+):
+    """Neither mined nor in the mempool: while the nonce is still free the attempt is lost
+    and the sweep re-runs at it; a consumed nonce is left for a human."""
+    record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
+        deposit_address="0x" + "aa" * 20,
+        chain_id=84532,
+        state=SweepState.GAS_FUNDED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        deposit_id_hex="0x" + "22" * 32,
+        sweep_nonce=7,
+        sweep_tx_hash="0x" + "dd" * 32,
+    )
+    _write_record(state_dir, record)
+    engine = SweepEngine(
+        accounting_service=AsyncMock(), chain_rpc_urls={84532: "https://fake"}, state_dir=state_dir
+    )
+    engine._web3_cache[84532] = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_transaction_receipt=AsyncMock(side_effect=TransactionNotFound("lost")),
+            get_transaction=AsyncMock(side_effect=TransactionNotFound("lost")),
+            get_transaction_count=AsyncMock(return_value=account_nonce),
+        )
+    )
+
+    await engine._reconcile_sweep_tx(record)
+
+    assert (record.sweep_tx_hash is None) == forgotten
+    assert (
+        engine.get_record_by_deposit_id(record.deposit_id_hex).sweep_tx_hash is None
+    ) == forgotten

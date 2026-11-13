@@ -71,19 +71,24 @@ task("getDepositAddress")
   });
 
 task("checkDeposit")
-  .addParam("txhash", "Transaction hash on source chain")
-  .addParam("amount", "Deposit amount in base units (e.g. wei)")
+  .addOptionalParam(
+    "tokenid",
+    "Token id (bytes32) of the registered asset to claim (default: check every configured token)",
+  )
   .addOptionalParam(
     "apiurl",
     "API base URL",
     "https://api.testnet.privana.finance",
   )
   .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
-  .addOptionalParam("sourcechainid", "Source chain ID where deposit was made", "84532")
-  .addOptionalParam("logindex", "Log index for ERC20 deposits", "0")
-  .addOptionalParam("chaintype", "Chain type", "evm")
   .addOptionalParam("keyversion", "Key derivation version", "0")
-  .setDescription("Check/trigger deposit verification and sweep (requires SIWE authentication)")
+  .addFlag(
+    "nowait",
+    "Return once the sweep is started instead of waiting until it is credited",
+  )
+  .setDescription(
+    "Claim a deposit: sweep and credit everything finalized at your deposit address (requires SIWE authentication)",
+  )
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
@@ -92,8 +97,7 @@ task("checkDeposit")
 
     console.log("User address:", userAddress);
     console.log("API URL:", apiBaseUrl);
-    console.log("Tx hash:", args.txhash);
-    console.log("Source chain:", args.sourcechainid);
+    console.log("Token id:", args.tokenid ?? "all registered tokens");
 
     console.log("\nAuthenticating with SIWE...");
     const { jwtAccessToken } = await authenticate({
@@ -114,25 +118,59 @@ task("checkDeposit")
           Authorization: `Bearer ${jwtAccessToken}`,
         },
         body: JSON.stringify({
-          chain_type: args.chaintype,
-          chain_id: parseInt(args.sourcechainid),
-          tx_hash: args.txhash,
-          amount: args.amount,
-          log_index: parseInt(args.logindex),
+          ...(args.tokenid ? { token_id: args.tokenid } : {}),
           version: parseInt(args.keyversion),
         }),
       },
     );
 
-    if (!isJsonObject(data)) {
+    if (!Array.isArray(data) || !data.every(isJsonObject)) {
       throw new Error("Unexpected response from API");
     }
 
     console.log("\n=== Deposit Check Result ===");
-    console.log("Status:", data.status);
-    if (data.deposit_id) console.log("Deposit id:", data.deposit_id);
-    if (data.amount) console.log("Amount:", data.amount);
-    if (data.token_address) console.log("Token:", data.token_address);
+    if (data.length === 0) {
+      console.log("No deposit in flight.");
+    }
+    for (const deposit of data) {
+      console.log("Deposit id:", deposit.deposit_id);
+      console.log("  Status:", deposit.status);
+      if (deposit.amount) console.log("  Amount:", deposit.amount);
+      if (deposit.token_address) console.log("  Token:", deposit.token_address);
+    }
 
-    return data;
+    // The sweeps and credits run in the background: poll each until credited.
+    const results: Record<string, unknown>[] = [];
+    for (const deposit of data) {
+      let result: Record<string, unknown> = deposit;
+      if (!args.nowait && typeof result.deposit_id === "string") {
+        console.log(`\nWaiting for ${result.deposit_id} to be credited...`);
+        for (
+          let attempt = 0;
+          attempt < 60 && result.status === "pending";
+          attempt++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          const status = await fetchJson(
+            `${apiBaseUrl}/v1/accounting/deposits/status/${result.deposit_id}`,
+            { headers: { Authorization: `Bearer ${jwtAccessToken}` } },
+          );
+          if (!isJsonObject(status)) {
+            throw new Error("Unexpected response from API");
+          }
+          result = status;
+          console.log("Status:", result.status);
+        }
+        if (result.status === "credited") {
+          console.log("Deposit credited.");
+        } else if (result.status === "error") {
+          console.log("Sweep failed:", result.detail);
+        } else {
+          console.log("Still pending; check again later with the same command.");
+        }
+      }
+      results.push(result);
+    }
+
+    return results;
   });

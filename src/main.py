@@ -173,7 +173,9 @@ async def lifespan(_app: FastAPI):
         logger.info("AuthToken encryption key synced to contract")
 
         await bootstrap_rofl_signer_address(get_accounting_contract_service())
-        await bootstrap_token_info(get_accounting_contract_service(), settings.token_infos)
+        await bootstrap_token_info(
+            get_accounting_contract_service(), list(settings.token_infos.values())
+        )
         await bootstrap_gas_prices(get_accounting_contract_service(), settings.gas_prices_wei)
 
     withdrawal_processor = get_withdrawal_processor()

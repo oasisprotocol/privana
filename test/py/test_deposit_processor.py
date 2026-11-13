@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,26 +7,25 @@ from web3 import Web3
 
 from src.models.private_read import PrivateReadAuth
 from src.services.deposit_processor import DepositProcessor
-from src.services.deposit_verifier import VerifiedDeposit
-from src.services.sweep_engine import SweepRecord, SweepState
+from src.services.sweep_engine import BalanceClaim, BalanceClaimStatus, SweepRecord, SweepState
 
 ONE_ETH = Web3.to_wei(1, "ether")
 FIFTY_USDC = 50 * 10**6
+TOKEN_ID = f"0x{1:064x}"
 PRIVATE_READ_AUTH = PrivateReadAuth(token=b"\x00" * 65, user_address="0x" + "bb" * 20)
-
-
-@pytest.fixture
-def mock_verifier():
-    return AsyncMock()
 
 
 @pytest.fixture
 def mock_sweep_engine():
     engine = AsyncMock()
-    engine.gas_funding_tx_hashes = set()
     engine.get_record_by_deposit_id = MagicMock(return_value=None)
-    engine.cleanup_record = MagicMock()
     engine.persist_error = MagicMock()
+    record = MagicMock(
+        deposit_id_hex="0x" + "77" * 32, amount=ONE_ETH, error=None, sweep_tx_hash=None
+    )
+    engine.claim_balance.return_value = BalanceClaim(
+        BalanceClaimStatus.STARTED, record, amount=ONE_ETH
+    )
     return engine
 
 
@@ -33,41 +33,33 @@ def mock_sweep_engine():
 def mock_accounting():
     svc = AsyncMock()
     svc.get_deposit_address = AsyncMock(return_value="0x" + "aa" * 20)
-    svc.get_token_id = AsyncMock(return_value=b"\x11" * 32)
     svc.is_deposit_processed = AsyncMock(return_value=False)  # not yet processed by default
-    svc.is_token_registered = AsyncMock(return_value=True)  # registered by default
     return svc
 
 
 @pytest.fixture
-def processor(mock_verifier, mock_sweep_engine, mock_accounting):
+def token_infos():
+    return {f"0x{i:064x}": {"chain_id": 84532, "token_address": None} for i in range(1, 5)}
+
+
+@pytest.fixture
+def processor(mock_sweep_engine, mock_accounting, token_infos, monkeypatch):
+    monkeypatch.setattr(
+        "src.services.deposit_processor.load_settings",
+        lambda: SimpleNamespace(token_infos=token_infos),
+    )
     return DepositProcessor(
-        verifier=mock_verifier,
         sweep_engine=mock_sweep_engine,
         accounting_service=mock_accounting,
     )
 
 
 @pytest.mark.asyncio
-async def test_process_native_deposit(processor, mock_verifier, mock_sweep_engine, mock_accounting):
+async def test_process_native_deposit(processor, mock_sweep_engine, mock_accounting):
     """Full flow: verify → background sweep native."""
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    result = await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
+    [result] = await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
@@ -76,102 +68,49 @@ async def test_process_native_deposit(processor, mock_verifier, mock_sweep_engin
     mock_accounting.get_deposit_address.assert_awaited_once_with("evm", 0, PRIVATE_READ_AUTH.token)
 
     await asyncio.sleep(0)
-    mock_sweep_engine.sweep_native.assert_called_once()
-    call_kwargs = mock_sweep_engine.sweep_native.call_args.kwargs
-    assert call_kwargs["beneficiary"] == PRIVATE_READ_AUTH.user_address
+    claim_kwargs = mock_sweep_engine.claim_balance.call_args.kwargs
+    assert claim_kwargs["beneficiary"] == PRIVATE_READ_AUTH.user_address
+    mock_sweep_engine.sweep_native.assert_called_once_with(b"\x77" * 32)
 
 
 @pytest.mark.asyncio
-async def test_reject_unconfigured_chain(processor):
-    """A chain with no CHAIN_CONFIGS entry is rejected before any verify/sweep."""
-    with pytest.raises(ValueError, match="Unsupported chain_id"):
-        await processor.process_deposit(
-            chain_type="evm",
-            chain_id=1234567,
-            tx_hash="0x" + "cc" * 32,
-            amount=ONE_ETH,
-            log_index=0,
-            version=0,
-            auth=PRIVATE_READ_AUTH,
-        )
+async def test_unconfigured_chain_is_skipped(processor, mock_sweep_engine, token_infos, caplog):
+    """A chain with no CHAIN_CONFIGS entry is logged and skipped, never swept."""
+    token_infos[TOKEN_ID]["chain_id"] = 1234567
 
-
-@pytest.mark.asyncio
-async def test_reject_gas_funding_tx(processor, mock_verifier, mock_sweep_engine):
-    """Gas funding txs must not be claimable as deposits."""
-    gas_tx_hash = "0x" + "ff" * 32
-    mock_sweep_engine.gas_funding_tx_hashes = {gas_tx_hash.lower()}
-
-    with pytest.raises(ValueError, match="[Gg]as funding"):
-        await processor.process_deposit(
-            chain_type="evm",
-            chain_id=84532,
-            tx_hash=gas_tx_hash,
-            amount=ONE_ETH,
-            log_index=0,
-            version=0,
-            auth=PRIVATE_READ_AUTH,
-        )
-
-
-@pytest.mark.asyncio
-async def test_idempotent_duplicate_returns_credited(
-    processor, mock_verifier, mock_sweep_engine, mock_accounting
-):
-    """Duplicate /deposits/check for an already-processed deposit returns success without sweeping."""
-    mock_accounting.is_deposit_processed = AsyncMock(return_value=True)
-
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        token_address=None,
-        is_native=True,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    result = await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
+    result = await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
-    assert result["status"] == "credited"
-    # No sweep should have been triggered
+    assert result == []
+    assert "Unsupported chain_id" in caplog.text
+    mock_sweep_engine.claim_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_nothing_left_to_claim_returns_none(processor, mock_sweep_engine):
+    """A repeat /deposits/check after the funds were swept finds nothing and sweeps nothing."""
+    mock_sweep_engine.claim_balance.return_value = BalanceClaim(BalanceClaimStatus.NONE)
+    result = await processor.check_and_schedule_deposits(
+        version=0,
+        token_id=TOKEN_ID,
+        auth=PRIVATE_READ_AUTH,
+    )
+
+    assert result == []
     mock_sweep_engine.sweep_native.assert_not_called()
     mock_sweep_engine.sweep_erc20.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_reject_unsupported_token(
-    processor, mock_verifier, mock_sweep_engine, mock_accounting
-):
-    """Deposits of unregistered tokens must be rejected before sweeping."""
-    mock_accounting.is_token_registered = AsyncMock(return_value=False)
-
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        token_address="0x" + "ee" * 20,  # unregistered ERC20
-        is_native=False,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    with pytest.raises(ValueError, match="[Tt]oken not supported"):
-        await processor.process_deposit(
-            chain_type="evm",
-            chain_id=84532,
-            tx_hash="0x" + "cc" * 32,
-            amount=ONE_ETH,
-            log_index=0,
+async def test_reject_unsupported_token(processor, mock_sweep_engine):
+    """Deposits of tokens that are not configured must be rejected before sweeping."""
+    with pytest.raises(ValueError, match="Token not supported"):
+        await processor.check_and_schedule_deposits(
             version=0,
+            token_id="0x" + "99" * 32,
             auth=PRIVATE_READ_AUTH,
         )
 
@@ -181,57 +120,13 @@ async def test_reject_unsupported_token(
 
 
 @pytest.mark.asyncio
-async def test_reject_below_minimum_native(
-    processor,
-    mock_verifier,
-    mock_sweep_engine,
-):
-    """Native deposits below MIN_DEPOSIT_NATIVE_WEI should be rejected."""
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=1000,  # way below 0.01 ETH minimum
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    with pytest.raises(ValueError, match="minimum requirements"):
-        await processor.process_deposit(
-            chain_type="evm",
-            chain_id=84532,
-            tx_hash="0x" + "cc" * 32,
-            amount=1000,
-            log_index=0,
-            version=0,
-            auth=PRIVATE_READ_AUTH,
-        )
-
-    mock_sweep_engine.sweep_native.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_process_erc20_deposit(processor, mock_verifier, mock_sweep_engine):
+async def test_process_erc20_deposit(processor, mock_sweep_engine, token_infos):
     """ERC20 deposit should call sweep_erc20 with token_address."""
-    token_addr = "0x" + "cc" * 20
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "dd" * 32,
-        amount=FIFTY_USDC,
-        is_native=False,
-        token_address=token_addr,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    result = await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "dd" * 32,
-        amount=FIFTY_USDC,
-        log_index=0,
+    token_addr = Web3.to_checksum_address("0x" + "cc" * 20)
+    token_infos[TOKEN_ID]["token_address"] = token_addr
+    [result] = await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
@@ -239,18 +134,17 @@ async def test_process_erc20_deposit(processor, mock_verifier, mock_sweep_engine
     assert result["deposit_id"] is not None
 
     await asyncio.sleep(0)
-    mock_sweep_engine.sweep_erc20.assert_called_once()
-    call_kwargs = mock_sweep_engine.sweep_erc20.call_args.kwargs
-    assert call_kwargs["token_address"] == token_addr
+    claim_kwargs = mock_sweep_engine.claim_balance.call_args.kwargs
+    assert claim_kwargs["token_address"] == token_addr
+    mock_sweep_engine.sweep_erc20.assert_called_once_with(b"\x77" * 32)
     mock_sweep_engine.sweep_native.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_check_returns_pending(
-    processor, mock_verifier, mock_sweep_engine, mock_accounting
-):
+async def test_concurrent_check_returns_pending(processor, mock_sweep_engine, mock_accounting):
     """Second /deposits/check while sweep is in progress returns pending without re-sweeping."""
     existing_record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
         state=SweepState.GAS_FUNDED,
@@ -260,25 +154,13 @@ async def test_concurrent_check_returns_pending(
         amount=ONE_ETH,
         deposit_id_hex="0x" + "dd" * 32,
     )
-    mock_sweep_engine.get_record_by_deposit_id = MagicMock(return_value=existing_record)
-
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
+    mock_sweep_engine.claim_balance.return_value = BalanceClaim(
+        BalanceClaimStatus.IN_FLIGHT, existing_record
     )
 
-    result = await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
+    [result] = await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
@@ -288,34 +170,20 @@ async def test_concurrent_check_returns_pending(
 
 
 @pytest.mark.asyncio
-async def test_stop_awaits_in_flight_background_sweeps(processor, mock_verifier, mock_sweep_engine):
+async def test_stop_awaits_in_flight_background_sweeps(processor, mock_sweep_engine):
     """stop() must await in-flight sweep tasks so shutdown doesn't cut them mid-await."""
     sweep_started = asyncio.Event()
     sweep_can_finish = asyncio.Event()
 
-    async def slow_sweep(**_kwargs):
+    async def slow_sweep(_deposit_id):
         sweep_started.set()
         await sweep_can_finish.wait()
 
     mock_sweep_engine.sweep_native = AsyncMock(side_effect=slow_sweep)
 
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
+    await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
@@ -343,7 +211,7 @@ async def test_stop_with_no_background_tasks_is_noop(processor, mock_sweep_engin
 
 @pytest.mark.asyncio
 async def test_stop_timeout_preserves_task_for_next_recovery(
-    processor, mock_verifier, mock_sweep_engine, monkeypatch
+    processor, mock_sweep_engine, monkeypatch
 ):
     """stop() on timeout must NOT cancel in-flight tasks.
 
@@ -359,29 +227,15 @@ async def test_stop_timeout_preserves_task_for_next_recovery(
     sweep_started = asyncio.Event()
     sweep_can_finish = asyncio.Event()
 
-    async def slow_sweep(**_kwargs):
+    async def slow_sweep(_deposit_id):
         sweep_started.set()
         await sweep_can_finish.wait()
 
     mock_sweep_engine.sweep_native = AsyncMock(side_effect=slow_sweep)
 
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
+    await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
@@ -400,51 +254,10 @@ async def test_stop_timeout_preserves_task_for_next_recovery(
 
 
 @pytest.mark.asyncio
-async def test_errored_record_allows_retry(
-    processor, mock_verifier, mock_sweep_engine, mock_accounting
-):
-    """If previous sweep failed (error in record), a retry deletes the old record and starts fresh."""
-    errored_record = SweepRecord(
-        deposit_address="0x" + "aa" * 20,
-        chain_id=84532,
-        state=SweepState.PENDING,
-        beneficiary="0x" + "bb" * 20,
-        chain_type="evm",
-        version=0,
-        error="Gas funding tx reverted",
-    )
-    mock_sweep_engine.get_record_by_deposit_id = MagicMock(return_value=errored_record)
-
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
-    )
-
-    result = await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
-        version=0,
-        auth=PRIVATE_READ_AUTH,
-    )
-
-    assert result["status"] == "pending"
-    mock_sweep_engine.cleanup_record.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_errored_record_with_sweep_tx_hash_preserves_record(
-    processor, mock_verifier, mock_sweep_engine
-):
+async def test_errored_record_with_sweep_tx_hash_preserves_record(processor, mock_sweep_engine):
     """Once a sweep tx is broadcast, retry must not delete its recovery pointer."""
     errored_record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
         state=SweepState.GAS_FUNDED,
@@ -455,24 +268,13 @@ async def test_errored_record_with_sweep_tx_hash_preserves_record(
         sweep_tx_hash="0x" + "dd" * 32,
     )
     mock_sweep_engine.get_record_by_deposit_id = MagicMock(return_value=errored_record)
-
-    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        is_native=True,
-        token_address=None,
-        deposit_index=0,
-        block_number=100,
+    mock_sweep_engine.claim_balance.return_value = BalanceClaim(
+        BalanceClaimStatus.IN_FLIGHT, errored_record
     )
 
-    result = await processor.process_deposit(
-        chain_type="evm",
-        chain_id=84532,
-        tx_hash="0x" + "cc" * 32,
-        amount=ONE_ETH,
-        log_index=0,
+    [result] = await processor.check_and_schedule_deposits(
         version=0,
+        token_id=TOKEN_ID,
         auth=PRIVATE_READ_AUTH,
     )
 
@@ -481,5 +283,52 @@ async def test_errored_record_with_sweep_tx_hash_preserves_record(
     assert status is not None
     assert status["status"] == "pending"
     assert "detail" not in status
-    mock_sweep_engine.cleanup_record.assert_not_called()
     mock_sweep_engine.sweep_native.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_without_token_id_every_configured_token_is_claimed(processor, mock_sweep_engine):
+    """Every token with something to claim gets a sweep; the others are only reported."""
+
+    def scheduled(n, status=BalanceClaimStatus.STARTED):
+        record = MagicMock(deposit_id_hex="0x" + f"{n:02x}" * 32)
+        return BalanceClaim(status, record, amount=ONE_ETH)
+
+    mock_sweep_engine.claim_balance.side_effect = [
+        scheduled(7),
+        BalanceClaim(BalanceClaimStatus.NONE),
+        scheduled(5),
+        scheduled(6, BalanceClaimStatus.IN_FLIGHT),
+    ]
+    started = []
+    mock_sweep_engine.sweep_native.side_effect = lambda deposit_id: started.append(deposit_id)
+
+    result = await processor.check_and_schedule_deposits(
+        version=0, token_id=None, auth=PRIVATE_READ_AUTH
+    )
+    await processor.stop()
+
+    assert [deposit["deposit_id"] for deposit in result] == [
+        "0x" + "07" * 32,
+        "0x" + "05" * 32,
+        "0x" + "06" * 32,
+    ]
+    assert started == [b"\x07" * 32, b"\x05" * 32]  # the in-flight one is not started again
+
+
+@pytest.mark.asyncio
+async def test_without_token_id_skips_a_token_that_fails(
+    processor, mock_sweep_engine, mock_accounting
+):
+    mock_sweep_engine.claim_balance.side_effect = [
+        ValueError("no verified RPC"),
+        BalanceClaim(BalanceClaimStatus.NONE),
+        BalanceClaim(BalanceClaimStatus.NONE),
+        BalanceClaim(BalanceClaimStatus.NONE),
+    ]
+
+    result = await processor.check_and_schedule_deposits(
+        version=0, token_id=None, auth=PRIVATE_READ_AUTH
+    )
+
+    assert result == []

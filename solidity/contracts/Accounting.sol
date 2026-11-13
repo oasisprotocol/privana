@@ -225,7 +225,7 @@ contract Accounting is EIP712SignatureVerifier, EVMSignerAndVerifier, OwnableUpg
      * @param beneficiary The address to credit
      * @param tokenId The token identifier
      * @param amount The deposit amount (verified off-chain by TEE)
-     * @param depositId Unique deposit identifier: keccak256(chainId, txHash, tokenId, depositIndex)
+     * @param depositId Unique deposit identifier
      */
     function creditDeposit(
         address beneficiary,

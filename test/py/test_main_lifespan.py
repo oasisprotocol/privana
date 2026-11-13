@@ -29,7 +29,7 @@ def _lifespan_settings() -> SimpleNamespace:
         chain_rpc_urls={LIFESPAN_CHAIN: LIFESPAN_RPC_URL},
         sapphire_rpc_url="",
         sapphire_rpc_headers={},
-        token_infos=[{"chain_id": LIFESPAN_CHAIN, "token_address": None}],
+        token_infos={"0x" + "11" * 32: {"chain_id": LIFESPAN_CHAIN, "token_address": None}},
         gas_prices_wei={LIFESPAN_CHAIN: 3_000_000_000},
     )
 

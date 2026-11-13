@@ -27,7 +27,6 @@ from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
 from src.config import load_settings
 from src.config.chain_config import (
-    CHAIN_CONFIGS,
     MIN_DEPOSIT_ERC20_WEI,
     MIN_DEPOSIT_NATIVE_WEI,
     get_finality_depth,
@@ -52,8 +51,6 @@ from src.models.accounting import (
     ModifyLockRequest,
     OnRampRecord,
     OnRampSessionResponse,
-    PendingDeposit,
-    PendingDepositsResponse,
     PendingOnRampsResponse,
     PendingWithdrawalsResponse,
     SignOnRampUrlRequest,
@@ -88,11 +85,6 @@ from src.services.accounting_contract import (
     SubmissionOutcomeUnknownError,
     SubmissionResult,
     get_accounting_contract_service,
-)
-from src.services.deposit_discovery import (
-    DiscoveryNotConfiguredError,
-    DiscoveryRPCError,
-    get_deposit_discovery_service,
 )
 from src.services.deposit_processor import get_deposit_processor
 from src.services.onramp import (
@@ -153,7 +145,6 @@ _ONRAMP_PENDING_RATE_LIMIT = 20
 _ONRAMP_SESSION_RATE_LIMIT = 10
 # (requests, window seconds) per caller of /funds/transfer.
 _TRANSFER_RATE_LIMITS = ((10, 60), (100, 86_400))
-_DEPOSITS_PENDING_RATE_LIMIT = 10
 _SUPPORTED_DEPOSIT_ADDRESS_VERSIONS = {0}
 
 
@@ -478,10 +469,14 @@ async def get_deposit_address(
         )
         settings = load_settings()
         native_supported = {
-            entry["chain_id"] for entry in settings.token_infos if not entry.get("token_address")
+            entry["chain_id"]
+            for entry in settings.token_infos.values()
+            if not entry.get("token_address")
         }
         erc20_supported = {
-            entry["chain_id"] for entry in settings.token_infos if entry.get("token_address")
+            entry["chain_id"]
+            for entry in settings.token_infos.values()
+            if entry.get("token_address")
         }
         # Advertise only chains that survived RPC identity verification and have
         # at least one registered asset type.
@@ -514,33 +509,28 @@ async def get_deposit_address(
         raise HTTPException(status_code=500, detail="Failed to get deposit address") from exc
 
 
-@router.post("/deposits/check", response_model=DepositCheckResponse)
+@router.post("/deposits/check", response_model=list[DepositCheckResponse])
 async def check_deposit(
     payload: DepositCheckRequest,
     response: Response,
     auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
-) -> DepositCheckResponse:
-    """Verify a deposit and start the sweep in the background.
+) -> list[DepositCheckResponse]:
+    """Claim funds that arrived at the caller's deposit address.
 
-    Returns 200 with status="credited" for idempotent replays.
-    Returns 202 with status="pending" when sweep is started or in progress.
+    Returns the in-flight deposits as pending statuses: 202 when a sweep was started or is
+    in progress, 200 with an empty list when there is none.
     Clients poll GET /deposits/status/{deposit_id} for completion.
     """
     try:
         processor = get_deposit_processor()
-        result = await processor.process_deposit(
+        result = await processor.check_and_schedule_deposits(
             auth=auth,
-            chain_type=payload.chain_type,
-            chain_id=payload.chain_id,
-            tx_hash=payload.tx_hash,
-            amount=payload.amount,
-            log_index=payload.log_index,
             version=payload.version,
+            token_id=payload.token_id,
         )
-        resp = DepositCheckResponse(**result)
-        if resp.status == "pending":
+        if result:
             response.status_code = 202
-        return resp
+        return [DepositCheckResponse(**deposit) for deposit in result]
     except ContractLogicError as exc:
         if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
             raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
@@ -585,90 +575,6 @@ async def get_deposit_status(
         raise HTTPException(status_code=500, detail="Failed to check deposit status")
 
     raise HTTPException(status_code=404, detail=f"No deposit found for key {deposit_id_hex}")
-
-
-@router.get("/deposits/pending", response_model=PendingDepositsResponse)
-async def get_pending_deposits(
-    request: Request,
-    chain_id: int = Query(..., description="Source chain ID to scan"),
-    version: int = Query(0, description="Deposit address derivation version"),
-    token_address: Optional[str] = Query(
-        None, description="Optional registered ERC20 contract to scan for (default: all)"
-    ),
-    lookback_blocks: Optional[int] = Query(
-        None,
-        gt=0,
-        description=(
-            "Scan window in blocks, rounded up to full scan chunks and clamped "
-            "to the chain's maximum (default: ~1h)"
-        ),
-    ),
-    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
-) -> PendingDepositsResponse:
-    """Discover uncredited external-wallet ERC20 deposits to the caller's deposit address.
-
-    Read-only: scans finalized source-chain Transfer logs and returns candidates
-    shaped for POST /deposits/check. Native transfers emit no logs and are not
-    discoverable — submit their tx hash to /deposits/check directly.
-    """
-    _enforce_auth_rate_limit(request, "deposits_pending", _DEPOSITS_PENDING_RATE_LIMIT)
-    if chain_id not in CHAIN_CONFIGS:
-        raise HTTPException(status_code=400, detail=f"Unsupported chain_id {chain_id}")
-    if version not in _SUPPORTED_DEPOSIT_ADDRESS_VERSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported version {version}")
-    if token_address is not None and not Web3.is_address(token_address):
-        raise HTTPException(status_code=400, detail="Invalid token_address")
-    try:
-        deposit_address = await _service.get_deposit_address("evm", version, auth.token)
-        result = await get_deposit_discovery_service().discover_pending_deposits(
-            deposit_address=deposit_address,
-            beneficiary=auth.user_address,
-            chain_id=chain_id,
-            version=version,
-            token_address=token_address,
-            lookback_blocks=lookback_blocks,
-        )
-        return PendingDepositsResponse(
-            pending=[
-                PendingDeposit(
-                    chain_id=d.chain_id,
-                    tx_hash=d.tx_hash,
-                    log_index=d.log_index,
-                    amount=str(d.amount),
-                    token_address=d.token_address,
-                    token_id=d.token_id_hex,
-                    block_number=d.block_number,
-                    version=d.version,
-                    status=d.status,
-                    deposit_id=d.deposit_id_hex,
-                )
-                for d in result.pending
-            ],
-            scanned_from_block=result.scanned_from_block,
-            scanned_to_block=result.scanned_to_block,
-        )
-    except ContractLogicError as exc:
-        if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
-            raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
-        logger.error("Contract revert in deposit discovery: %s", exc)
-        raise HTTPException(status_code=422, detail="Contract call failed") from exc
-    except DiscoveryRPCError as exc:
-        logger.warning("Deposit discovery RPC failure: %s", exc)
-        raise HTTPException(status_code=502, detail="Source-chain RPC unavailable") from exc
-    except DiscoveryNotConfiguredError as exc:
-        # Deployment fault (chain has no RPC URL), not caller error: 503 like
-        # onramp's not-configured path, with the config detail kept server-side.
-        logger.error("Deposit discovery misconfigured: %s", exc)
-        raise HTTPException(
-            status_code=503, detail="Deposit discovery unavailable for this chain"
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Failed to discover pending deposits")
-        raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
 @router.post("/onramp/intent", response_model=OnRampRecord)

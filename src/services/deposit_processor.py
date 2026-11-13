@@ -1,7 +1,11 @@
-"""Deposit processor: orchestrates verification → sweep → credit.
+"""Deposit processor: orchestrates sweep → credit.
 
-Called from the /deposits/check API route. Coordinates the deposit verifier,
-sweep engine, and accounting contract service.
+Called from the /deposits/check API route. Coordinates the sweep engine and the
+accounting contract service.
+
+Every asset is claimed by balance: the whole finalized balance of the asset at the
+deposit address is swept and credited, so no tx hash or amount is needed. Each sweep
+gets a random deposit_id; at most one unfinished sweep exists per asset and address.
 
 The sweep lifecycle runs in a background task so the API responds within
 the ROFL HTTP proxy timeout (~30s). Clients poll GET /deposits/status/{key}.
@@ -14,15 +18,11 @@ from typing import Dict
 from web3 import Web3
 
 from src.config import load_settings
-from src.config.chain_config import (
-    CHAIN_CONFIGS,
-    MIN_DEPOSIT_ERC20_WEI,
-    MIN_DEPOSIT_NATIVE_WEI,
-)
+from src.config.chain_config import CHAIN_CONFIGS
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import get_accounting_contract_service
-from src.services.deposit_verifier import DepositVerifier
 from src.services.sweep_engine import (
+    BalanceClaimStatus,
     DepositAccountingProtocol,
     SweepCreditPendingError,
     SweepEngine,
@@ -32,35 +32,19 @@ from src.services.sweep_engine import (
 logger = logging.getLogger(__name__)
 
 
-# Tasks cancelled before their first SweepRecord checkpoint (inside
-# sweep_native/sweep_erc20, after the balance read + gas-price fetch) leave
-# nothing on disk — the client saw "pending" but recovery has nothing to resume.
+# Tasks cancelled before their claim was saved leave nothing on disk — the client saw
+# "pending" but recovery has nothing to resume.
 BACKGROUND_SWEEP_SHUTDOWN_TIMEOUT = 60
 
 
-def compute_deposit_id(chain_id: int, tx_hash: str, token_id: bytes, deposit_index: int) -> bytes:
-    """Compute the deposit dedup key: keccak256(chainId, txHash, tokenId, depositIndex).
-
-    All arguments are fixed-size types, so abi.encode and abi.encodePacked produce
-    identical output. Safe to use solidity_keccak here.
-    """
-    tx_hash_bytes = bytes.fromhex(tx_hash.removeprefix("0x"))
-    return Web3.solidity_keccak(
-        ["uint256", "bytes32", "bytes32", "uint256"],
-        [chain_id, tx_hash_bytes, token_id, deposit_index],
-    )
-
-
 class DepositProcessor:
-    """Orchestrates the full deposit flow: verify → sweep → credit."""
+    """Orchestrates the full deposit flow: sweep → credit."""
 
     def __init__(
         self,
-        verifier: DepositVerifier,
         sweep_engine: SweepEngine,
         accounting_service: DepositAccountingProtocol,
     ):
-        self._verifier = verifier
         self._sweep = sweep_engine
         self._accounting = accounting_service
         # Strong refs — asyncio.create_task returns can be GC'd without one.
@@ -68,7 +52,7 @@ class DepositProcessor:
 
     @property
     def sweep_engine(self) -> SweepEngine:
-        """In-flight sweep state, shared with read-only consumers like discovery."""
+        """In-flight sweep state."""
         return self._sweep
 
     async def resume_incomplete_sweeps(self) -> None:
@@ -99,183 +83,131 @@ class DepositProcessor:
                 len(still_pending),
             )
 
-    async def _get_token_id(self, chain_id: int, token_address: str | None) -> bytes:
-        """Get tokenId via AccountingContractService — avoids abi.encode mismatch."""
-        return await self._accounting.get_token_id(chain_id, token_address)
-
     @staticmethod
     def _deposit_response(
         status: str,
-        deposit_id_hex: str,
-        amount: int,
+        deposit_id_hex: str | None,
+        amount: int | None,
         token_address: str | None,
         detail: str | None = None,
     ) -> Dict:
         resp: Dict = {
             "status": status,
             "deposit_id": deposit_id_hex,
-            "amount": str(amount),
+            "amount": None if amount is None else str(amount),
             "token_address": token_address,
         }
         if detail is not None:
             resp["detail"] = detail
         return resp
 
-    async def process_deposit(
+    async def check_and_schedule_deposits(
         self,
-        chain_type: str,
-        chain_id: int,
-        tx_hash: str,
-        amount: int,
-        log_index: int,
         version: int,
         auth: PrivateReadAuth,
-    ) -> Dict:
-        """Verify a deposit and start the sweep in the background.
+        token_id: str | None,
+    ) -> list[Dict]:
+        """Initiate checking deposit address balance and schedule a sweep if needed.
 
-        Returns immediately after verification (~2-3s). The actual sweep
-        runs as a background asyncio task. Clients poll
-        GET /deposits/status/{deposit_id} for completion.
+        Returns immediately. The actual sweep runs as a background asyncio task. Clients
+        poll GET /deposits/status/{deposit_id} for completion.
 
-        Idempotent: if the deposit is already credited on-chain, returns
-        status="credited" immediately.
+        ``token_id`` is the asset to claim; without it every registered asset is
+        checked. The whole finalized balance is claimed.
 
         Returns:
-            Dict with status ("credited" | "pending") and deposit_id.
+            The in-flight deposits found or started, each as a pending status; empty when
+            there is none.
 
         Raises:
-            ValueError: If verification fails or tx is a gas funding tx.
+            ValueError: If the ``token_id`` is not a configured token.
         """
-        tx_hash_lower = tx_hash.lower()
+        deposit_address = await self._accounting.get_deposit_address("evm", version, auth.token)
+
+        token_ids = load_settings().token_infos
+        if token_id is not None:
+            if token_id not in token_ids:
+                raise ValueError("Token not supported")
+            token_ids = {token_id: token_ids[token_id]}
+
+        # Read balances concurrently.
+        results = await asyncio.gather(
+            *(
+                self._check_and_schedule_deposit(key, deposit_address, auth, version)
+                for key in token_ids
+            ),
+            return_exceptions=True,
+        )
+        deposits = []
+        for key, result in zip(token_ids, results):
+            if isinstance(result, BaseException):
+                logger.warning("Skipping token %s for address %s: %s", key, deposit_address, result)
+                continue
+            deposit, new_sweep = result
+            if deposit is not None:
+                deposits.append(deposit)
+            if new_sweep is not None:
+                deposit_id, is_native = new_sweep
+                task = asyncio.create_task(self._background_sweep(deposit_id, is_native))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+
+        return deposits
+
+    async def _check_and_schedule_deposit(
+        self,
+        token_id_hex: str,
+        deposit_address: str,
+        auth: PrivateReadAuth,
+        version: int,
+    ) -> tuple[Dict | None, tuple[bytes, bool] | None]:
+        """Check deposit and schedule a sweep, if needed.
+
+        Returns the in-flight deposit (None when there is none) and, for a newly
+        scheduled sweep ``(deposit_id, is_native)``.
+        """
+        token_id = bytes.fromhex(token_id_hex.removeprefix("0x"))
+        info = load_settings().token_infos[token_id_hex]
+        chain_id = info["chain_id"]
+        asset = Web3.to_checksum_address(info["token_address"]) if info["token_address"] else None
+        is_native = asset is None
 
         if chain_id not in CHAIN_CONFIGS:
             raise ValueError(f"Unsupported chain_id {chain_id}")
 
-        if tx_hash_lower in self._sweep.gas_funding_tx_hashes:
-            raise ValueError(
-                f"Transaction {tx_hash} is a gas funding tx and cannot be claimed as a deposit"
-            )
-
-        deposit_address = await self._accounting.get_deposit_address(
-            chain_type, version, auth.token
-        )
-
-        verified = await self._verifier.verify_deposit(
-            chain_id=chain_id,
-            tx_hash=tx_hash,
+        claim = await self._sweep.claim_balance(
             deposit_address=deposit_address,
-            expected_amount=amount,
-            log_index=log_index,
+            beneficiary=auth.user_address,
+            chain_type="evm",
+            version=version,
+            chain_id=chain_id,
+            token_address=asset,
+            token_id=token_id,
         )
 
-        if verified.is_native:
-            min_amount = MIN_DEPOSIT_NATIVE_WEI.get(chain_id, 0)
-        else:
-            min_amount = MIN_DEPOSIT_ERC20_WEI.get(chain_id, 0)
-        if min_amount > 0 and verified.amount < min_amount:
-            raise ValueError("Deposit does not meet minimum requirements")
+        record = claim.record
+        if claim.status in (BalanceClaimStatus.NONE, BalanceClaimStatus.BUSY):
+            return None, None
 
-        token_id = await self._get_token_id(chain_id, verified.token_address)
+        assert record is not None
+        sweep = None
+        if claim.status is BalanceClaimStatus.STARTED:
+            sweep = (bytes.fromhex(record.deposit_id_hex.removeprefix("0x")), is_native)
 
-        if not await self._accounting.is_token_registered(token_id):
-            raise ValueError("Token not supported")
-
-        deposit_id = compute_deposit_id(chain_id, tx_hash, token_id, verified.deposit_index)
-        deposit_id_hex = _to_hex(deposit_id)
-
-        already_processed = await self._accounting.is_deposit_processed(deposit_id)
-        if already_processed:
-            logger.info("Deposit already processed: deposit_id=%s", deposit_id_hex)
-            return self._deposit_response(
-                "credited", deposit_id_hex, verified.amount, verified.token_address
-            )
-
-        # If a sweep is already in progress for this deposit, return pending
-        existing = self._sweep.get_record_by_deposit_id(deposit_id_hex)
-        if existing is not None:
-            if existing.error:
-                if existing.sweep_tx_hash:
-                    logger.warning(
-                        "Sweep record has error after sweep tx broadcast; preserving record: "
-                        "deposit_id=%s sweep_tx=%s",
-                        deposit_id_hex,
-                        existing.sweep_tx_hash,
-                    )
-                    return self._deposit_response(
-                        "pending", deposit_id_hex, verified.amount, verified.token_address
-                    )
-                self._sweep.cleanup_record(deposit_id_hex)
-            else:
-                return self._deposit_response(
-                    "pending", deposit_id_hex, verified.amount, verified.token_address
-                )
-
-        # Fire background sweep — returns immediately
-        task = asyncio.create_task(
-            self._background_sweep(
-                deposit_address=deposit_address,
-                beneficiary=auth.user_address,
-                chain_type=chain_type,
-                version=version,
-                chain_id=chain_id,
-                token_address=verified.token_address,
-                token_id=token_id,
-                amount=verified.amount,
-                deposit_id=deposit_id,
-                is_native=verified.is_native,
-            )
+        deposit = self._deposit_response(
+            "pending", record.deposit_id_hex, claim.amount or record.amount, asset
         )
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        return deposit, sweep
 
-        return self._deposit_response(
-            "pending", deposit_id_hex, verified.amount, verified.token_address
-        )
-
-    async def _background_sweep(
-        self,
-        deposit_address: str,
-        beneficiary: str,
-        chain_type: str,
-        version: int,
-        chain_id: int,
-        token_address: str | None,
-        token_id: bytes,
-        amount: int,
-        deposit_id: bytes,
-        is_native: bool,
-    ) -> None:
+    async def _background_sweep(self, deposit_id: bytes, is_native: bool) -> None:
         """Run sweep + credit in background. Errors are persisted to the record."""
         deposit_id_hex = _to_hex(deposit_id)
         try:
             if is_native:
-                await self._sweep.sweep_native(
-                    deposit_address=deposit_address,
-                    beneficiary=beneficiary,
-                    chain_type=chain_type,
-                    version=version,
-                    chain_id=chain_id,
-                    token_id=token_id,
-                    amount=amount,
-                    deposit_id=deposit_id,
-                )
+                await self._sweep.sweep_native(deposit_id)
             else:
-                await self._sweep.sweep_erc20(
-                    deposit_address=deposit_address,
-                    beneficiary=beneficiary,
-                    chain_type=chain_type,
-                    version=version,
-                    chain_id=chain_id,
-                    token_address=token_address,
-                    token_id=token_id,
-                    amount=amount,
-                    deposit_id=deposit_id,
-                )
-            logger.info(
-                "Background sweep completed: deposit_id=%s beneficiary=%s",
-                deposit_id_hex,
-                beneficiary,
-            )
+                await self._sweep.sweep_erc20(deposit_id)
+            logger.info("Background sweep completed: deposit_id=%s", deposit_id_hex)
         except SweepCreditPendingError:
             logger.warning(
                 "Background sweep: credit pending for deposit_id=%s — recovery loop will retry",
@@ -286,7 +218,7 @@ class DepositProcessor:
             self._sweep.persist_error(deposit_id_hex, str(exc))
 
     def get_deposit_status(self, deposit_id_hex: str, beneficiary: str) -> Dict | None:
-        """Get current status of a deposit from in-memory sweep state.
+        """Get current status of a deposit from the persisted sweep record.
 
         Returns None if deposit_id is unknown (caller should check on-chain).
         """
@@ -309,7 +241,11 @@ class DepositProcessor:
                     "pending", deposit_id_hex, record.amount, record.token_address
                 )
             return self._deposit_response(
-                "error", deposit_id_hex, record.amount, record.token_address, detail=record.error
+                "error",
+                deposit_id_hex,
+                record.amount,
+                record.token_address,
+                detail=record.error,
             )
 
         return self._deposit_response(
@@ -326,13 +262,11 @@ def get_deposit_processor() -> DepositProcessor:
     if _processor_instance is None:
         settings = load_settings()
         accounting = get_accounting_contract_service()
-        verifier = DepositVerifier(dict(settings.chain_rpc_urls))
         sweep = SweepEngine(
             accounting_service=accounting,
             chain_rpc_urls=dict(settings.chain_rpc_urls),
         )
         _processor_instance = DepositProcessor(
-            verifier=verifier,
             sweep_engine=sweep,
             accounting_service=accounting,
         )

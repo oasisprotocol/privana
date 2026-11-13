@@ -4,15 +4,18 @@ Mocks AccountingContractService and web3 to test state transitions
 without hitting real chains.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from web3 import Web3
 
 import src.services.rpc_identity as rpc_identity
 from src.clients.rofl import TransactionRevertedError
 from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI, SWEEP_GAS_LIMIT_NATIVE
 from src.services.sweep_engine import (
+    BalanceClaimStatus,
     SweepEngine,
     SweepRecord,
     SweepState,
@@ -65,6 +68,23 @@ def engine(state_dir, mock_accounting):
     )
 
 
+def _plan(engine, token_address=None):
+    """Save the record claim_balance() leaves: a scheduled sweep."""
+    engine._save_record(
+        SweepRecord(
+            deposit_address="0x" + "aa" * 20,
+            chain_id=84532,
+            state=SweepState.PENDING,
+            beneficiary="0x" + "bb" * 20,
+            chain_type="evm",
+            version=0,
+            token_id_hex="0x" + "11" * 32,
+            token_address=token_address,
+            deposit_id_hex="0x" + "22" * 32,
+        )
+    )
+
+
 def test_initial_state_is_idle(engine):
     record = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert record is None  # no record = idle
@@ -73,6 +93,7 @@ def test_initial_state_is_idle(engine):
 def test_state_persistence(engine, state_dir):
     """Sweep records should survive engine restart."""
     record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
         state=SweepState.PENDING,
@@ -97,7 +118,7 @@ def test_state_persistence(engine, state_dir):
 @pytest.mark.asyncio
 async def test_sweep_native_full_cycle(engine, mock_accounting):
     """Native sweep: IDLE → PENDING → SWEPT → credit → IDLE."""
-    deposit_addr = "0x" + "aa" * 20
+    "0x" + "aa" * 20
 
     with patch.object(engine, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -105,23 +126,15 @@ async def test_sweep_native_full_cycle(engine, mock_accounting):
         w3.eth.get_balance = AsyncMock(return_value=10**18)
         w3.eth.get_transaction_count = AsyncMock(return_value=0)
         w3.eth.gas_price = _AwaitableValue(1_000_000_000)  # 1 gwei
-        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
         # Broadcast sweep tx
         w3.eth.send_raw_transaction = AsyncMock(return_value=b"\xdd" * 32)
         # Wait for sweep confirmation
         w3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 100})
         mock_get_w3.return_value = w3
 
-        await engine.sweep_native(
-            deposit_address=deposit_addr,
-            beneficiary="0x" + "bb" * 20,
-            chain_type="evm",
-            version=0,
-            chain_id=84532,
-            token_id=b"\x11" * 32,
-            amount=10**18,
-            deposit_id=b"\x22" * 32,
-        )
+        _plan(engine)
+        await engine.sweep_native(b"\x22" * 32)
 
     # Sweep signing was called
     mock_accounting.generate_sweep_native.assert_called_once()
@@ -129,58 +142,6 @@ async def test_sweep_native_full_cycle(engine, mock_accounting):
     mock_accounting.credit_deposit.assert_called_once()
     # State is back to idle (record cleaned up)
     assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
-
-
-@pytest.mark.asyncio
-async def test_sweep_native_zero_balance_already_processed(engine, mock_accounting):
-    """When balance=0 and deposit already processed (race condition), return success."""
-    deposit_addr = "0x" + "aa" * 20
-    mock_accounting.is_deposit_processed = AsyncMock(return_value=True)
-
-    with patch.object(engine, "_get_web3") as mock_get_w3:
-        w3 = AsyncMock()
-        w3.eth.get_balance = AsyncMock(return_value=0)
-        mock_get_w3.return_value = w3
-
-        await engine.sweep_native(
-            deposit_address=deposit_addr,
-            beneficiary="0x" + "bb" * 20,
-            chain_type="evm",
-            version=0,
-            chain_id=84532,
-            token_id=b"\x11" * 32,
-            amount=10**18,
-            deposit_id=b"\x22" * 32,
-        )
-
-    mock_accounting.generate_sweep_native.assert_not_called()
-    mock_accounting.credit_deposit.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_sweep_native_zero_balance_not_processed_rejects(engine, mock_accounting):
-    """When balance=0 but deposit NOT yet processed, reject — nothing to sweep."""
-    deposit_addr = "0x" + "aa" * 20
-    mock_accounting.is_deposit_processed = AsyncMock(return_value=False)
-
-    with patch.object(engine, "_get_web3") as mock_get_w3:
-        w3 = AsyncMock()
-        w3.eth.get_balance = AsyncMock(return_value=0)
-        mock_get_w3.return_value = w3
-
-        with pytest.raises(ValueError, match="nothing to sweep"):
-            await engine.sweep_native(
-                deposit_address=deposit_addr,
-                beneficiary="0x" + "bb" * 20,
-                chain_type="evm",
-                version=0,
-                chain_id=84532,
-                token_id=b"\x11" * 32,
-                amount=10**18,
-                deposit_id=b"\x22" * 32,
-            )
-
-    mock_accounting.credit_deposit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -224,7 +185,7 @@ async def test_idempotent_credit_reraises_other_errors(engine, mock_accounting):
 @pytest.mark.asyncio
 async def test_sweep_erc20_full_cycle(engine, mock_accounting):
     """ERC20 sweep: IDLE → PENDING → GAS_FUNDED → SWEPT → credit → IDLE."""
-    deposit_addr = "0x" + "aa" * 20
+    "0x" + "aa" * 20
     token_addr = "0x" + "cc" * 20
 
     with (
@@ -243,9 +204,10 @@ async def test_sweep_erc20_full_cycle(engine, mock_accounting):
         ),
     ):
         w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=0)  # no native gas at the address yet
         w3.eth.get_transaction_count = AsyncMock(return_value=0)
         w3.eth.gas_price = _AwaitableValue(1_000_000_000)  # 1 gwei
-        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
         # Gas funding broadcast, then sweep broadcast
         w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
         # Gas funding receipt, then sweep receipt
@@ -257,17 +219,8 @@ async def test_sweep_erc20_full_cycle(engine, mock_accounting):
         )
         mock_get_w3.return_value = w3
 
-        await engine.sweep_erc20(
-            deposit_address=deposit_addr,
-            beneficiary="0x" + "bb" * 20,
-            chain_type="evm",
-            version=0,
-            chain_id=84532,
-            token_address=token_addr,
-            token_id=b"\x11" * 32,
-            amount=1000 * 10**6,
-            deposit_id=b"\x22" * 32,
-        )
+        _plan(engine, token_addr)
+        await engine.sweep_erc20(b"\x22" * 32)
 
     # Gas funding tx was generated
     mock_accounting.generate_gas_funding_tx.assert_called_once()
@@ -275,9 +228,6 @@ async def test_sweep_erc20_full_cycle(engine, mock_accounting):
     mock_accounting.generate_sweep_erc20.assert_called_once()
     # Credit was called
     mock_accounting.credit_deposit.assert_called_once()
-    # Gas funding tx hash is tracked (prevents claiming as deposit)
-    gas_tx_hash_hex = "0x" + "aa" * 32
-    assert gas_tx_hash_hex.lower() in engine._gas_funding_tx_hashes
     # Record cleaned up (back to idle)
     assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
 
@@ -306,10 +256,10 @@ async def test_receipt_after_chain_drop_keeps_the_record_for_recovery(
     await rpc_identity.initialize_verified_chain_rpc_urls(settings)
 
     w3 = AsyncMock()
-    w3.eth.get_balance = AsyncMock(return_value=10**18)
+    w3.eth.get_balance = AsyncMock(return_value=10**18 if asset == "native" else 0)
     w3.eth.get_transaction_count = AsyncMock(return_value=0)
     w3.eth.gas_price = _AwaitableValue(1_000_000_000)
-    w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+    w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
     w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
     receipt_waits = iter(["gas funding", "sweep"])
 
@@ -324,98 +274,16 @@ async def test_receipt_after_chain_drop_keeps_the_record_for_recovery(
     monkeypatch.setattr(engine, "_get_gas_tank_address", AsyncMock(return_value="0x" + "ff" * 20))
     monkeypatch.setattr(engine, "_get_erc20_balance", AsyncMock(return_value=1000 * 10**6))
 
-    sweep_args = dict(
-        deposit_address="0x" + "aa" * 20,
-        beneficiary="0x" + "bb" * 20,
-        chain_type="evm",
-        version=0,
-        chain_id=84532,
-        token_id=b"\x11" * 32,
-        deposit_id=b"\x22" * 32,
-    )
+    _plan(engine, None if asset == "native" else "0x" + "cc" * 20)
+    sweep = engine.sweep_native if asset == "native" else engine.sweep_erc20
     with pytest.raises(ValueError, match="No verified RPC endpoint for chain 84532"):
-        if asset == "native":
-            await engine.sweep_native(amount=10**18, **sweep_args)
-        else:
-            await engine.sweep_erc20(
-                token_address="0x" + "cc" * 20, amount=1000 * 10**6, **sweep_args
-            )
+        await sweep(b"\x22" * 32)
 
     mock_accounting.credit_deposit.assert_not_called()
     record = engine.get_record_by_deposit_id("0x" + "22" * 32)
     assert record.state == SweepState.GAS_FUNDED
-    assert record.sweep_tx_hash == "0x" + "bb" * 32
-
-
-@pytest.mark.asyncio
-async def test_sweep_erc20_zero_balance_already_processed(engine, mock_accounting):
-    """When ERC20 balance=0 and deposit already processed (race), return success."""
-    deposit_addr = "0x" + "aa" * 20
-    token_addr = "0x" + "cc" * 20
-    mock_accounting.is_deposit_processed = AsyncMock(return_value=True)
-
-    with (
-        patch.object(engine, "_get_web3") as mock_get_w3,
-        patch.object(
-            engine,
-            "_get_erc20_balance",
-            new_callable=AsyncMock,
-            return_value=0,
-        ),
-    ):
-        w3 = AsyncMock()
-        mock_get_w3.return_value = w3
-
-        await engine.sweep_erc20(
-            deposit_address=deposit_addr,
-            beneficiary="0x" + "bb" * 20,
-            chain_type="evm",
-            version=0,
-            chain_id=84532,
-            token_address=token_addr,
-            token_id=b"\x11" * 32,
-            amount=1000 * 10**6,
-            deposit_id=b"\x22" * 32,
-        )
-
-    mock_accounting.generate_gas_funding_tx.assert_not_called()
-    mock_accounting.generate_sweep_erc20.assert_not_called()
-    mock_accounting.credit_deposit.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_sweep_erc20_zero_balance_not_processed_rejects(engine, mock_accounting):
-    """When ERC20 balance=0 but deposit NOT yet processed, reject."""
-    deposit_addr = "0x" + "aa" * 20
-    token_addr = "0x" + "cc" * 20
-    mock_accounting.is_deposit_processed = AsyncMock(return_value=False)
-
-    with (
-        patch.object(engine, "_get_web3") as mock_get_w3,
-        patch.object(
-            engine,
-            "_get_erc20_balance",
-            new_callable=AsyncMock,
-            return_value=0,
-        ),
-    ):
-        w3 = AsyncMock()
-        mock_get_w3.return_value = w3
-
-        with pytest.raises(ValueError, match="nothing to sweep"):
-            await engine.sweep_erc20(
-                deposit_address=deposit_addr,
-                beneficiary="0x" + "bb" * 20,
-                chain_type="evm",
-                version=0,
-                chain_id=84532,
-                token_address=token_addr,
-                token_id=b"\x11" * 32,
-                amount=1000 * 10**6,
-                deposit_id=b"\x22" * 32,
-            )
-
-    mock_accounting.credit_deposit.assert_not_called()
+    signed_tx = b"\x01\x02\x03" if asset == "native" else b"\x04\x05\x06"
+    assert record.sweep_tx_hash == "0x" + Web3.keccak(signed_tx).hex()
 
 
 @pytest.mark.asyncio
@@ -429,8 +297,9 @@ async def test_wait_for_receipt_timeout(engine):
 
 
 @pytest.mark.asyncio
-async def test_wait_for_receipt_survives_rpc_errors(engine):
+async def test_wait_for_receipt_survives_rpc_errors(engine, monkeypatch):
     """_wait_for_receipt continues polling after transient RPC errors."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())  # the poll delay is real time otherwise
     w3 = AsyncMock()
     # First call: RPC error. Second call: success.
     w3.eth.get_transaction_receipt = AsyncMock(
@@ -444,7 +313,7 @@ async def test_wait_for_receipt_survives_rpc_errors(engine):
 @pytest.mark.asyncio
 async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
     """On L2 chains, gas funding should include the L1 data fee."""
-    deposit_addr = "0x" + "aa" * 20
+    "0x" + "aa" * 20
     l1_fee = 50_000_000_000_000  # 0.00005 ETH
 
     with (
@@ -461,21 +330,13 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
         w3.eth.get_balance = AsyncMock(return_value=10**18)
         w3.eth.get_transaction_count = AsyncMock(return_value=0)
         w3.eth.gas_price = _AwaitableValue(1_000_000_000)
-        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
         w3.eth.send_raw_transaction = AsyncMock(return_value=b"\xdd" * 32)
         w3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 100})
         mock_get_w3.return_value = w3
 
-        await engine.sweep_native(
-            deposit_address=deposit_addr,
-            beneficiary="0x" + "bb" * 20,
-            chain_type="evm",
-            version=0,
-            chain_id=84532,
-            token_id=b"\x11" * 32,
-            amount=10**18,
-            deposit_id=b"\x22" * 32,
-        )
+        _plan(engine)
+        await engine.sweep_native(b"\x22" * 32)
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=False)
     # gas_price = max(1.25 * 1 gwei base fee, 1 gwei rpc, floor) = 1.25 gwei;
@@ -487,7 +348,7 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
 @pytest.mark.asyncio
 async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
     """On L2 chains, ERC20 gas funding should include the L1 data fee."""
-    deposit_addr = "0x" + "aa" * 20
+    "0x" + "aa" * 20
     token_addr = "0x" + "cc" * 20
     l1_fee = 80_000_000_000_000  # ERC20 txs have more calldata
 
@@ -508,9 +369,10 @@ async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
         ),
     ):
         w3 = AsyncMock()
+        w3.eth.get_balance = AsyncMock(return_value=0)  # no native gas at the address yet
         w3.eth.get_transaction_count = AsyncMock(return_value=0)
         w3.eth.gas_price = _AwaitableValue(1_000_000_000)
-        w3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
         w3.eth.send_raw_transaction = AsyncMock(side_effect=[b"\xaa" * 32, b"\xbb" * 32])
         w3.eth.get_transaction_receipt = AsyncMock(
             side_effect=[
@@ -520,17 +382,8 @@ async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
         )
         mock_get_w3.return_value = w3
 
-        await engine.sweep_erc20(
-            deposit_address=deposit_addr,
-            beneficiary="0x" + "bb" * 20,
-            chain_type="evm",
-            version=0,
-            chain_id=84532,
-            token_address=token_addr,
-            token_id=b"\x11" * 32,
-            amount=1000 * 10**6,
-            deposit_id=b"\x22" * 32,
-        )
+        _plan(engine, token_addr)
+        await engine.sweep_erc20(b"\x22" * 32)
 
     mock_fee.assert_called_once_with(w3, 84532, is_erc20=True)
     # Derived amount (65k gas * 1.25 gwei * 2 + l1_fee = 242.5e12) exceeds the
@@ -562,6 +415,7 @@ def test_persist_error_skips_record_with_broadcast_sweep_tx(engine):
     """A broadcast sweep tx must never be flagged as terminally errored."""
     deposit_id_hex = "0x" + "dd" * 32
     record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
         state=SweepState.GAS_FUNDED,
@@ -584,6 +438,7 @@ def test_persist_error_skips_record_with_broadcast_sweep_tx(engine):
 def test_persist_error_marks_record_without_sweep_tx(engine):
     deposit_id_hex = "0x" + "ee" * 32
     record = SweepRecord(
+        token_id_hex="0x" + "11" * 32,
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
         state=SweepState.PENDING,
@@ -601,8 +456,9 @@ def test_persist_error_marks_record_without_sweep_tx(engine):
     assert stored.error == "gas funding failed"
 
 
-def _same_address_record(deposit_id_hex: str) -> SweepRecord:
+def _same_address_record(deposit_id_hex: str, token_id_hex: str) -> SweepRecord:
     return SweepRecord(
+        token_id_hex=token_id_hex,
         deposit_address="0x" + "aa" * 20,
         chain_id=84532,
         state=SweepState.PENDING,
@@ -613,55 +469,146 @@ def _same_address_record(deposit_id_hex: str) -> SweepRecord:
     )
 
 
-def test_same_address_records_coexist(engine):
-    """Two deposits to the same address keep independent records.
+ID_A, TOKEN_A = "0x" + "1a" * 32, "0x" + "a1" * 32
+ID_B, TOKEN_B = "0x" + "2b" * 32, "0x" + "b2" * 32
 
-    Records are keyed by deposit_id, so a later same-address deposit must
-    not overwrite or shadow an earlier one's persisted state.
-    """
-    id_a = "0x" + "1a" * 32
-    id_b = "0x" + "2b" * 32
-    engine._save_record(_same_address_record(id_a))
-    engine._save_record(_same_address_record(id_b))
 
-    stored_a = engine.get_record_by_deposit_id(id_a)
-    stored_b = engine.get_record_by_deposit_id(id_b)
-    assert stored_a is not None and stored_a.deposit_id_hex == id_a
-    assert stored_b is not None and stored_b.deposit_id_hex == id_b
+def test_same_address_records_of_different_tokens_coexist(engine):
+    """Records are keyed by (token, address): another token's sweep never shadows ours."""
+    engine._save_record(_same_address_record(ID_A, TOKEN_A))
+    engine._save_record(_same_address_record(ID_B, TOKEN_B))
+
+    assert engine.get_record(TOKEN_A, "0x" + "aa" * 20).deposit_id_hex == ID_A
+    assert engine.get_record_by_deposit_id(ID_B).deposit_id_hex == ID_B
 
 
 def test_cleanup_record_leaves_same_address_sibling(engine):
-    id_a = "0x" + "1a" * 32
-    id_b = "0x" + "2b" * 32
-    engine._save_record(_same_address_record(id_a))
-    engine._save_record(_same_address_record(id_b))
+    engine._save_record(_same_address_record(ID_A, TOKEN_A))
+    engine._save_record(_same_address_record(ID_B, TOKEN_B))
 
-    engine.cleanup_record(id_a)
+    engine.cleanup_record(ID_A)
 
-    assert engine.get_record_by_deposit_id(id_a) is None
-    assert engine.get_record_by_deposit_id(id_b) is not None
+    assert engine.get_record_by_deposit_id(ID_A) is None
+    assert engine.get_record_by_deposit_id(ID_B) is not None
 
 
 def test_persist_error_targets_only_its_deposit(engine):
     """An error on one deposit must not land on a same-address sibling."""
-    id_a = "0x" + "1a" * 32
-    id_b = "0x" + "2b" * 32
-    engine._save_record(_same_address_record(id_a))
-    engine._save_record(_same_address_record(id_b))
+    engine._save_record(_same_address_record(ID_A, TOKEN_A))
+    engine._save_record(_same_address_record(ID_B, TOKEN_B))
 
-    engine.persist_error(id_a, "gas funding failed")
+    engine.persist_error(ID_A, "gas funding failed")
 
-    stored_a = engine.get_record_by_deposit_id(id_a)
-    stored_b = engine.get_record_by_deposit_id(id_b)
-    assert stored_a is not None and stored_a.error == "gas funding failed"
-    assert stored_b is not None and stored_b.error is None
+    assert engine.get_record_by_deposit_id(ID_A).error == "gas funding failed"
+    assert engine.get_record_by_deposit_id(ID_B).error is None
 
 
-def test_save_record_requires_deposit_id(engine):
-    record = _same_address_record("0x" + "1a" * 32)
-    for bad_id in ("", "0x12", "0x" + "zz" * 32, "0x../" + "22" * 31):
-        record.deposit_id_hex = bad_id
-        with pytest.raises(ValueError):
-            engine._save_record(record)
+def test_malformed_deposit_ids_are_not_found(engine):
     # Malformed ids on the read path are a client error, not ours: not-found.
     assert engine.get_record_by_deposit_id("0x../etc/passwd") is None
+
+
+@pytest.mark.asyncio
+async def test_claim_schedules_the_finalized_balance_without_amount_or_nonce(engine):
+    w3 = AsyncMock()
+    w3.eth.get_block = AsyncMock(return_value={"number": 1000})
+
+    async def balance(_w3, _token, _holder, block_identifier=None):
+        return 7_000_000 if block_identifier == 1000 - 15 else 9_000_000  # then / now
+
+    args = dict(
+        deposit_address="0x" + "aa" * 20,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        chain_id=84532,
+        token_address="0x" + "cc" * 20,
+        token_id=b"\x11" * 32,
+    )
+    with (
+        patch.object(engine, "_get_web3", return_value=w3),
+        patch.object(engine, "_get_erc20_balance", side_effect=balance),
+    ):
+        claim = await engine.claim_balance(**args)
+        again = await engine.claim_balance(**args)
+
+    assert (claim.status, claim.amount) == (BalanceClaimStatus.STARTED, 7_000_000)  # finalized
+    assert (claim.record.amount, claim.record.sweep_nonce) == (None, None)  # decided at signing
+    assert (again.status, again.record.deposit_id_hex) == (
+        BalanceClaimStatus.IN_FLIGHT,
+        claim.record.deposit_id_hex,
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_reschedules_a_record_that_failed_before_broadcast(engine):
+    w3 = AsyncMock()
+    w3.eth.get_block = AsyncMock(return_value={"number": 1000})
+    w3.eth.get_balance = AsyncMock(return_value=10**18)
+    args = dict(
+        deposit_address="0x" + "aa" * 20,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        chain_id=84532,
+        token_address=None,
+        token_id=b"\x11" * 32,
+    )
+    with patch.object(engine, "_get_web3", return_value=w3):
+        failed = (await engine.claim_balance(**args)).record
+        engine.persist_error(failed.deposit_id_hex, "gas funding failed")
+        retry = await engine.claim_balance(**args)
+
+        assert retry.status is BalanceClaimStatus.STARTED
+        assert retry.record.deposit_id_hex != failed.deposit_id_hex
+        assert engine.get_record_by_deposit_id(failed.deposit_id_hex) is None
+
+        # Once a sweep tx may exist the record is kept for recovery.
+        retry.record.error, retry.record.sweep_tx_hash = "timed out", "0x" + "dd" * 32
+        engine._save_record(retry.record)
+        kept = await engine.claim_balance(**args)
+
+    assert (kept.status, kept.record.deposit_id_hex) == (
+        BalanceClaimStatus.IN_FLIGHT,
+        retry.record.deposit_id_hex,
+    )
+
+
+@pytest.mark.asyncio
+async def test_claims_made_together_for_one_asset_schedule_a_single_sweep(engine):
+    w3 = AsyncMock()
+    w3.eth.get_block = AsyncMock(return_value={"number": 1000})
+    w3.eth.get_balance = AsyncMock(return_value=10**18)
+    args = dict(
+        deposit_address="0x" + "aa" * 20,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        chain_id=84532,
+        token_address=None,
+        token_id=b"\x11" * 32,
+    )
+    with patch.object(engine, "_get_web3", return_value=w3):
+        claims = await asyncio.gather(engine.claim_balance(**args), engine.claim_balance(**args))
+
+    assert sorted(claim.status for claim in claims) == [
+        BalanceClaimStatus.IN_FLIGHT,
+        BalanceClaimStatus.STARTED,
+    ]
+    assert len({claim.record.deposit_id_hex for claim in claims}) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_waiting_for_the_lock_skips_a_record_settled_meanwhile(engine, mock_accounting):
+    """#299: a pass that queued behind a live sweep re-reads the record under the lock,
+    finds it gone, and does not sweep again."""
+    _plan(engine)
+    lock = engine._get_address_lock("0x" + "aa" * 20, 84532)
+    await lock.acquire()  # the live sweep
+    stale_pass = asyncio.create_task(engine.sweep_native(b"\x22" * 32))
+    await asyncio.sleep(0)
+    engine.cleanup_record("0x" + "22" * 32)  # the live sweep settled and cleaned up
+    lock.release()
+    await stale_pass
+
+    mock_accounting.generate_sweep_native.assert_not_called()
