@@ -624,6 +624,22 @@ class DepositCheckRequest(BaseModel):
         return _normalise_hex(value)
 
 
+class DepositCheckAllRequest(BaseModel):
+    """Request to claim every unclaimed deposit at the deposit address."""
+
+    chain_type: Literal["evm"] = Field("evm", description="Chain family (v1: 'evm' only)")
+    token_id: str | None = Field(
+        None, description="Token id (bytes32) to check; default: every configured token"
+    )
+    version: int = Field(0, description="Deposit address derivation version")
+
+    @field_validator("token_id")
+    def _normalise_token_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
+
+
 class DepositCheckResponse(BaseModel):
     """Response for deposit check status."""
 

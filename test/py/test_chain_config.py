@@ -159,19 +159,27 @@ USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 def test_build_token_infos_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ACCOUNTING_TOKEN_INFO", raising=False)
 
-    assert _build_token_infos() == []
+    assert _build_token_infos() == {}
 
 
-def test_build_token_infos_parses_native_and_erc20(monkeypatch):
+def test_build_token_infos_parses_native_and_erc20_keyed_by_token_id(monkeypatch):
     monkeypatch.setenv(
         "ACCOUNTING_TOKEN_INFO",
         f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}"}}]',
     )
 
-    assert _build_token_infos() == [
-        {"chain_id": 84532, "token_address": None},
-        {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA},
-    ]
+    # keccak256(abi.encode(type, abi.encodePacked(chainId[, tokenAddress]))); the ERC20 id is
+    # the one in Accounting.E2E.ts.
+    assert _build_token_infos() == {
+        "0xcb000b49674eef8e30d9488d0ef35b7f4cec0306641f59d5592a859f53805c8f": {
+            "chain_id": 84532,
+            "token_address": None,
+        },
+        "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514": {
+            "chain_id": 84532,
+            "token_address": USDC_BASE_SEPOLIA,
+        },
+    }
 
 
 def test_build_token_infos_rejects_invalid_json(monkeypatch):

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from src.services.accounting_contract import AccountingContractService
 
@@ -36,7 +36,7 @@ def _describe(chain_id: int, token_address: str | None) -> str:
 
 async def bootstrap_token_info(
     service: AccountingContractService,
-    token_infos: List[Dict[str, Any]],
+    token_infos: Dict[str, Dict[str, Any]],
 ) -> None:
     """Register any configured token that isn't already registered on-chain.
 
@@ -48,7 +48,7 @@ async def bootstrap_token_info(
         logger.info("ACCOUNTING_TOKEN_INFO not configured; skipping token registration")
         return
 
-    for entry in token_infos:
+    for entry in token_infos.values():
         chain_id = entry["chain_id"]
         token_address = entry.get("token_address")
         await _register_token(service, chain_id, token_address)

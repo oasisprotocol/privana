@@ -20,13 +20,14 @@ import src.config
 import src.services.onramp as onramp
 import src.services.onramp_intent as onramp_intent
 import src.services.transak as transak
+from src.config import get_token_id
 from src.models.private_read import PrivateReadAuth
 
 BENEFICIARY = Web3.to_checksum_address("0x" + "bb" * 20)
 OTHER_BENEFICIARY = Web3.to_checksum_address("0x" + "dd" * 20)
 DEPOSIT_ADDRESS = Web3.to_checksum_address("0x" + "aa" * 20)
 TOKEN_ADDRESS = Web3.to_checksum_address("0x" + "cc" * 20)
-TOKEN_ID = "0x" + "11" * 32
+TOKEN_ID = get_token_id(84532, TOKEN_ADDRESS)
 TX_HASH = "0x" + "22" * 32
 PRIVATE_READ_TOKEN = b"\x12" * 65
 RESOLVED_PRIVATE_READ_TOKEN = b"\x34" * 65
@@ -103,7 +104,6 @@ def _make_client(
     _set_required_env(monkeypatch, tmp_path, provider=provider)
     accounting = MagicMock()
     accounting.get_deposit_address = AsyncMock(return_value=DEPOSIT_ADDRESS)
-    accounting.get_token_id = AsyncMock(return_value=bytes.fromhex(TOKEN_ID.removeprefix("0x")))
     accounting.is_token_registered = AsyncMock(return_value=True)
     monkeypatch.setattr(routes, "_service", accounting)
     monkeypatch.setattr(routes, "fetch_moonpay_buy_transactions", AsyncMock(return_value=[]))
@@ -192,7 +192,6 @@ def test_transak_intent_is_provider_selected_and_registry_bound(monkeypatch, tmp
     assert intent["moonpay_currency_code"] is None
     assert decoded["p"] == "transak"
     assert decoded["a"] == "usdc"
-    accounting.get_token_id.assert_awaited_once_with(84532, TOKEN_ADDRESS)
     accounting.is_token_registered.assert_awaited_once()
 
 

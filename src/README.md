@@ -58,7 +58,7 @@ src/
 
 ### Deposit Flow
 
-Triggered by `POST /deposits/check`. The processor returns within ~2-3 s with `status="pending"` and a `deposit_id`; the actual sweep continues in a background task. Clients poll `GET /deposits/status/{deposit_id}`.
+Triggered by `POST /deposits/check`, or by `POST /deposits/check-all`, which finds the funding txs of the deposit address balance through Alchemy (`deposit_funding.py`) and runs the same processor for each of them. The processor returns within ~2-3 s with `status="pending"` and a `deposit_id`; the actual sweep continues in a background task. Clients poll `GET /deposits/status/{deposit_id}`.
 
 ```
 Client                       DepositProcessor              SweepEngine                Sapphire

@@ -731,7 +731,7 @@ def _deposit_address_body(monkeypatch, token_infos, chain_rpc_urls) -> dict:
     monkeypatch.setattr(routes, "_service", mock_service)
 
     fake_settings = MagicMock()
-    fake_settings.token_infos = token_infos
+    fake_settings.token_infos = {f"0x{i:064x}": info for i, info in enumerate(token_infos)}
     fake_settings.chain_rpc_urls = chain_rpc_urls
     monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
 

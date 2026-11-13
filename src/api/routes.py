@@ -25,7 +25,7 @@ from src.auth.siwe_config import get_siwe_config, get_siwe_configs
 from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
-from src.config import load_settings
+from src.config import get_token_id, load_settings
 from src.config.chain_config import (
     CHAIN_CONFIGS,
     MIN_DEPOSIT_ERC20_WEI,
@@ -40,6 +40,7 @@ from src.models.accounting import (
     CreateOnRampSessionRequest,
     DepositAddressRequest,
     DepositAddressResponse,
+    DepositCheckAllRequest,
     DepositCheckRequest,
     DepositCheckResponse,
     ExpiredLocksResponse,
@@ -383,11 +384,10 @@ async def _registered_transak_token_id(
 
     if requested_chain_id is not None and requested_chain_id != config.chain_id:
         raise OnRampError("chain_id does not match the configured Transak asset")
-    token_id = await _service.get_token_id(config.chain_id, config.token_address)
-    token_id_hex = Web3.to_hex(token_id).lower()
+    token_id_hex = get_token_id(config.chain_id, config.token_address)
     if requested_token_id is not None and requested_token_id.lower() != token_id_hex:
         raise OnRampError("token_id does not match the configured Transak asset")
-    if not await _service.is_token_registered(token_id):
+    if not await _service.is_token_registered(bytes.fromhex(token_id_hex.removeprefix("0x"))):
         raise OnRampNotConfiguredError("The configured Transak asset is not registered")
     return token_id_hex
 
@@ -478,10 +478,14 @@ async def get_deposit_address(
         )
         settings = load_settings()
         native_supported = {
-            entry["chain_id"] for entry in settings.token_infos if not entry.get("token_address")
+            entry["chain_id"]
+            for entry in settings.token_infos.values()
+            if not entry.get("token_address")
         }
         erc20_supported = {
-            entry["chain_id"] for entry in settings.token_infos if entry.get("token_address")
+            entry["chain_id"]
+            for entry in settings.token_infos.values()
+            if entry.get("token_address")
         }
         # Advertise only chains that survived RPC identity verification and have
         # at least one registered asset type.
@@ -551,6 +555,42 @@ async def check_deposit(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to process deposit")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
+
+
+@router.post("/deposits/check-all", response_model=list[DepositCheckResponse])
+async def check_all_deposits(
+    payload: DepositCheckAllRequest,
+    response: Response,
+    auth: PrivateReadAuth = Depends(_require_resolved_private_read_auth),
+) -> list[DepositCheckResponse]:
+    """Claim every unclaimed deposit at the deposit address, without knowing the tx hashes.
+
+    Checks the balance of ``token_id`` (default: every configured token) and runs the
+    /deposits/check logic for each transfer that funded it. Returns the pending deposits:
+    202 when there are any, 200 with an empty list otherwise. Clients poll
+    GET /deposits/status/{deposit_id} for completion.
+    """
+    try:
+        deposits = await get_deposit_processor().process_all_deposits(
+            chain_type=payload.chain_type,
+            version=payload.version,
+            auth=auth,
+            token_id=payload.token_id,
+        )
+        if deposits:
+            response.status_code = 202
+        return [DepositCheckResponse(**deposit) for deposit in deposits]
+    except ContractLogicError as exc:
+        if "Siwe" in str(exc) or "InvalidSiwe" in str(exc):
+            raise HTTPException(status_code=401, detail="Invalid or expired SIWE token") from exc
+        logger.error("Contract revert in deposit check-all: %s", exc)
+        raise HTTPException(status_code=422, detail="Deposit credit failed") from exc
+    except ValueError as exc:
+        logger.warning("Deposit check-all rejected: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to check deposits")
         raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
