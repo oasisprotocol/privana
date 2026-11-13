@@ -1,43 +1,59 @@
+name: privana-localnet
+
+x-app: &app
+  image: privana-localnet-dev
+  pull_policy: never
+  # Share the node's network so localhost:8545 works as in .env.localnet.
+  network_mode: service:sapphire-localnet
+  volumes:
+    - appd:/run
+    - data:/data
+
 services:
-  privana:
-    build:
-      context: .
-      args:
-        - ENV_FILE=.env.localnet
-    image: "privana:localnet"
+  sapphire-localnet:
+    image: ghcr.io/oasisprotocol/sapphire-localnet
     platform: linux/amd64
     environment:
-      - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
-      - SWEEP_STATE_DIR=/data/sweep-engine
-      - ACCOUNTING_STATE_DIR=/data/accounting
-      - ONRAMP_PROVIDER
-      - MOONPAY_API_KEY=${MOONPAY_API_KEY}
-      - MOONPAY_SECRET_KEY=${MOONPAY_SECRET_KEY}
-      - ONRAMP_INTENT_SIGNING_KEY_ID
-      - ONRAMP_INTENT_PREVIOUS_SIGNING_KEY_IDS
-      - MOONPAY_API_BASE_URL=${MOONPAY_API_BASE_URL:-https://api.moonpay.com}
-      - MOONPAY_WEBHOOK_SECRET_KEY=${MOONPAY_WEBHOOK_SECRET_KEY}
-      - TRANSAK_API_KEY=${TRANSAK_API_KEY}
-      - TRANSAK_API_SECRET=${TRANSAK_API_SECRET}
-      - TRANSAK_API_BASE_URL
-      - TRANSAK_GATEWAY_BASE_URL
-      - TRANSAK_REFERRER_DOMAIN
-      - TRANSAK_CLIENT_IP_HEADER
-      - TRANSAK_CLIENT_IP_MODE
-      - TRANSAK_IP_ATTESTATION_SECRET
-      - TRANSAK_CRYPTO_CURRENCY_CODE
-      - TRANSAK_NETWORK
-      - TRANSAK_CHAIN_ID
-      - TRANSAK_TOKEN_ADDRESS
+      TO: chimney theory present latin find behave ankle clock shadow earn suit reflect
     volumes:
-      - ./rofl-appd.sock:/run/rofl-appd.sock
-      - sweep-engine-data:/data/sweep-engine
-      - accounting-data:/data/accounting
-    network_mode: host # For sapphire-localnet
+      - appd:/rofls
+      - ./docker/localnet/rofl.yaml:/rofls/rofl.yaml:ro
     ports:
+      # Privana's API. Its container shares this network, so the port is published here.
       - "8000:8000"
-    restart: on-failure
+      - "8544-8548:8544-8548"
+    healthcheck:
+      test: [CMD-SHELL, "test -f /CONTAINER_READY && test -S /rofls/rofl-appd.sock"]
+      interval: 3s
+      timeout: 5s
+      retries: 120
+
+  bootstrap:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/localnet/Dockerfile
+    depends_on:
+      sapphire-localnet:
+        condition: service_healthy
+    command: [/privana/.venv/bin/python, /localnet/bootstrap.py]
+
+  privana:
+    <<: *app
+    environment:
+      SWEEP_STATE_DIR: /data/sweep-engine
+      ACCOUNTING_STATE_DIR: /data/accounting
+      AUTH_TOKEN_STORAGE_DIR: /data/auth
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    command: [sh, -ec, "set -a; . /data/localnet.env; exec .venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000"]
+    healthcheck:
+      test: [CMD, /privana/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
 
 volumes:
-  sweep-engine-data:
-  accounting-data:
+  appd:
+  data:

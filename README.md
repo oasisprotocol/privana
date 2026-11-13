@@ -16,6 +16,8 @@ A reusable framework for apps running in ROFL that enables:
 
 ## Deployments
 
+For local development, see [Running Locally](src/README.md#running-locally).
+
 The Privana python backend service is containerized and deployed as an
 application running in ROFL TEE.
 
