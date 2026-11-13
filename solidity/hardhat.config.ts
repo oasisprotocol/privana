@@ -47,9 +47,7 @@ const config: HardhatUserConfig = {
       accounts,
     },
     hardhat: {
-      accounts: SECRET_KEY
-        ? [{ privateKey: SECRET_KEY, balance: '10000000000000000000000' }]
-        : TEST_HDWALLET,
+      accounts: TEST_HDWALLET,
       // Accounting may exceed the EIP-170 24576-byte cap; Sapphire allows 64 KiB
       // (see scripts/check-bytecode-size.ts), so lift the cap on the in-process
       // test network too.

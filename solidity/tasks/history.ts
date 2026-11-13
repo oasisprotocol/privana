@@ -3,7 +3,8 @@ import {
   fetchJson,
   getSiweToken,
   isJsonObject,
-  normalizeApiBaseUrl,
+  resolveApiBaseUrl,
+  resolveChainId,
 } from "./utils/siwe";
 import { fetchTokens, formatBalance, tokenName, TokenInfo } from "./tokens";
 import { withRetry } from "./utils/retry";
@@ -96,16 +97,14 @@ task("history")
   .addOptionalParam("limit", "Page size, max 100. Use 0 to fetch the entire history from the beginning", "50")
   .addOptionalParam(
     "apiurl",
-    "API base URL",
-    "https://api.testnet.privana.finance",
-  )
-  .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
+    "API base URL (default: based on network)", "")
+  .addOptionalParam("chainid", "Chain ID for SIWE message (default: based on network)", "")
   .setDescription("Get a page of the authenticated user's account history (requires SIWE authentication)")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
-    const chainId = parseInt(args.chainid);
+    const apiBaseUrl = resolveApiBaseUrl(args.apiurl, hre);
+    const chainId = resolveChainId(args.chainid, hre);
 
     console.log("User address:", userAddress);
     console.log("API URL:", apiBaseUrl);

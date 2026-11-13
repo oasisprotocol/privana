@@ -5,7 +5,8 @@ import {
   fetchJson,
   getSiweToken,
   isJsonObject,
-  normalizeApiBaseUrl,
+  resolveApiBaseUrl,
+  resolveChainId,
 } from "./utils/siwe";
 import { withRetry } from "./utils/retry";
 
@@ -89,16 +90,14 @@ task("getBalance")
   )
   .addOptionalParam(
     "apiurl",
-    "API base URL",
-    "https://api.testnet.privana.finance",
-  )
-  .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
+    "API base URL (default: based on network)", "")
+  .addOptionalParam("chainid", "Chain ID for SIWE message (default: based on network)", "")
   .setDescription("Get user balance for a token, or all registered tokens (requires SIWE authentication)")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
-    const chainId = parseInt(args.chainid);
+    const apiBaseUrl = resolveApiBaseUrl(args.apiurl, hre);
+    const chainId = resolveChainId(args.chainid, hre);
 
     console.log("User address:", userAddress);
     console.log("API URL:", apiBaseUrl);

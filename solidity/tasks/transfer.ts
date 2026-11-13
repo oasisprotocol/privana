@@ -4,7 +4,7 @@ import {
   fetchJson,
   getSiweToken,
   isJsonObject,
-  normalizeApiBaseUrl,
+  resolveApiBaseUrl,
 } from "./utils/siwe";
 import { eip712DomainOf } from "./utils/eip712";
 
@@ -30,15 +30,13 @@ task("transfer")
   .addParam("amount", "Amount in token base units (e.g., 1000000 for 1 USDC)")
   .addOptionalParam(
     "apiurl",
-    "API base URL",
-    "https://api.testnet.privana.finance",
-  )
+    "API base URL (default: based on network)", "")
   .setDescription("Transfer funds from your account to another account")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = hre.ethers.getAddress(signer.address); // Ensure checksum
     const toAddress = hre.ethers.getAddress(args.to); // Ensure checksum
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
+    const apiBaseUrl = resolveApiBaseUrl(args.apiurl, hre);
     const chainId = Number((await hre.ethers.provider.getNetwork()).chainId);
     const accounting = await hre.ethers.getContractAt(
       "Accounting",
