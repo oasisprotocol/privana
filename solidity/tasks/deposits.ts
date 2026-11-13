@@ -3,24 +3,23 @@ import {
   authenticate,
   fetchJson,
   isJsonObject,
-  normalizeApiBaseUrl,
+  resolveApiBaseUrl,
+  resolveChainId,
 } from "./utils/siwe";
 
 task("getDepositAddress")
   .addOptionalParam(
     "apiurl",
-    "API base URL",
-    "https://api.testnet.privana.finance",
-  )
-  .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
+    "API base URL (default: based on network)", "")
+  .addOptionalParam("chainid", "Chain ID for SIWE message (default: based on network)", "")
   .addOptionalParam("chaintype", "Chain type", "evm")
   .addOptionalParam("keyversion", "Key derivation version", "0")
   .setDescription("Get per-user deposit address (requires SIWE authentication)")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
-    const chainId = parseInt(args.chainid);
+    const apiBaseUrl = resolveApiBaseUrl(args.apiurl, hre);
+    const chainId = resolveChainId(args.chainid, hre);
 
     console.log("User address:", userAddress);
     console.log("API URL:", apiBaseUrl);
@@ -75,10 +74,8 @@ task("checkDeposit")
   .addParam("amount", "Deposit amount in base units (e.g. wei)")
   .addOptionalParam(
     "apiurl",
-    "API base URL",
-    "https://api.testnet.privana.finance",
-  )
-  .addOptionalParam("chainid", "Chain ID for SIWE message", "23295")
+    "API base URL (default: based on network)", "")
+  .addOptionalParam("chainid", "Chain ID for SIWE message (default: based on network)", "")
   .addOptionalParam("sourcechainid", "Source chain ID where deposit was made", "84532")
   .addOptionalParam("logindex", "Log index for ERC20 deposits", "0")
   .addOptionalParam("chaintype", "Chain type", "evm")
@@ -87,8 +84,8 @@ task("checkDeposit")
   .setAction(async (args, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const userAddress = signer.address;
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
-    const chainId = parseInt(args.chainid);
+    const apiBaseUrl = resolveApiBaseUrl(args.apiurl, hre);
+    const chainId = resolveChainId(args.chainid, hre);
 
     console.log("User address:", userAddress);
     console.log("API URL:", apiBaseUrl);

@@ -1,7 +1,7 @@
 import { task } from "hardhat/config";
 import * as cbor from "cbor";
 import { Interface } from "ethers";
-import { fetchJson, isJsonObject, normalizeApiBaseUrl } from "./utils/siwe";
+import { fetchJson, isJsonObject, resolveApiBaseUrl } from "./utils/siwe";
 import { eip712DomainOf } from "./utils/eip712";
 
 // Build error selectors from the ABI (lazy loaded)
@@ -110,9 +110,7 @@ task("withdraw")
   .addParam("amount", "Amount in token base units (e.g., 1000000 for 1 USDC)")
   .addOptionalParam(
     "apiurl",
-    "API base URL",
-    "https://api.testnet.privana.finance",
-  )
+    "API base URL (default: based on network)", "")
   .addOptionalParam("scanlimit", "How many latest withdrawals to scan when fallback-confirming on-chain", "250")
   .addOptionalParam("timeout", "Timeout in seconds to wait for resolution", "120")
   .setAction(async (args, hre) => {
@@ -130,7 +128,7 @@ task("withdraw")
     console.log("\nEIP-712 Domain:", domain);
 
     // Get the current withdrawal nonce from the API
-    const apiBaseUrl = normalizeApiBaseUrl(args.apiurl);
+    const apiBaseUrl = resolveApiBaseUrl(args.apiurl, hre);
     const nonceUrl = `${apiBaseUrl}/v1/accounting/withdraw/nonce/${userAddress}`;
     const nonceData = await fetchJson(nonceUrl);
     const nonce = BigInt((nonceData as { nonce: number }).nonce);

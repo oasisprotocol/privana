@@ -1,3 +1,4 @@
+import type { HardhatRuntimeEnvironment } from "hardhat/types";
 export type JsonObject = Record<string, unknown>;
 
 export function isJsonObject(value: unknown): value is JsonObject {
@@ -6,6 +7,40 @@ export function isJsonObject(value: unknown): value is JsonObject {
 
 export function normalizeApiBaseUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
+}
+
+const DEFAULT_API_URLS: Record<string, string> = {
+  sapphire: "https://api.privana.finance",
+  "sapphire-testnet": "https://api.testnet.privana.finance",
+  "sapphire-localnet": "http://localhost:8000",
+};
+
+/** Returns the explicit --apiurl, or derives it from the --network flag. */
+export function resolveApiBaseUrl(
+  apiUrl: string | undefined,
+  hre: HardhatRuntimeEnvironment,
+): string {
+  if (apiUrl) return normalizeApiBaseUrl(apiUrl);
+  const derived = DEFAULT_API_URLS[hre.network.name];
+  if (!derived) {
+    throw new Error(
+      `Cannot derive API URL for network "${hre.network.name}". Pass --apiurl or use one of: ${Object.keys(DEFAULT_API_URLS).join(", ")}.`,
+    );
+  }
+  return derived;
+}
+
+/** Returns the explicit --chainid, or the chainId of the selected --network. */
+export function resolveChainId(
+  chainId: string | undefined,
+  hre: HardhatRuntimeEnvironment,
+): number {
+  if (chainId) return parseInt(chainId);
+  const derived = hre.config.networks[hre.network.name]?.chainId;
+  if (derived === undefined) {
+    throw new Error(`No chainId configured for network "${hre.network.name}". Pass --chainid.`);
+  }
+  return derived;
 }
 
 export async function fetchJson(
