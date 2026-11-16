@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import cbor2
+import httpx
 from eth_account import Account
 from hexbytes import HexBytes
 from oasis_rofl_client import AsyncRoflClient
@@ -50,6 +51,10 @@ class TransactionRevertedError(Exception):
         self.module = module
         self.error_name = error_name
         super().__init__(message)
+
+
+class AppdError(Exception):
+    """Raised when appd replies with an error status."""
 
 
 def _decode_revert_reason(raw_message: str | None) -> str:
@@ -183,6 +188,7 @@ class RoflAppdClient:
         Raises:
             ValueError: If required transaction fields are missing
             TransactionRevertedError: If the on-chain transaction reverted
+            AppdError: If appd replies with an error status
             RuntimeError: If appd's reply can't be parsed, after it submitted
             Exception: If submission fails
         """
@@ -261,6 +267,11 @@ class RoflAppdClient:
             logger.error("ROFL submission exception: %s", str(e), exc_info=True)
             # appd has submitted before it replies. Routes read ValueError as nothing sent (400).
             raise RuntimeError(f"Invalid ROFL response: {e}") from e
+        except httpx.HTTPStatusError as e:
+            # appd gives its reason in the reply body, which the status error leaves out.
+            reason = f"appd replied {e.response.status_code}: {e.response.text}"
+            logger.error("ROFL submission exception: %s", reason, exc_info=True)
+            raise AppdError(reason) from e
         except Exception as e:
             logger.error("ROFL submission exception: %s", str(e), exc_info=True)
             raise
