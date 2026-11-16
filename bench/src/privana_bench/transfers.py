@@ -35,6 +35,8 @@ REFUSED_WAIT_S = 30.0
 # takes one write, so at most one copy lands.
 RESEND_AFTER_S = 30.0
 RESENDS = 3
+# Privana takes 10 transfers a minute from one caller. 7 s apart is 9 a minute, so one resend fits.
+TRANSFER_GAP_S = 7.0
 
 
 @dataclass
@@ -190,9 +192,11 @@ async def run_transfers(
     refused_wait_s: float = REFUSED_WAIT_S,
     progress: Callable[[Transfer], None] = lambda t: None,
     resend_after_s: float = RESEND_AFTER_S,
+    min_gap_s: float = 0.0,
 ) -> str:
     """Send up to `n` transfers from `start_nonce`, the nonce the run expects,
-    appending each to `transfers` as it starts. Returns why the run ended."""
+    appending each to `transfers` as it starts. Each goes out at least
+    `min_gap_s` after the one before. Returns why the run ended."""
     nonce = await read_nonce()
     if nonce != start_nonce:
         return (
@@ -200,6 +204,8 @@ async def run_transfers(
             f"{start_nonce}, so its view lags or something else used this wallet"
         )
     for k in range(n):
+        if k and min_gap_s:
+            await asyncio.sleep(transfers[-1].sent_at + min_gap_s - time.time())
         t = Transfer(k=k, nonce=nonce, due_at=time.time())
         transfers.append(t)
         journal.write("send", k=k, nonce=nonce, due_at=t.due_at)

@@ -75,7 +75,11 @@ class Run:
 
 
 async def run(
-    tmp_path: Path, steps: list[Step], world: World | None = None, max_wait: float = MAX_WAIT
+    tmp_path: Path,
+    steps: list[Step],
+    world: World | None = None,
+    max_wait: float = MAX_WAIT,
+    min_gap: float = 0.0,
 ) -> Run:
     world = world or World()
     world.run_task = asyncio.current_task()
@@ -110,6 +114,7 @@ async def run(
         max_wait,
         REFUSED_WAIT,
         resend_after_s=RESEND_AFTER,
+        min_gap_s=min_gap,
     )
     elapsed = time.time() - started
     journal.close()
@@ -130,6 +135,16 @@ async def test_all_land_in_order(tmp_path: Path) -> None:
     for t, after in zip(r.transfers, r.transfers[1:], strict=False):
         assert t.done_at <= after.due_at
     assert [rec["event"] for rec in r.records] == ["send", "outcome"] * 4
+
+
+async def test_each_transfer_goes_out_the_gap_after_the_one_before(tmp_path: Path) -> None:
+    gap = 0.2  # longer than a transfer takes to land
+    r = await run(tmp_path, [Step("ok")] * 2, min_gap=gap)
+    assert r.ended == "completed"
+    first, second = r.transfers
+    # The loop's clock is not time.time(), so allow a little.
+    assert second.sent_at - first.sent_at >= gap - 0.01
+    assert second.due_at - first.sent_at >= gap - 0.01  # the wait comes before it is due
 
 
 async def test_landing_is_seen_while_the_reply_is_pending(tmp_path: Path) -> None:

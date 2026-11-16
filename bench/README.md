@@ -8,8 +8,8 @@ Throughput benchmarks run as an integrator, through Privana's public API, the Py
 
 1. **Funding, one after another**: the funder sends each player `--amount`.
 2. **Locks, all at once**: every player signs a lock of that amount for the service, and all N go out together.
-3. **Settles, all at once**: the service reads its lock ids with a signed query, signs one settle per lock at consecutive nonces and sends them together. Privana accepts only the current nonce, so one lands and the rest are refused.
-4. **Settles, one after another**: each refused settle goes out again, the same signed write, once the previous one landed.
+3. **Settles, in nonce order without waiting**: the service reads its lock ids with a signed query, signs one settle per lock at consecutive nonces and sends them in that order, `--settle-gap` apart (default 0.25 s), without waiting for replies. Privana's signer lands at most 10 writes a block, so a shorter gap lands nothing faster and holds the order less often. Each settle goes out on its own connection, opened 3 s before: a new connection takes a TLS handshake, long enough to swap settles sent this close, and the SDK closes a connection that sat idle for 5 s. The contract takes a service's settles in nonce order only, so a settle that overtakes an earlier one reverts and so does every later one.
+4. **Settles, one after another**: each settle that did not land goes out again, the same signed write, once the previous one landed.
 
 PASS means all N locks landed, resent or not, and were settled, and the funder's balance ended where it started.
 
@@ -17,9 +17,11 @@ PASS means all N locks landed, resent or not, and were settled, and the funder's
 
 `privana-bench transfers --n N`: wallet index 0 sends N transfers of `--amount` to index 1, one after another. PASS means all N landed and both balances moved by exactly N × amount.
 
+Privana takes 10 transfers a minute and 100 a day from one caller. Transfers, here and in the funding of a locks run, go out at least `--transfer-gap` apart (default 7 s), and one funder funds at most 100 players a day, resends included.
+
 ## How a write is judged
 
-Each write is saved to the run's journal and signed at its wallet's next nonce. A try whose connection never opens sends nothing, so the same signed write goes out again, up to 3 tries. One after another, a write whose reply was lost also goes out again while its nonce still shows unused 30 s after the last try, up to 3 times: the proxy can cut a request before it reaches Privana, and a nonce takes one write, so at most one copy lands. Locks sent all at once queue behind Privana's one signer, so a lost reply proves nothing while others still land. Each time no lock has landed or been answered for 90 s, every lock whose reply was lost and whose nonce still shows unused goes out again, until `--max-wait`: Privana waits up to 10 minutes on a write and joins a resend to that wait, so only a later resend submits again. A 4xx reply to a resend is the lock's reply. Settles sent all at once go out once each. No write is re-signed at another nonce. One after another means each write waits for the previous one to land, and the run stops at the first that does not.
+Each write is saved to the run's journal and signed at its wallet's next nonce. A try whose connection never opens sends nothing, so the same signed write goes out again, up to 3 tries. One after another, a write whose reply was lost also goes out again while its nonce still shows unused 30 s after the last try, up to 3 times: the proxy can cut a request before it reaches Privana, and a nonce takes one write, so at most one copy lands. Locks sent all at once queue behind Privana's one signer, so a lost reply proves nothing while others still land. Each time no lock has landed or been answered for 90 s, every lock whose reply was lost and whose nonce still shows unused goes out again, until `--max-wait`: Privana waits up to 10 minutes on a write and joins a resend to that wait, so only a later resend submits again. A 4xx reply to a resend is the lock's reply. Settles sent in nonce order without waiting go out once each. No write is re-signed at another nonce. One after another means each write waits for the previous one to land, and the run stops at the first that does not.
 
 Each write ends as one of:
 
@@ -50,10 +52,10 @@ Use the mnemonic only for benchmarks and run one benchmark at a time, since a no
 `.env.localnet` holds the settings for the stack that `compose.localnet.yaml` starts (see [Running Locally](../src/README.md#running-locally)), so a run there needs no mnemonic and no funds:
 
 ```sh
-uv run privana-bench --env-file .env.localnet locks --n 10 --live
+uv run privana-bench --env-file .env.localnet locks --n 10 --transfer-gap 0 --live
 ```
 
-Its `BENCH_FUNDER_INDEX=1` moves the two wallets to indices 1 and 2, the stack's funded accounts.
+Its `BENCH_FUNDER_INDEX=1` moves the two wallets to indices 1 and 2, the stack's funded accounts. The stack exempts index 1 from the transfer limit, so `--transfer-gap 0` drops the wait.
 
 A new stack starts every nonce at 0 again. If an earlier localnet run left a write unresolved, move its run folder out of `results/` first.
 
@@ -69,7 +71,7 @@ uv run privana-bench locks --n 10 --live      # logs in the funder and sends
 
 Preflight checks the chain, the contract's EIP-712 domain, the token and that the sender's nonce on chain matches the API's. `--live` logs in with SIWE, since balances are private. `--help` lists the options.
 
-A locks run with N = 100 sends about 300 writes through Privana's one signer over nearly an hour, and other staging users queue behind them.
+A locks run with N = 100 sends about 300 writes through Privana's one signer, and other staging users queue behind them. Funding 100 players takes over 11 minutes at the default `--transfer-gap`.
 
 Each run writes `results/<UTC time>-<benchmark>/` with `report.md`, `report.json` and its journals. A locks report shows per phase how many writes landed without a resend, next to how many landed in all. Its table covers every landing, so a phase with resends includes their waits. A journal holds the setup, then a line before each send and one with its outcome: nonces, times and replies, never keys, signatures or login tokens. `results/` stays out of git.
 

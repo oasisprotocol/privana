@@ -23,7 +23,7 @@ from .chain import Chain, ChainError, host_of
 from .config import ENV_FILE, NETWORKS, Config, ConfigError, PreflightError, load, wallets
 from .privana import SDK_TIMEOUT_S, LoginError, Privana, Reply, safe_detail
 from .report import Balances, summarize, write_report
-from .transfers import Journal, Transfer, check_settled, run_transfers
+from .transfers import TRANSFER_GAP_S, Journal, Transfer, check_settled, run_transfers
 
 BENCH_DIR = Path(__file__).resolve().parents[2]
 RESULTS = BENCH_DIR / "results"
@@ -171,6 +171,7 @@ async def _live_transfers(
         "pattern": "serial, each sent after the previous reply and its nonce showing used",
         "poll_s": args.poll,
         "max_wait_s": args.max_wait,
+        "transfer_gap_s": args.transfer_gap,
     }
 
     async def send(nonce: int) -> Reply:
@@ -199,6 +200,7 @@ async def _live_transfers(
             args.poll,
             args.max_wait,
             progress=_progress,
+            min_gap_s=args.transfer_gap,
         )
         await asyncio.sleep(BALANCE_SETTLE_S)
         balances = Balances(
@@ -229,13 +231,21 @@ async def _locks(
     print(
         f"Locks: the funder sends each player {args.amount} {facts.symbol}, one after another. "
         "The players lock it for the service, all at once. The service settles the locks "
-        "back to the funder, all at once and then the rest one after another."
+        f"back to the funder, in nonce order {args.settle_gap} s apart, and then the rest "
+        "one after another."
     )
     if not args.live:
         print("Dry run, nothing sent. Add --live to log in the funder and send.")
         return 0
     meta = locks.describe(cfg, plan, args, facts.network, facts.version, facts.symbol, _commit())
     return await locks.run(cfg, args, chain, privana, plan, amount, meta, RESULTS)
+
+
+def _gap(text: str) -> float:
+    gap = float(text)
+    if not gap >= 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return gap
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -270,7 +280,21 @@ def main(argv: list[str] | None = None) -> int:
         default=1800.0,
         help="seconds before a write counts as unresolved, at least 90 (default 1800)",
     )
+    lk.add_argument(
+        "--settle-gap",
+        type=_gap,
+        default=0.25,
+        help="seconds between the settles (default 0.25: Privana's signer lands at most 10 "
+        "writes a block, so a shorter gap only risks their order)",
+    )
     lk.add_argument("--live", action="store_true", help="log in and send; otherwise a dry run")
+    for command in (tr, lk):
+        command.add_argument(
+            "--transfer-gap",
+            type=_gap,
+            default=TRANSFER_GAP_S,
+            help="seconds between transfers (default 7, under Privana's 10 a minute per caller)",
+        )
     args = parser.parse_args(argv)
     most = {"transfers": 1000, "locks": 100}.get(args.command)
     if most and not (1 <= args.n <= most and args.poll > 0 and args.max_wait >= SDK_TIMEOUT_S):

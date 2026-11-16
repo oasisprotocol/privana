@@ -50,6 +50,9 @@ SIWE_TTL_S = 23 * 3600
 NEVER_SENT = "never sent: ConnectError"
 CONNECT_TRIES = 3
 CONNECT_RETRY_S = 2.0
+# A write goes out this long after its connection began to open. The SDK's client closes
+# a connection that sat idle for 5 s.
+OPEN_S = 3.0
 
 ReplyKind = Literal["ok", "refused", "unknown"]
 
@@ -215,6 +218,21 @@ class Privana:
                 f"login {account.address}: {exc.status_code} {safe_detail(exc.detail)}{hint}"
             ) from None
 
+    def _own(self, address: str, nonce: int) -> PrivanaClient:
+        """The client that only `address`'s write at `nonce` uses, so it has its own connection."""
+        return self.client(f"{address}/{nonce}")
+
+    async def open_connection(self, address: str, nonce: int) -> bool:
+        """Open the connection for `address`'s write at `nonce`, and return whether it
+        opened within OPEN_S. A new connection takes a TLS handshake, long enough to swap
+        writes sent a second apart."""
+        try:
+            # Privana answers this read from its settings.
+            await asyncio.wait_for(self._own(address, nonce).get_siwe_domain(), OPEN_S)
+        except Exception:
+            return False
+        return True
+
     async def transfer_locked_nonce(self, service: str) -> int:
         return int((await self.client("public").get_transfer_locked_nonce(service)).nonce)
 
@@ -284,8 +302,10 @@ class Privana:
         lock_id: int,
         amount: int,
         nonce: int,
+        own_connection: bool = False,
     ) -> Reply:
-        """Sign, as the service, a move of `amount` from `user`'s lock to `to`, and send it once."""
+        """Sign, as the service, a move of `amount` from `user`'s lock to `to`, and send it
+        once, with `own_connection` on the connection opened for its nonce."""
         message = TransferLockedMessage(
             user_address=user,
             to_address=to,
@@ -309,4 +329,6 @@ class Privana:
             nonce=nonce,
             signature=sign_transfer_locked_message(params),
         )
-        return await submit(lambda: self.client(service.address).transfer_locked_funds(request))
+        sender = service.address
+        client = self._own(sender, nonce) if own_connection else self.client(sender)
+        return await submit(lambda: client.transfer_locked_funds(request))

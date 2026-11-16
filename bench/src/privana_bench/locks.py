@@ -1,6 +1,6 @@
 """Locks: N players each lock funds for one service, all at once. The service
-then settles every lock back to the funder, first all at once, then the rest
-one after another.
+then settles every lock back to the funder, first in nonce order a gap apart
+without waiting for replies, then the rest one after another.
 
 Wallets come from BENCH_MNEMONIC. Index BENCH_FUNDER_INDEX, 0 unless set, funds
 the players and gets the settled funds back, and the next index is the service.
@@ -28,7 +28,7 @@ from eth_account.signers.local import LocalAccount
 
 from .chain import Chain, host_of
 from .config import Config, PreflightError, indexed_wallets, wallets
-from .privana import Privana, Reply
+from .privana import OPEN_S, Privana, Reply
 from .transfers import (
     REFUSED_WAIT_S,
     Journal,
@@ -50,7 +50,7 @@ SETTLE_NONCES = "transferLockedNonces"
 PHASES = {
     "funding": "Funding, one after another",
     "locks": "Locks, all at once",
-    "settles at once": "Settles, all at once",
+    "settles in order": "Settles, in nonce order without waiting",
     "settles": "Settles, one after another",
 }
 
@@ -93,19 +93,28 @@ async def burst(
     refused_wait_s: float,
     journal: Journal | None = None,
     quiet_s: float | None = None,
+    gap_s: float = 0.0,
+    open_first: Callable[[Action], Awaitable[object]] | None = None,
 ) -> None:
     """Send every action at once and read their wallets' nonces until each
     landed or was refused `refused_wait_s` ago, or until `max_wait_s` passed.
     Anything else stays unresolved: it can still land.
 
+    With `gap_s`: action i goes out `i * gap_s` after the start, in list order,
+    never waiting for an earlier reply.
+
+    With `open_first`: it starts for each action OPEN_S before the action goes
+    out, so the first one goes out OPEN_S after the start.
+
     With `quiet_s`: each time none has landed or been answered for that long,
     every action whose reply was lost goes out again, the same signed write.
     A resend that Privana refuses is the action's reply."""
+    lead = OPEN_S if open_first is not None else 0.0
     start = time.time()
-    for a in actions:
-        a.due_at = start
+    for i, a in enumerate(actions):
+        a.due_at = start + lead + i * gap_s
         if journal is not None:
-            journal.write("send", k=a.k, nonce=a.nonce, wallet=a.wallet, due_at=start)
+            journal.write("send", k=a.k, nonce=a.nonce, wallet=a.wallet, due_at=a.due_at)
 
     async def reply_to(a: Action) -> Reply:
         try:
@@ -114,6 +123,12 @@ async def burst(
             return Reply("unknown", None, type(exc).__name__)
 
     async def one(a: Action) -> None:
+        # Counted from the task's start, so time spent on the journal shortens no gap.
+        await asyncio.sleep(a.due_at - lead - start)
+        if open_first is not None:
+            began = time.monotonic()
+            await open_first(a)
+            await asyncio.sleep(began + lead - time.monotonic())
         a.sent_at = time.time()
         a.reply = await reply_to(a)
         a.reply_at = time.time()
@@ -309,6 +324,7 @@ async def _phases(
             args.poll,
             args.max_wait,
             progress=_progress,
+            min_gap_s=args.transfer_gap,
         )
     finally:
         journal.close()
@@ -355,37 +371,55 @@ async def _phases(
     _, settle_nonces = await chain.nonces(SETTLE_NONCES, [p.service.address])
     if settle_nonces[p.service.address] != p.service_nonce:
         return "stopped after locking: the service's settle nonce moved, so another signer uses it"
-    print(f"Settling: {len(targets)} locks at once, at consecutive nonces.")
-    at_once = [
+    print(
+        f"Settling: {len(targets)} locks in nonce order, {args.settle_gap} s apart, "
+        f"each on a connection opened {OPEN_S:g} s before."
+    )
+    in_order = [
         Action(i, p.service_nonce + i, 0.0, wallet=p.service.address) for i in range(len(targets))
     ]
-    phases["settles at once"] = at_once
-    journal = Journal(run_dir / "settles-at-once.jsonl")
+    phases["settles in order"] = in_order
+    journal = Journal(run_dir / "settles-in-order.jsonl")
     journal.write("start", **{**meta, "sender": p.service.address})
+
+    async def open_first(a: Action) -> None:
+        opened = await privana.open_connection(p.service.address, a.nonce)
+        journal.write("open", k=a.k, nonce=a.nonce, opened=opened)
+        if not opened:
+            print(f"  settle {a.k + 1}: no open connection in time, so it opens a new one")
+
     try:
         await burst(
-            at_once,
+            in_order,
             lambda a: privana.settle(
-                p.service, targets[a.k][0], p.funder.address, targets[a.k][1], amount, a.nonce
+                p.service,
+                targets[a.k][0],
+                p.funder.address,
+                targets[a.k][1],
+                amount,
+                a.nonce,
+                own_connection=True,
             ),
             lambda w: chain.nonces(SETTLE_NONCES, w),
             args.poll,
             args.max_wait,
             REFUSED_WAIT_S,
             journal,
+            gap_s=args.settle_gap,
+            open_first=open_first,
         )
     finally:
         journal.close()
-    if any(a.outcome == "unresolved" for a in at_once):
-        return "stopped after the settles at once: one can still land and would take a nonce"
+    if any(a.outcome == "unresolved" for a in in_order):
+        return "stopped after the settles in order: one can still land and would take a nonce"
 
-    rest = [targets[a.k] for a in at_once if a.outcome != "landed"]
+    rest = [targets[a.k] for a in in_order if a.outcome != "landed"]
     ended = "completed"
     if rest:
         print(f"Settling the other {len(rest)} one after another.")
         # The landed settles took the burst's first nonces, so each of the rest goes out
         # again at its burst nonce, the same signed write.
-        start = p.service_nonce + len(at_once) - len(rest)
+        start = p.service_nonce + len(in_order) - len(rest)
 
         async def settle(nonce: int) -> Reply:
             user, lock_id = rest[nonce - start]
@@ -431,7 +465,7 @@ async def _check(
     def landed(name: str) -> int:
         return sum(t.outcome == "landed" for t in phases[name])
 
-    expected = amount * (landed("settles at once") + landed("settles") - landed("funding"))
+    expected = amount * (landed("settles in order") + landed("settles") - landed("funding"))
     moved = await privana.balance(p.funder, cfg.token_id) - before
     return (
         "ok"
@@ -598,4 +632,6 @@ def describe(
         "chain_rpc": host_of(cfg.rpc_url),
         "poll_s": args.poll,
         "max_wait_s": args.max_wait,
+        "transfer_gap_s": args.transfer_gap,
+        "settle_gap_s": args.settle_gap,
     }

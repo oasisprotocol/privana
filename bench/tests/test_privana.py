@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +24,7 @@ class FakeClient:
     """Stands in for the SDK's PrivanaClient."""
 
     instances: list[FakeClient] = []
+    settles: list[FakeClient] = []  # the client each settle went out on
     transfer_error: Exception | None = None
     first_errors: list[Exception] = []  # raised once each, before transfer_error
     login_error: Exception | None = None
@@ -50,6 +52,9 @@ class FakeClient:
         if error or FakeClient.transfer_error:
             raise error or FakeClient.transfer_error  # type: ignore[misc]
 
+    async def transfer_locked_funds(self, request: Any) -> None:
+        FakeClient.settles.append(self)
+
     async def list_tokens(self) -> Any:
         token = SimpleNamespace(
             token_id=TOKEN.upper().replace("0X", "0x"), decimals=6, symbol="USDC"
@@ -60,6 +65,7 @@ class FakeClient:
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch) -> Privana:
     FakeClient.instances = []
+    FakeClient.settles = []
     FakeClient.transfer_error = None
     FakeClient.first_errors = []
     FakeClient.login_error = None
@@ -213,6 +219,36 @@ async def test_login_rate_limit_is_explained(api: Privana) -> None:
     FakeClient.login_error = AccountingApiError("x", 429, "Too many requests")
     with pytest.raises(LoginError, match="10 per minute"):
         await api.login(sender, 1_800_000_000)
+
+
+async def test_a_settle_goes_out_on_the_connection_opened_for_its_nonce(api: Privana) -> None:
+    service, user = wallets(MNEMONIC)
+    assert await api.open_connection(service.address, 7)
+    (opened,) = FakeClient.instances
+    for own in (True, False):
+        await api.settle(service, user.address, user.address, 1, 1, 7, own_connection=own)
+    shared = FakeClient.instances[1]
+    assert FakeClient.settles == [opened, shared]  # the same client only for its own nonce
+    assert await api.open_connection(service.address, 8)
+    assert len(FakeClient.instances) == 3  # another nonce, another connection
+
+
+async def test_a_connection_that_does_not_open_in_time_is_reported(
+    api: Privana, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = wallets(MNEMONIC)
+    monkeypatch.setattr(module, "OPEN_S", 0.05)
+
+    async def slow() -> None:
+        await asyncio.sleep(2)  # still opening when the wait ends
+
+    async def down() -> None:
+        raise NetworkError("no connection", httpx.ConnectError("x"))
+
+    monkeypatch.setattr(FakeClient, "get_siwe_domain", staticmethod(slow))
+    assert not await api.open_connection(service.address, 0)
+    monkeypatch.setattr(FakeClient, "get_siwe_domain", staticmethod(down))
+    assert not await api.open_connection(service.address, 1)
 
 
 async def test_token_lookup(api: Privana) -> None:

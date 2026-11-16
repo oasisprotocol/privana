@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 
@@ -137,7 +138,13 @@ class LiveApi(FakeApi):
 
 def transfers_args(live: bool) -> argparse.Namespace:
     return argparse.Namespace(
-        command="transfers", n=3, amount="0.01", poll=0.01, max_wait=90.0, live=live
+        command="transfers",
+        n=3,
+        amount="0.01",
+        poll=0.01,
+        max_wait=90.0,
+        transfer_gap=0.0,
+        live=live,
     )
 
 
@@ -173,13 +180,18 @@ async def test_live_run_end_to_end(results: Path, monkeypatch: pytest.MonkeyPatc
     sender, receiver = wallets(MNEMONIC)
     api = LiveApi(held={sender.address: 100_000})
     monkeypatch.setattr(cli, "Privana", lambda *args: api)
-    assert await cli.run(CFG, transfers_args(live=True)) == 0
+    args = transfers_args(live=True)
+    args.transfer_gap = 0.05
+    assert await cli.run(CFG, args) == 0
     assert api.calls == ["login", "login", *["sign", "transfer"] * 3]
     assert api.held == {sender.address: 70_000, receiver.address: 30_000}
     (run_dir,) = results.iterdir()
     journal = (run_dir / "journal.jsonl").read_text()
-    start = json.loads(journal.splitlines()[0])
+    start, *records = (json.loads(line) for line in journal.splitlines())
     assert (start["event"], start["benchmark"], start["token_id"]) == ("start", "transfers", TOKEN)
+    due = [r["due_at"] for r in records if r["event"] == "send"]
+    # The loop's clock is not time.time(), so allow a little.
+    assert all(later - earlier >= 0.04 for earlier, later in pairwise(due))
     assert (run_dir / "report.md").read_text().startswith("# Transfers, N = 3: PASS")
     for text in (journal, (run_dir / "report.json").read_text()):
         assert "5" * 130 not in text and "junk" not in text
@@ -206,7 +218,12 @@ async def test_unresolved_earlier_transfer_blocks_the_run(
 
 @pytest.mark.parametrize(
     "argv",
-    [["transfers", "--max-wait", "30"], ["transfers", "--n", "0"], ["transfers", "--poll", "0"]],
+    [
+        ["transfers", "--max-wait", "30"],
+        ["transfers", "--n", "0"],
+        ["transfers", "--poll", "0"],
+        ["locks", "--settle-gap", "-1"],
+    ],
 )
 def test_bad_options_stop_before_anything_runs(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:

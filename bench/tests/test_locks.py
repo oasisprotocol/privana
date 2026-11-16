@@ -14,7 +14,7 @@ from privana_bench import cli, locks
 from privana_bench.config import Config, PreflightError, indexed_wallets, wallets
 from privana_bench.locks import Action, burst, summarize
 from privana_bench.privana import NEVER_SENT, Reply
-from privana_bench.transfers import Journal, unsettled
+from privana_bench.transfers import Journal, run_transfers, unsettled
 
 MNEMONIC = "test test test test test test test test test test test junk"
 ACCOUNTING = "0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f"
@@ -34,6 +34,8 @@ class World:
     next_lock: int = 1
     block: int = 100
     calls: list[str] = field(default_factory=list)
+    opened: list[int] = field(default_factory=list)  # nonces with a connection opened for them
+    own: list[int] = field(default_factory=list)  # nonces of the settles sent on their own one
     network: str = "testnet"
 
     def nonce(self, getter: str, address: str) -> int:
@@ -104,10 +106,19 @@ class World:
         return Reply("ok", 200)
 
     async def settle(
-        self, service: Any, user: str, to: str, lock_id: int, amount: int, nonce: int
+        self,
+        service: Any,
+        user: str,
+        to: str,
+        lock_id: int,
+        amount: int,
+        nonce: int,
+        own_connection: bool = False,
     ) -> Reply:
         self.calls.append("settle")
-        # Privana checks the nonce before the signer queues the write, as here.
+        if own_connection:
+            self.own.append(nonce)
+        # The contract takes the current nonce only, so any other settle reverts.
         if nonce != self.nonce("transferLockedNonces", service.address):
             return Reply("refused", 400, "transferFromLock nonce mismatch")
         await asyncio.sleep(0.01)
@@ -115,6 +126,12 @@ class World:
         self.held[to] = self.held.get(to, 0) + amount
         self.step("transferLockedNonces", service.address)
         return Reply("ok", 200)
+
+    async def open_connection(self, address: str, nonce: int) -> bool:
+        assert address == SERVICE
+        self.calls.append("open")
+        self.opened.append(nonce)
+        return True
 
     async def close(self) -> None:
         pass
@@ -130,7 +147,14 @@ class FakeChain:
 
 def locks_args(live: bool, n: int = 3) -> argparse.Namespace:
     return argparse.Namespace(
-        command="locks", n=n, amount="0.01", poll=0.01, max_wait=90.0, live=live
+        command="locks",
+        n=n,
+        amount="0.01",
+        poll=0.01,
+        max_wait=90.0,
+        transfer_gap=0.0,
+        settle_gap=0.0,
+        live=live,
     )
 
 
@@ -141,6 +165,7 @@ def world(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> World:
     monkeypatch.setattr(cli, "Chain", lambda *args: FakeChain(w))
     monkeypatch.setattr(cli, "Privana", lambda *args: w)
     monkeypatch.setattr(locks, "SETTLE_S", 0.0)
+    monkeypatch.setattr(locks, "OPEN_S", 0.0)
     monkeypatch.setattr(locks, "REFUSED_WAIT_S", 0.05)
     return w
 
@@ -162,6 +187,10 @@ async def test_players_that_locked_before_stop_the_run(world: World) -> None:
 async def test_live_run_end_to_end(world: World, tmp_path: Path) -> None:
     assert await cli.run(CFG, locks_args(live=True)) == 0
     assert world.calls[:4] == ["login", "transfer", "transfer", "transfer"]
+    # Each settle of the ordered burst goes out on a connection opened for it. The two
+    # that the fake refuses go out again one after another, on the service's shared one.
+    assert world.calls[4:] == ["lock"] * 3 + ["open"] * 3 + ["settle"] * 5
+    assert world.opened == world.own == [0, 1, 2]
     assert world.held[FUNDER] == 100_000  # every lock settled back to the funder
     assert all(not found for found in world.locks.values())
 
@@ -169,17 +198,49 @@ async def test_live_run_end_to_end(world: World, tmp_path: Path) -> None:
     report = json.loads((run_dir / "report.json").read_text())
     assert (report["ended"], report["money_check"]) == ("completed", "ok")
     landed = {name: s["landed"] for name, s in report["summary"].items()}
-    assert landed == {"funding": 3, "locks": 3, "settles at once": 1, "settles": 2}
-    assert report["summary"]["settles at once"]["refused"] == 2
+    assert landed == {"funding": 3, "locks": 3, "settles in order": 1, "settles": 2}
+    assert report["summary"]["settles in order"]["refused"] == 2
     assert all(a["block"] for a in report["phases"]["locks"])  # where each was first seen
     assert (run_dir / "report.md").read_text().startswith("# Locks, N = 3: PASS")
     for path in run_dir.iterdir():
         text = path.read_text()
         assert "5" * 130 not in text and "junk" not in text
+    journal = (run_dir / "settles-in-order.jsonl").read_text().splitlines()
+    opens = [r for r in map(json.loads, journal) if r["event"] == "open"]
+    assert [(r["nonce"], r["opened"]) for r in opens] == [(0, True), (1, True), (2, True)]
     # The lock journal names no sender, so the earlier-run guard skips it.
     assert (run_dir / "locks.jsonl").exists()
     assert unsettled(tmp_path, FUNDER, ACCOUNTING, 0) == []
     assert unsettled(tmp_path, SERVICE, ACCOUNTING, 0) == []
+
+
+def test_settles_at_the_default_gap_all_land_in_the_burst(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "load", lambda path: CFG)
+    argv = ["locks", "--n", "3", "--poll", "0.01", "--max-wait", "90", "--transfer-gap", "0"]
+    assert cli.main([*argv, "--live"]) == 0
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert report["meta"]["settle_gap_s"] == 0.25
+    landed = {name: s["landed"] for name, s in report["summary"].items()}
+    assert landed == {"funding": 3, "locks": 3, "settles in order": 3}
+
+
+async def test_the_funding_is_paced_and_the_serial_settles_are_not(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paced = locks_args(live=True)
+    paced.transfer_gap = 0.01
+    gaps: list[float] = []
+
+    async def recorded(*args: Any, **kwargs: Any) -> str:
+        gaps.append(kwargs.get("min_gap_s", 0.0))
+        return await run_transfers(*args, **kwargs)
+
+    monkeypatch.setattr(locks, "run_transfers", recorded)
+    assert await cli.run(CFG, paced) == 0
+    assert gaps == [0.01, 0.0]  # the funding, then the settles one after another
 
 
 @pytest.mark.parametrize(
@@ -272,6 +333,77 @@ async def test_burst_outcomes(tmp_path: Path) -> None:
     assert "can still land" in actions[3].note
     events = [json.loads(line)["event"] for line in (tmp_path / "j.jsonl").read_text().splitlines()]
     assert events == ["send"] * 4 + ["outcome"] * 4
+
+
+async def test_a_burst_with_a_gap_sends_in_order_without_waiting(tmp_path: Path) -> None:
+    path = tmp_path / "j.jsonl"
+    nonce = 0
+    sent: list[tuple[int, float]] = []
+    journaled: list[int] = []
+
+    async def send(a: Action) -> Reply:
+        nonlocal nonce
+        sent.append((a.k, time.time()))
+        journaled.append(len(path.read_text().splitlines()))
+        if a.nonce == nonce:  # one wallet's writes land in nonce order only
+            nonce += 1
+        await asyncio.sleep(0.5)  # every reply comes back after the last send
+        return Reply("ok", 200)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        return 7, {w: nonce for w in wallets}
+
+    actions = [Action(k, k, 0.0, wallet="0xS") for k in range(3)]
+    journal = Journal(path)
+    await burst(
+        actions,
+        send,
+        read,
+        poll_s=0.01,
+        max_wait_s=2.0,
+        refused_wait_s=0.02,
+        journal=journal,
+        gap_s=0.05,
+    )
+    journal.close()
+    assert [k for k, _ in sent] == [0, 1, 2]
+    assert [a.outcome for a in actions] == ["landed"] * 3
+    assert [a.due_at - actions[0].due_at for a in actions] == pytest.approx([0.0, 0.05, 0.1])
+    # The loop's clock is not time.time(), so allow a little.
+    assert all(a.sent_at >= a.due_at - 0.01 for a in actions)
+    assert sent[-1][1] < actions[0].reply_at
+    assert journaled == [3, 3, 3]  # every send line is on disk before the first send
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["due_at"] for r in records[:3]] == [a.due_at for a in actions]
+
+
+async def test_a_burst_opens_each_action_first_and_keeps_the_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(locks, "OPEN_S", 0.2)
+    nonce = 0
+    began: dict[int, float] = {}
+    sent: dict[int, float] = {}
+
+    async def open_first(a: Action) -> None:
+        began[a.k] = time.time()
+        await asyncio.sleep(0.15 if a.k == 1 else 0.01)  # one opens slower than the others
+
+    async def send(a: Action) -> Reply:
+        nonlocal nonce
+        sent[a.k] = time.time()
+        nonce += 1
+        return Reply("ok", 200)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        return 7, {w: nonce for w in wallets}
+
+    actions = [Action(k, k, 0.0, wallet="0xS") for k in range(3)]
+    await burst(actions, send, read, 0.01, 2.0, 0.02, gap_s=0.05, open_first=open_first)
+    assert [a.outcome for a in actions] == ["landed"] * 3
+    # Each goes out OPEN_S after its opening began, however long the opening took.
+    assert all(sent[k] - began[k] == pytest.approx(0.2, abs=0.03) for k in range(3))
+    assert [sent[k + 1] - sent[k] for k in range(2)] == pytest.approx([0.05, 0.05], abs=0.03)
 
 
 async def test_a_lost_write_goes_out_again_once_the_burst_is_quiet(tmp_path: Path) -> None:
