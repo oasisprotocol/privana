@@ -223,6 +223,8 @@ async def test_unresolved_earlier_transfer_blocks_the_run(
         ["transfers", "--n", "0"],
         ["transfers", "--poll", "0"],
         ["locks", "--settle-gap", "-1"],
+        ["sessions", "--per-minute", "0"],
+        ["sessions", "--n", "101"],
     ],
 )
 def test_bad_options_stop_before_anything_runs(argv: list[str]) -> None:

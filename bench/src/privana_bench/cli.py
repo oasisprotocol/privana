@@ -1,5 +1,5 @@
-"""privana-bench: a read-only preflight, and the transfers and locks benchmarks, which send
-only with --live."""
+"""privana-bench: a read-only preflight, and the transfers, locks and sessions benchmarks,
+which send only with --live."""
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ async def run(cfg: Config, args: argparse.Namespace) -> int:
         privana = Privana(cfg.api_url, cfg.accounting, await chain.chain_id())
         try:
             facts = await preflight(cfg, chain, privana, sender)
-            if args.command == "locks":
+            if args.command in ("locks", "sessions"):
                 return await _locks(cfg, args, chain, privana, facts)
             print(
                 f"{facts.network}, Accounting {cfg.accounting} VERSION {facts.version}, "
@@ -220,20 +220,44 @@ async def _live_transfers(
 async def _locks(
     cfg: Config, args: argparse.Namespace, chain: Chain, privana: Privana, facts: Facts
 ) -> int:
-    plan = await locks.plan(cfg, chain, privana, facts.nonce, args.n, args.amount, RESULTS)
+    plan = await locks.plan(
+        cfg, chain, privana, facts.nonce, args.n, args.amount, RESULTS, args.funded
+    )
     print(
         f"{facts.network}, Accounting {cfg.accounting} VERSION {facts.version}. "
         f"Funder {plan.funder.address} at transfer nonce {plan.funder_nonce}, service "
-        f"{plan.service.address} at settle nonce {plan.service_nonce}, {args.n} new players "
+        f"{plan.service.address} at settle nonce {plan.service_nonce}, {args.n} "
+        f"{'funded' if args.funded else 'new'} players "
         f"{plan.players[0].address} to {plan.players[-1].address}."
     )
     amount = to_units(args.amount, facts.decimals)
-    print(
-        f"Locks: the funder sends each player {args.amount} {facts.symbol}, one after another. "
-        "The players lock it for the service, all at once. The service settles the locks "
-        f"back to the funder, in nonce order {args.settle_gap} s apart, and then the rest "
-        "one after another."
+    funding = (
+        "an earlier run sent each player its amount, so this one funds nothing"
+        if args.funded
+        else f"the funder sends each player {args.amount} {facts.symbol}, one after another"
     )
+    if args.command == "sessions":
+        last = locks.session_starts(args.n, args.per_minute)[-1]
+        # The last session's money has until the limit to be back.
+        if last + args.play + locks.MONEY_BACK_S[-1] > args.max_wait:
+            raise PreflightError(
+                f"the last session starts after {last:.0f} s, so --max-wait {args.max_wait:g} "
+                "ends the watch too early"
+            )
+        print(
+            f"Sessions: {funding}. The players lock "
+            f"{args.amount} {facts.symbol} for the service as sessions start, {args.per_minute:g} "
+            f"a minute at random, the last after {last:.0f} s. The service settles each lock back "
+            f"to the funder {args.play:g} s after it landed, in nonce order at least "
+            f"{args.settle_gap} s apart, and then the rest one after another."
+        )
+    else:
+        print(
+            f"Locks: {funding}. The players lock "
+            f"{args.amount} {facts.symbol} for the service, all at once. The service settles the "
+            f"locks back to the funder, in nonce order {args.settle_gap} s apart, and then the "
+            "rest one after another."
+        )
     if not args.live:
         print("Dry run, nothing sent. Add --live to log in the funder and send.")
         return 0
@@ -246,6 +270,13 @@ def _gap(text: str) -> float:
     if not gap >= 0:
         raise argparse.ArgumentTypeError("must be 0 or more")
     return gap
+
+
+def _rate(text: str) -> float:
+    rate = float(text)
+    if not rate > 0:
+        raise argparse.ArgumentTypeError("must be above 0")
+    return rate
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -269,26 +300,55 @@ def main(argv: list[str] | None = None) -> int:
     )
     tr.add_argument("--live", action="store_true", help="log in and send; otherwise a dry run")
     lk = commands.add_parser("locks", help="N players lock for one service, which settles them")
-    lk.add_argument("--n", type=int, default=10, help="number of players, up to 100 (default 10)")
-    lk.add_argument("--amount", default="0.01", help="token amount per player (default 0.01)")
-    lk.add_argument(
-        "--poll", type=float, default=2.0, help="seconds between nonce reads (default 2)"
+    ss = commands.add_parser(
+        "sessions", help="N players lock and are settled at the pace of real traffic"
     )
-    lk.add_argument(
-        "--max-wait",
-        type=float,
-        default=1800.0,
-        help="seconds before a write counts as unresolved, at least 90 (default 1800)",
+    for command in (lk, ss):
+        command.add_argument(
+            "--n", type=int, default=10, help="number of players, up to 100 (default 10)"
+        )
+        command.add_argument(
+            "--amount", default="0.01", help="token amount per player (default 0.01)"
+        )
+        command.add_argument(
+            "--poll", type=float, default=2.0, help="seconds between nonce reads (default 2)"
+        )
+        command.add_argument(
+            "--max-wait",
+            type=float,
+            default=1800.0,
+            help="seconds before a write counts as unresolved, at least 90 (default 1800)",
+        )
+        command.add_argument(
+            "--settle-gap",
+            type=_gap,
+            default=0.25,
+            help="seconds between the settles (default 0.25: Privana's signer lands at most 10 "
+            "writes a block, so a shorter gap only risks their order)",
+        )
+        command.add_argument(
+            "--live", action="store_true", help="log in and send; otherwise a dry run"
+        )
+        command.add_argument(
+            "--funded",
+            action="store_true",
+            help="use the last N players the funder funded, in a run that stopped before "
+            "they locked, and fund nothing",
+        )
+    ss.add_argument(
+        "--per-minute",
+        type=_rate,
+        default=10.0,
+        help="session starts a minute, at random (default 10: 100 users, 3 sessions each in "
+        "a 30 minute visit)",
     )
-    lk.add_argument(
-        "--settle-gap",
+    ss.add_argument(
+        "--play",
         type=_gap,
-        default=0.25,
-        help="seconds between the settles (default 0.25: Privana's signer lands at most 10 "
-        "writes a block, so a shorter gap only risks their order)",
+        default=30.0,
+        help="seconds from a lock landing to its session ending (default 30)",
     )
-    lk.add_argument("--live", action="store_true", help="log in and send; otherwise a dry run")
-    for command in (tr, lk):
+    for command in (tr, lk, ss):
         command.add_argument(
             "--transfer-gap",
             type=_gap,
@@ -296,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             help="seconds between transfers (default 7, under Privana's 10 a minute per caller)",
         )
     args = parser.parse_args(argv)
-    most = {"transfers": 1000, "locks": 100}.get(args.command)
+    most = {"transfers": 1000, "locks": 100, "sessions": 100}.get(args.command)
     if most and not (1 <= args.n <= most and args.poll > 0 and args.max_wait >= SDK_TIMEOUT_S):
         parser.error(
             f"--n must be 1 to {most}, --poll positive and --max-wait at least "

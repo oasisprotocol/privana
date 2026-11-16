@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,7 +16,7 @@ from privana_bench import cli, locks
 from privana_bench.config import Config, PreflightError, indexed_wallets, wallets
 from privana_bench.locks import Action, burst, summarize
 from privana_bench.privana import NEVER_SENT, Reply
-from privana_bench.transfers import Journal, run_transfers, unsettled
+from privana_bench.transfers import RESENDS, Journal, run_transfers, unsettled
 
 MNEMONIC = "test test test test test test test test test test test junk"
 ACCOUNTING = "0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f"
@@ -155,6 +157,7 @@ def locks_args(live: bool, n: int = 3) -> argparse.Namespace:
         transfer_gap=0.0,
         settle_gap=0.0,
         live=live,
+        funded=False,
     )
 
 
@@ -566,3 +569,378 @@ async def test_failed_reads_leave_a_refusal_unresolved() -> None:
     actions = [Action(0, 0, 0.0, wallet="0xA")]
     await burst(actions, send, cast(Any, read), poll_s=0.01, max_wait_s=0.1, refused_wait_s=0.01)
     assert actions[0].outcome == "unresolved"
+
+
+def sessions_args(n: int = 4) -> argparse.Namespace:
+    args = locks_args(live=True, n=n)
+    args.max_wait = 400.0
+    args.command, args.per_minute, args.play, args.settle_gap = "sessions", 600.0, 0.2, 0.03
+    return args
+
+
+async def test_sessions_settle_each_lock_while_later_ones_still_start(
+    world: World, tmp_path: Path
+) -> None:
+    assert await cli.run(CFG, sessions_args()) == 0
+    # The first settle goes out before the last lock: the two streams overlap.
+    writes = [c for c in world.calls if c in ("lock", "settle")]
+    assert writes.index("settle") < len(writes) - 1 - writes[::-1].index("lock")
+    assert world.opened == world.own == [0, 1, 2, 3]
+    assert world.held[FUNDER] == 100_000
+
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    landed = {name: s["landed"] for name, s in report["summary"].items()}
+    assert landed == {"funding": 4, "locks": 4, "settles in order": 4}
+    back = report["money_back"]
+    assert (back["sessions"], back["back"], back["within_60_s"]) == (4, 4, 4)
+    starts = [a["due_at"] for a in report["phases"]["locks"]]
+    assert starts == sorted(starts) and len(set(starts)) == 4  # one schedule, not all at once
+    # Each settle goes out a play time after its lock landed, in the order they landed.
+    landings = sorted(a["landed_at"] for a in report["phases"]["locks"])
+    settles = report["phases"]["settles in order"]
+    assert all(s["due_at"] >= at + 0.2 for s, at in zip(settles, landings, strict=True))
+    # Every settle is in the journal before it goes out, so a later run sees one left open.
+    journal = (run_dir / "settles-in-order.jsonl").read_text().splitlines()
+    sends = [r["nonce"] for r in map(json.loads, journal) if r["event"] == "send"]
+    assert sends == [0, 1, 2, 3]
+    text = (run_dir / "report.md").read_text()
+    assert text.startswith("# Sessions, N = 4: PASS")
+    assert "| Locks, as sessions start | 4 | 4 |" in text
+    assert "Money back after a session ended: 4 of 4 sessions, 4 within 1 min" in text
+    assert 0 <= back["lock_wait_median_s"] <= back["lock_wait_slowest_s"] < 5
+    assert f"Lock landed after its session started: median {back['lock_wait_median_s']} s" in text
+    assert (report["meta"]["benchmark"], report["meta"]["per_minute"]) == ("sessions", 600.0)
+    assert unsettled(tmp_path, SERVICE, ACCOUNTING, 0) == []
+    # A later run sends a sessions run's funding again, as it does a locks run's.
+    assert locks.same_funding("0.01", TOKEN)(report["meta"])
+
+
+async def test_sessions_that_end_together_are_settled_a_gap_apart(
+    world: World, tmp_path: Path
+) -> None:
+    args = sessions_args()
+    args.per_minute, args.settle_gap = 600_000.0, 0.05
+    assert await cli.run(CFG, args) == 0
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    dues = [a["due_at"] for a in report["phases"]["settles in order"]]
+    assert len(dues) == 4
+    assert all(later - earlier >= 0.05 - 1e-6 for earlier, later in pairwise(dues))
+
+
+async def test_sessions_whose_money_is_back_late_fail(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(locks, "MONEY_BACK_S", (60, 180, 0))
+    assert await cli.run(CFG, sessions_args()) == 1
+    assert world.held[FUNDER] == 100_000  # every lock was settled back, only late
+
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert report["ended"] == (
+        "slow: 4 of 4 sessions did not have their money back within 0 minutes of ending"
+    )
+    assert (run_dir / "report.md").read_text().startswith("# Sessions, N = 4: FAIL")
+
+
+def failing_settle(world: World, tries: int, status: int | None, reason: str) -> Any:
+    """`world.settle`, but the settle at nonce 1 fails on its first `tries` tries."""
+    settle, tried = world.settle, 0
+
+    async def fail_first(service: Any, user: str, *args: Any, **kwargs: Any) -> Reply:
+        nonlocal tried
+        if args[3] == 1:
+            tried += 1
+            if tried <= tries:
+                return Reply("unknown", status, reason)
+        return await settle(service, user, *args, **kwargs)
+
+    return fail_first
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (409, "transferFromLock 0xabc: submission outcome is unknown: appd replied 400: no"),
+        (None, "network: RemoteProtocolError"),
+    ],
+)
+async def test_a_settle_that_does_not_land_goes_out_again(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int | None, reason: str
+) -> None:
+    monkeypatch.setattr(world, "settle", failing_settle(world, 1, status, reason))
+    assert await asyncio.wait_for(cli.run(CFG, sessions_args()), 20) == 0
+    assert world.held[FUNDER] == 100_000
+
+    (run_dir,) = tmp_path.iterdir()
+    assert run_dir.name.endswith("-sessions")
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    ordered = report["phases"]["settles in order"]
+    # The stream itself lands all four, so nothing is left to send one after another.
+    assert [a["outcome"] for a in ordered] == ["landed"] * 4
+    assert (ordered[0]["resends"], ordered[1]["resends"]) == (0, 1)
+    assert ordered[0]["first_sent_at"] == ordered[0]["sent_at"]
+    assert ordered[1]["first_sent_at"] < ordered[1]["sent_at"]
+    assert report["phases"]["settles"] == []
+    assert report["money_back"]["back"] == 4
+    # The reply that made it go out again is kept, in the journal and in the report.
+    journal = map(json.loads, (run_dir / "settles-in-order.jsonl").read_text().splitlines())
+    resends = [r for r in journal if r["event"] == "resend"]
+    assert (resends[0]["nonce"], resends[0]["reply"]["detail"]) == (1, reason)
+    text = (run_dir / "report.md").read_text()
+    assert (
+        "Sent again with the settles behind it, after it did not land: settle 1 (nonce 1)" in text
+    )
+    assert reason in text
+
+
+async def test_settles_go_out_again_in_order_a_gap_apart_once_none_is_still_out(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settle = world.settle
+    tried: Counter[int] = Counter()
+    out: set[int] = set()
+    overlapped: list[int] = []
+
+    async def slow(service: Any, user: str, *args: Any, **kwargs: Any) -> Reply:
+        nonce = args[3]
+        overlapped.extend([nonce] * (nonce in out))
+        out.add(nonce)
+        tried[nonce] += 1
+        try:
+            if nonce == 1 and tried[1] == 1:
+                await asyncio.sleep(0.1)
+                return Reply("unknown", 409, "no")
+            if nonce == 2 and tried[2] == 1:
+                await asyncio.sleep(0.4)  # still out when the settle before it is sent again
+            return await settle(service, user, *args, **kwargs)
+        finally:
+            out.discard(nonce)
+
+    monkeypatch.setattr(world, "settle", slow)
+    args = sessions_args()
+    args.per_minute = 60_000.0  # the four sessions end together
+    assert await asyncio.wait_for(cli.run(CFG, args), 20) == 0
+    assert overlapped == []
+
+    (run_dir,) = tmp_path.iterdir()
+    journal = map(json.loads, (run_dir / "settles-in-order.jsonl").read_text().splitlines())
+    resends = [r for r in journal if r["event"] == "resend"]
+    assert [r["nonce"] for r in resends] == [1, 2, 3]
+    assert all(b["at"] - a["at"] >= 0.03 - 1e-6 for a, b in pairwise(resends))
+
+
+async def test_a_read_on_a_node_behind_does_not_send_a_landed_settle_again(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read = world.transfer_locked_nonce
+
+    async def behind(address: str) -> int:
+        return max(0, await read(address) - 1)
+
+    monkeypatch.setattr(world, "transfer_locked_nonce", behind)
+    assert await cli.run(CFG, sessions_args()) == 0
+    (run_dir,) = tmp_path.iterdir()
+    assert json.loads((run_dir / "report.json").read_text())["phases"]["settles"] == []
+
+
+def test_a_resend_does_not_shorten_the_time_from_the_first_send() -> None:
+    resent = Action(0, 0, 0.0, sent_at=100.0, first_sent_at=10.0, landed_at=110.0, resends=1)
+    assert summarize([resent])["first_send_to_last_landing_s"] == 100.0
+
+
+async def test_a_settle_that_never_lands_in_the_stream_stops_it(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reason = "transferFromLock 0xabc: submission outcome is unknown: appd replied 400: no"
+    monkeypatch.setattr(world, "settle", failing_settle(world, 1 + RESENDS, 409, reason))
+    # The stream stops on that settle, well before --max-wait.
+    assert await asyncio.wait_for(cli.run(CFG, sessions_args()), 20) == 0
+    assert world.held[FUNDER] == 100_000  # every lock was still settled back
+
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    ordered = report["phases"]["settles in order"]
+    assert [a["outcome"] for a in ordered][:2] == ["landed", "unresolved"]
+    assert (ordered[1]["resends"], ordered[1]["reply"]["detail"]) == (RESENDS, reason)
+    # Nothing behind the unused nonce lands, so the rest go out one after another,
+    # the settle at nonce 1 as the same write again.
+    assert all(a["outcome"] != "landed" for a in ordered[1:])
+    serial = report["phases"]["settles"]
+    assert [t["nonce"] for t in serial] == [1, 2, 3]
+    assert all(t["outcome"] == "landed" for t in serial)
+    back = report["money_back"]
+    assert (back["back"], back["within_60_s"]) == (4, 4)
+    # No session's money is back before the session ended.
+    assert all(a["back_at"] >= a["ended_at"] for a in report["phases"]["locks"])
+    text = (run_dir / "report.md").read_text()
+    stopped = f"The settle stream stopped after {RESENDS} resends at settle 1 (nonce 1)"
+    assert stopped in text
+
+
+async def test_a_settle_that_lands_after_the_stream_stopped_is_not_sent_again(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settle, read = world.settle, world.transfer_locked_nonce
+    lost: list[Any] = []  # the stream's tries of the settle at nonce 1, each reply lost
+    late = False
+
+    async def lose(service: Any, user: str, *args: Any, **kwargs: Any) -> Reply:
+        if args[3] == 1 and not late:
+            lost.append((service, user, *args))
+            return Reply("unknown", None, "network: RemoteProtocolError")
+        return await settle(service, user, *args, **kwargs)
+
+    async def read_after_it_landed(address: str) -> int:
+        nonlocal late
+        if len(lost) == 1 + RESENDS and not late:
+            late = True
+            await settle(*lost[-1])  # the last try lands once the stream has stopped
+        return await read(address)
+
+    monkeypatch.setattr(world, "settle", lose)
+    monkeypatch.setattr(world, "transfer_locked_nonce", read_after_it_landed)
+    assert await asyncio.wait_for(cli.run(CFG, sessions_args()), 20) == 0
+    assert world.held[FUNDER] == 100_000
+
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    ordered = report["phases"]["settles in order"]
+    assert [a["outcome"] for a in ordered][:2] == ["landed", "landed"]
+    assert ordered[1]["note"].startswith("landed after the stream stopped")
+    # Only the two behind it go out one after another.
+    assert [t["nonce"] for t in report["phases"]["settles"]] == [2, 3]
+    assert report["money_back"]["back"] == 4
+
+
+async def test_sessions_that_outlast_the_watch_stop_before_anything_is_sent(world: World) -> None:
+    args = sessions_args(n=100)
+    args.per_minute = 3.0
+    with pytest.raises(PreflightError, match="ends the watch too early"):
+        await cli.run(CFG, args)
+    assert world.calls == []
+
+
+async def test_a_burst_takes_offsets_and_later_actions() -> None:
+    nonce = 0
+    sent: list[int] = []
+
+    async def send(a: Action) -> Reply:
+        nonlocal nonce
+        sent.append(a.k)
+        nonce += 1
+        return Reply("ok", 200)
+
+    async def read(wallets: list[str]) -> tuple[int, dict[str, int]]:
+        return 7, {"0xS": nonce}
+
+    actions = [Action(k, k, 0.0, wallet="0xS") for k in range(2)]
+    late = [Action(2, 2, 0.0, wallet="0xS")]
+
+    async def more(last_read: float) -> list[Action] | None:
+        if len(actions) == 3:
+            return None if actions[2].landed_at else []
+        if actions[1].landed_at is None:
+            return []
+        late[0].due_at = time.time() + 0.05
+        return late
+
+    await burst(actions, send, read, 0.01, 2.0, 0.02, offsets=[0.1, 0.0], more=more)
+    assert sent == [1, 0, 2]
+    assert actions[0].due_at - actions[1].due_at == pytest.approx(0.1)
+    assert [a.outcome for a in actions] == ["landed"] * 3
+    assert actions[2].sent_at >= actions[2].due_at - 0.01
+
+
+async def test_players_funded_by_an_earlier_run_are_not_funded_again(
+    world: World, tmp_path: Path
+) -> None:
+    # An earlier run funded six players, the last four have not locked, and the funder
+    # holds nothing more.
+    world.nonces[("transferNonces", FUNDER)] = 6
+    world.held[FUNDER] = 0
+    for player in indexed_wallets(MNEMONIC, locks.PLAYER_INDEX + 2, 4):
+        world.held[player.address] = 10_000
+    args = sessions_args()
+    args.funded = True
+    assert await cli.run(CFG, args) == 0
+    assert "transfer" not in world.calls
+    assert world.held[FUNDER] == 40_000
+
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    first = locks.PLAYER_INDEX + 2
+    assert report["meta"]["players"] == f"indices {first} to {first + 3}"
+    assert set(report["summary"]) == {"locks", "settles in order"}
+    assert not (run_dir / "funding.jsonl").exists()
+    assert "4 players funded by an earlier run each lock" in (run_dir / "report.md").read_text()
+
+
+async def test_funded_needs_that_many_funded_players(world: World) -> None:
+    world.nonces[("transferNonces", FUNDER)] = 3
+    args = sessions_args()
+    args.funded = True
+    with pytest.raises(PreflightError, match="has funded 3 players, fewer than 4"):
+        await cli.run(CFG, args)
+    assert world.calls == []
+
+
+async def test_funded_stops_while_an_earlier_funding_can_still_land(
+    world: World, tmp_path: Path
+) -> None:
+    # The earlier run left its funding at nonce 4 unresolved. A funded run does not send
+    # that write, so it landing mid-run would move the funder's balance.
+    world.nonces[("transferNonces", FUNDER)] = 4
+    start = {"event": "start", "benchmark": "sessions", "amount": "0.01", "token_id": TOKEN}
+    start |= {"sender": FUNDER, "accounting": ACCOUNTING}
+    (tmp_path / "earlier").mkdir()
+    (tmp_path / "earlier" / "funding.jsonl").write_text(
+        json.dumps(start) + "\n" + json.dumps({"event": "send", "k": 4, "nonce": 4}) + "\n"
+    )
+    args = sessions_args()
+    args.funded = True
+    with pytest.raises(PreflightError, match="left write 4 .* at nonce 4 unresolved"):
+        await cli.run(CFG, args)
+    assert world.calls == []
+
+
+async def test_resends_behind_another_settle_do_not_use_up_a_settles_own(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settle = world.settle
+    tried: Counter[int] = Counter()
+    failed_itself = False
+
+    async def fail(service: Any, user: str, *args: Any, **kwargs: Any) -> Reply:
+        nonlocal failed_itself
+        nonce = args[3]
+        tried[nonce] += 1
+        # Nonce 1 lands on its last resend. Nonce 2 went out behind it each time, and
+        # then fails once as the first unused one.
+        itself = nonce == 2 and tried[1] > RESENDS and not failed_itself
+        if (nonce == 1 and tried[1] <= RESENDS) or itself:
+            failed_itself = failed_itself or itself
+            return Reply("unknown", 409, "no")
+        return await settle(service, user, *args, **kwargs)
+
+    monkeypatch.setattr(world, "settle", fail)
+    args = sessions_args()
+    args.per_minute = 60_000.0  # all four sessions end together, so every settle is behind
+    assert await asyncio.wait_for(cli.run(CFG, args), 20) == 0
+
+    (run_dir,) = tmp_path.iterdir()
+    report = json.loads((run_dir / "report.json").read_text())
+    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    ordered = report["phases"]["settles in order"]
+    assert [a["outcome"] for a in ordered] == ["landed"] * 4
+    assert ordered[2]["resends"] == RESENDS + 1
+    # The stream sent nonce 2 again instead of stopping on it.
+    assert "stream_stopped" not in report["meta"]
+    assert report["phases"]["settles"] == []
+    assert "sent_again" not in (run_dir / "report.md").read_text()

@@ -2,6 +2,10 @@
 then settles every lock back to the funder, first in nonce order a gap apart
 without waiting for replies, then the rest one after another.
 
+Sessions: the same writes at the pace of real traffic. The locks go out at random
+session starts, and the service settles each lock a play time after it landed,
+while later sessions still start.
+
 Wallets come from BENCH_MNEMONIC. Index BENCH_FUNDER_INDEX, 0 unless set, funds
 the players and gets the settled funds back, and the next index is the service.
 The players are new each run: they start at index 1000 plus the funder's
@@ -15,6 +19,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
+import statistics
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
@@ -31,6 +37,7 @@ from .config import Config, PreflightError, indexed_wallets, wallets
 from .privana import OPEN_S, Privana, Reply
 from .transfers import (
     REFUSED_WAIT_S,
+    RESENDS,
     Journal,
     Transfer,
     _resent,
@@ -53,8 +60,17 @@ PHASES = {
     "settles in order": "Settles, in nonce order without waiting",
     "settles": "Settles, one after another",
 }
+SESSION_PHASES = {
+    **PHASES,
+    "locks": "Locks, as sessions start",
+    "settles in order": "Settles, as sessions end, in nonce order without waiting",
+}
+# One fixed schedule of session starts, so two runs at the same rate compare.
+SCHEDULE_SEED = 1
+MONEY_BACK_S = (60, 180, 300)  # ideal, fine and the limit
 
 ReadNonces = Callable[[list[str]], Awaitable[tuple[int, dict[str, int]]]]
+More = Callable[[float], Awaitable["list[Action] | None"]]
 
 
 @dataclass
@@ -63,6 +79,9 @@ class Action(Transfer):
 
     wallet: str = ""
     block: int | None = None  # the block of the first read that showed it landed
+    first_sent_at: float = 0.0  # `sent_at` of its first try: a resend moves `sent_at`
+    ended_at: float | None = None  # a session's lock: when the session ended
+    back_at: float | None = None  # a session's lock: when its settle showed as landed
 
 
 def _done(a: Action, last_read: float, refused_wait_s: float) -> bool:
@@ -95,13 +114,21 @@ async def burst(
     quiet_s: float | None = None,
     gap_s: float = 0.0,
     open_first: Callable[[Action], Awaitable[object]] | None = None,
+    offsets: Sequence[float] | None = None,
+    more: More | None = None,
+    label: str = "",
 ) -> None:
     """Send every action at once and read their wallets' nonces until each
     landed or was refused `refused_wait_s` ago, or until `max_wait_s` passed.
     Anything else stays unresolved: it can still land.
 
     With `gap_s`: action i goes out `i * gap_s` after the start, in list order,
-    never waiting for an earlier reply.
+    never waiting for an earlier reply. With `offsets`: `offsets[i]` after the start.
+
+    With `more`: it is called after each read, with the time of the last read that
+    succeeded, and returns the actions to send, each with its `due_at` set. A new one
+    is added. One with a reply goes out again, the same signed write. The burst then
+    ends when it returns None, not when every action is done.
 
     With `open_first`: it starts for each action OPEN_S before the action goes
     out, so the first one goes out OPEN_S after the start.
@@ -112,7 +139,7 @@ async def burst(
     lead = OPEN_S if open_first is not None else 0.0
     start = time.time()
     for i, a in enumerate(actions):
-        a.due_at = start + lead + i * gap_s
+        a.due_at = start + lead + (offsets[i] if offsets else i * gap_s)
         if journal is not None:
             journal.write("send", k=a.k, nonce=a.nonce, wallet=a.wallet, due_at=a.due_at)
 
@@ -122,9 +149,9 @@ async def burst(
         except Exception as exc:
             return Reply("unknown", None, type(exc).__name__)
 
-    async def one(a: Action) -> None:
+    async def one(a: Action, wait_s: float) -> None:
         # Counted from the task's start, so time spent on the journal shortens no gap.
-        await asyncio.sleep(a.due_at - lead - start)
+        await asyncio.sleep(wait_s)
         if open_first is not None:
             began = time.monotonic()
             await open_first(a)
@@ -133,6 +160,7 @@ async def burst(
         a.reply = await reply_to(a)
         a.reply_at = time.time()
         a.sent_at += a.reply.retry_s  # the try that went out
+        a.first_sent_at = a.first_sent_at or a.sent_at
 
     async def again(a: Action) -> None:
         a.resends += 1
@@ -145,7 +173,7 @@ async def burst(
         if reply.kind == "refused" and reply.status is not None:
             a.reply, a.reply_at = reply, time.time()
 
-    tries = [asyncio.create_task(one(a)) for a in actions]
+    tries = [asyncio.create_task(one(a, a.due_at - lead - start)) for a in actions]
     wallets = sorted({a.wallet for a in actions})
     last_read, news, shown = 0.0, start, (0, 0)
     try:
@@ -164,14 +192,33 @@ async def burst(
                 if counts != shown:
                     shown, news = counts, last_read
                     print(
-                        f"  {last_read - start:5.0f} s, block {block}: {counts[0]} of "
+                        f"  {last_read - start:5.0f} s, block {block}: {label}{counts[0]} of "
                         f"{len(actions)} landed, {counts[1]} of {len(tries)} replied",
                         flush=True,
                     )
             except Exception:
                 pass  # a failed read is no news
-            if all(_done(a, last_read, refused_wait_s) for a in actions):
-                break
+            if more is None:
+                if all(_done(a, last_read, refused_wait_s) for a in actions):
+                    break
+            else:
+                added = await more(last_read)
+                if added is None:
+                    break
+                now = time.time()  # one clock for all, so the journal shortens no gap
+                for a in added:
+                    if a.reply is None:
+                        actions.append(a)
+                        record = {"wallet": a.wallet, "due_at": a.due_at}
+                    else:
+                        a.resends += 1
+                        record = {"at": a.due_at, "reply": asdict(a.reply)}
+                        a.reply = None
+                    if journal is not None:
+                        journal.write(
+                            "resend" if a.resends else "send", k=a.k, nonce=a.nonce, **record
+                        )
+                    tries.append(asyncio.create_task(one(a, a.due_at - lead - now)))
             if time.time() >= start + max_wait_s:
                 break
             # Quiet: every try is answered, and no read since showed a landing or a reply.
@@ -203,13 +250,23 @@ async def burst(
                 journal.write("outcome", **asdict(a))
 
 
+def session_starts(n: int, per_minute: float) -> list[float]:
+    """When each of `n` sessions starts, in seconds after the first: random gaps at
+    `per_minute` starts a minute on average."""
+    schedule = random.Random(SCHEDULE_SEED)
+    starts = [0.0]
+    for _ in range(n - 1):
+        starts.append(starts[-1] + schedule.expovariate(per_minute / 60))
+    return starts
+
+
 def same_funding(amount: str, token_id: str) -> Callable[[dict[str, Any]], bool]:
-    """Whether an earlier journal is a locks run's funding of `amount` of `token_id`.
-    Funding at nonce X always pays player PLAYER_INDEX + X, so its write at the
-    funder's nonce is the one this run sends first."""
-    expected = ("locks", amount, token_id)
+    """Whether an earlier journal is a locks or sessions run's funding of `amount` of
+    `token_id`. Funding at nonce X always pays player PLAYER_INDEX + X, so its write
+    at the funder's nonce is the one this run sends first."""
     return lambda start: (
-        (start.get("benchmark"), start.get("amount"), start.get("token_id")) == expected
+        start.get("benchmark") in ("locks", "sessions")
+        and (start.get("amount"), start.get("token_id")) == (amount, token_id)
     )
 
 
@@ -232,10 +289,15 @@ async def plan(
     n: int,
     amount: str,
     results: Path,
+    funded: bool = False,
 ) -> Plan:
-    """Public reads only: the players are new, and no earlier write can still land."""
+    """Public reads only: the players are new, and no earlier write can still land.
+    With `funded` they are the last `n` the funder funded, in a run that stopped
+    before they locked."""
     funder, service = wallets(cfg.mnemonic, cfg.funder_index)
-    first = PLAYER_INDEX + funder_nonce
+    if funded and funder_nonce < n:
+        raise PreflightError(f"the funder has funded {funder_nonce} players, fewer than {n}")
+    first = PLAYER_INDEX + funder_nonce - (n if funded else 0)
     players = indexed_wallets(cfg.mnemonic, first, n)
     _, lock_nonces = await chain.nonces(LOCK_NONCES, [p.address for p in players])
     used = [address for address, nonce in lock_nonces.items() if nonce != 0]
@@ -248,9 +310,12 @@ async def plan(
         raise PreflightError(
             f"the service's settle nonce is {service_nonce} on chain but {api_nonce} in the API"
         )
-    check_settled(
-        results, funder.address, cfg.accounting, funder_nonce, same_funding(amount, cfg.token_id)
-    )
+    if funded:
+        # This run sends no funding, so an unresolved one from an earlier run can still land.
+        check_settled(results, funder.address, cfg.accounting, funder_nonce)
+    else:
+        same = same_funding(amount, cfg.token_id)
+        check_settled(results, funder.address, cfg.accounting, funder_nonce, same)
     check_settled(results, service.address, cfg.accounting, service_nonce)
     # The service's signed lock read works if a new player shows no locks.
     probe = await chain.service_locks(service, [players[0].address])
@@ -272,11 +337,11 @@ async def run(
     """Log in the funder for its balance, then fund, lock and settle."""
     await privana.login(p.funder, time.time())
     before = await privana.balance(p.funder, cfg.token_id)
-    if before < amount * args.n:
+    if not args.funded and before < amount * args.n:
         print(f"Not funded: the funder holds {before} units, the run needs {amount * args.n}.")
         return 1
 
-    run_dir = results / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-locks"
+    run_dir = results / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{args.command}"
     phases: dict[str, Sequence[Transfer]] = {name: [] for name in PHASES}
     ended, check = "aborted", "not run"
     try:
@@ -302,34 +367,47 @@ async def _phases(
 ) -> str:
     token = cfg.token_id
 
-    print(f"Funding {len(p.players)} players, one after another.")
+    if not args.funded:
+        print(f"Funding {len(p.players)} players, one after another.")
 
-    async def fund(nonce: int) -> Reply:
-        to = p.players[nonce - p.funder_nonce].address
-        signature = privana.sign_transfer(p.funder, to, token, amount, nonce)
-        return await privana.transfer(p.funder, to, token, amount, nonce, signature)
+        async def fund(nonce: int) -> Reply:
+            to = p.players[nonce - p.funder_nonce].address
+            signature = privana.sign_transfer(p.funder, to, token, amount, nonce)
+            return await privana.transfer(p.funder, to, token, amount, nonce, signature)
 
-    funding: list[Transfer] = []
-    phases["funding"] = funding
-    journal = Journal(run_dir / "funding.jsonl")
-    journal.write("start", **{**meta, "sender": p.funder.address})
-    try:
-        ended = await run_transfers(
-            len(p.players),
-            p.funder_nonce,
-            fund,
-            lambda: privana.transfer_nonce(p.funder.address),
-            journal,
-            funding,
-            args.poll,
-            args.max_wait,
-            progress=_progress,
-            min_gap_s=args.transfer_gap,
-        )
-    finally:
-        journal.close()
-    if ended != "completed":
-        return f"funding {ended}"
+        funding: list[Transfer] = []
+        phases["funding"] = funding
+        journal = Journal(run_dir / "funding.jsonl")
+        journal.write("start", **{**meta, "sender": p.funder.address})
+        try:
+            ended = await run_transfers(
+                len(p.players),
+                p.funder_nonce,
+                fund,
+                lambda: privana.transfer_nonce(p.funder.address),
+                journal,
+                funding,
+                args.poll,
+                args.max_wait,
+                progress=_progress,
+                min_gap_s=args.transfer_gap,
+            )
+        finally:
+            journal.close()
+        if ended != "completed":
+            return f"funding {ended}"
+    if args.command == "sessions":
+        ended = await _sessions(cfg, args, chain, privana, p, amount, meta, run_dir, phases)
+        back = money_back(phases["locks"])
+        late = back["sessions"] - back[f"within_{MONEY_BACK_S[-1]}_s"] if back else 0
+        if ended == "completed" and late:
+            stopped = meta.get("stream_stopped")
+            return (
+                f"slow: {late} of {len(p.players)} sessions did not have their money back "
+                f"within {MONEY_BACK_S[-1] // 60} minutes of ending"
+                + (f", after the settle stream stopped at {stopped}" if stopped else "")
+            )
+        return ended
 
     print(f"Locking: {len(p.players)} players at once.")
     locks = [
@@ -382,12 +460,6 @@ async def _phases(
     journal = Journal(run_dir / "settles-in-order.jsonl")
     journal.write("start", **{**meta, "sender": p.service.address})
 
-    async def open_first(a: Action) -> None:
-        opened = await privana.open_connection(p.service.address, a.nonce)
-        journal.write("open", k=a.k, nonce=a.nonce, opened=opened)
-        if not opened:
-            print(f"  settle {a.k + 1}: no open connection in time, so it opens a new one")
-
     try:
         await burst(
             in_order,
@@ -406,7 +478,7 @@ async def _phases(
             REFUSED_WAIT_S,
             journal,
             gap_s=args.settle_gap,
-            open_first=open_first,
+            open_first=_open_first(privana, journal),
         )
     finally:
         journal.close()
@@ -414,12 +486,41 @@ async def _phases(
         return "stopped after the settles in order: one can still land and would take a nonce"
 
     rest = [targets[a.k] for a in in_order if a.outcome != "landed"]
+    # The landed settles took the burst's first nonces, so each of the rest goes out
+    # again at its burst nonce, the same signed write.
+    start = p.service_nonce + len(in_order) - len(rest)
+    missing = len(p.players) - len(locked)
+    return await _rest(args, privana, p, amount, meta, run_dir, phases, rest, start, missing)
+
+
+def _open_first(privana: Privana, journal: Journal) -> Callable[[Action], Awaitable[None]]:
+    """Open the connection for a settle before it goes out, and journal whether it opened."""
+
+    async def open_first(a: Action) -> None:
+        opened = await privana.open_connection(a.wallet, a.nonce)
+        journal.write("open", k=a.k, nonce=a.nonce, opened=opened)
+        if not opened:
+            print(f"  settle {a.k + 1}: no open connection in time, so it opens a new one")
+
+    return open_first
+
+
+async def _rest(
+    args: argparse.Namespace,
+    privana: Privana,
+    p: Plan,
+    amount: int,
+    meta: dict[str, Any],
+    run_dir: Path,
+    phases: dict[str, Sequence[Transfer]],
+    rest: list[tuple[str, int]],
+    start: int,
+    missing: int,
+) -> str:
+    """Settle `rest` one after another from the service's nonce `start`."""
     ended = "completed"
     if rest:
         print(f"Settling the other {len(rest)} one after another.")
-        # The landed settles took the burst's first nonces, so each of the rest goes out
-        # again at its burst nonce, the same signed write.
-        start = p.service_nonce + len(in_order) - len(rest)
 
         async def settle(nonce: int) -> Reply:
             user, lock_id = rest[nonce - start]
@@ -443,10 +544,191 @@ async def _phases(
             )
         finally:
             journal.close()
-    missing = len(p.players) - len(locked)
     if ended == "completed" and missing:
         return f"partial: {missing} of {len(p.players)} locks did not land, see the notes"
     return ended
+
+
+async def _sessions(
+    cfg: Config,
+    args: argparse.Namespace,
+    chain: Chain,
+    privana: Privana,
+    p: Plan,
+    amount: int,
+    meta: dict[str, Any],
+    run_dir: Path,
+    phases: dict[str, Sequence[Transfer]],
+) -> str:
+    """The players lock at random session starts, and the service settles each lock
+    `--play` seconds after it landed, while later sessions still start."""
+    token = cfg.token_id
+    starts = session_starts(len(p.players), args.per_minute)
+    print(f"Sessions: {len(p.players)} start over {starts[-1]:.0f} s.")
+    locks = [
+        Action(i, p.lock_nonces[w.address], 0.0, wallet=w.address) for i, w in enumerate(p.players)
+    ]
+    phases["locks"] = locks
+    in_order: list[Action] = []
+    phases["settles in order"] = in_order
+    targets: list[tuple[str, int]] = []  # settle i moves targets[i], the lock of player queued[i]
+    queued: list[int] = []
+    as_head: Counter[int] = Counter()  # by nonce: resends it started as the first unused one
+
+    async def queue(due: list[Action]) -> None:
+        found = await chain.service_locks(p.service, [p.players[a.k].address for a in due])
+        for a in due:
+            user = p.players[a.k].address
+            # A read on a node behind shows no lock yet, so that one waits for the next read.
+            if len(found[user]) == 1 and found[user][0][1] == amount:
+                targets.append((user, found[user][0][0]))
+                queued.append(a.k)
+
+    async def ended_sessions(last_read: float) -> list[Action] | None:
+        """The settles to send now: those of the sessions that ended since the last
+        read, or the first unused one and every one behind it again. None once the
+        stream is over."""
+        head = next((a for a in in_order if a.landed_at is None), None)
+        if head and head.reply and head.reply.kind != "ok":
+            # The head's reply came back, or was lost, without it landing. The contract
+            # takes a service's settles in nonce order only, so nothing behind it lands.
+            # Once a read this long after the reply still shows the nonce unused, the head
+            # and every settle behind it go out again in order, the same signed writes.
+            unused = head.seen_nonce == head.nonce
+            behind = [a for a in in_order if a.landed_at is None]
+            if (
+                not unused
+                or last_read < head.reply_at + REFUSED_WAIT_S
+                or any(a.reply is None for a in behind)  # one of them is still out
+            ):
+                return []
+            said = f"settle {head.k} (nonce {head.nonce}): {_said(head.reply)}"
+            if as_head[head.nonce] == RESENDS:
+                meta["stream_stopped"] = said
+                return None
+            as_head[head.nonce] += 1
+            meta.setdefault("sent_again", []).append(said)
+            for i, a in enumerate(behind):
+                a.due_at = time.time() + OPEN_S + i * args.settle_gap
+            return behind
+        landed = [a for a in locks if a.landed_at is not None]
+        due = [a for a in landed if a.k not in queued and time.time() >= a.landed_at + args.play]
+        if not due:
+            over = locking.done() and head is None and len(queued) == len(landed)
+            return None if over else []
+        try:
+            await queue(due)
+        except Exception:
+            return []  # a failed read is no news
+        added: list[Action] = []
+        for i in range(len(in_order), len(targets)):
+            earlier = (added or in_order)[-1].due_at if added or in_order else 0.0
+            due_at = max(time.time() + OPEN_S, earlier + args.settle_gap)
+            added.append(Action(i, p.service_nonce + i, due_at, wallet=p.service.address))
+        return added
+
+    _, settle_nonces = await chain.nonces(SETTLE_NONCES, [p.service.address])
+    if settle_nonces[p.service.address] != p.service_nonce:
+        return (
+            "stopped before the sessions: the service's settle nonce moved, so another signer "
+            "uses it"
+        )
+    expiry = int(time.time()) + LOCK_TTL_S
+    lock_journal = Journal(run_dir / "locks.jsonl")
+    lock_journal.write("start", **meta, expiry=expiry)
+    journal = Journal(run_dir / "settles-in-order.jsonl")
+    journal.write("start", **{**meta, "sender": p.service.address})
+
+    locking = asyncio.create_task(
+        burst(
+            locks,
+            lambda a: privana.lock(
+                p.players[a.k], p.service.address, token, amount, expiry, a.nonce
+            ),
+            lambda w: chain.nonces(LOCK_NONCES, w),
+            args.poll,
+            args.max_wait,
+            REFUSED_WAIT_S,
+            lock_journal,
+            QUIET_S,
+            offsets=starts,
+            label="locks, ",
+        )
+    )
+    try:
+        try:
+            await burst(
+                in_order,
+                lambda a: privana.settle(
+                    p.service,
+                    targets[a.k][0],
+                    p.funder.address,
+                    targets[a.k][1],
+                    amount,
+                    a.nonce,
+                    own_connection=True,
+                ),
+                # The stream starts empty, so the read names the service itself.
+                lambda w: chain.nonces(SETTLE_NONCES, [p.service.address]),
+                args.poll,
+                args.max_wait,
+                REFUSED_WAIT_S,
+                journal,
+                open_first=_open_first(privana, journal),
+                more=ended_sessions,
+                label="settles, ",
+            )
+            await locking
+        finally:
+            locking.cancel()
+            await asyncio.gather(locking, return_exceptions=True)
+            lock_journal.close()
+            journal.close()
+
+        landed = [a for a in locks if a.outcome == "landed"]
+        if not landed:
+            return "stopped after locking: no lock landed"
+        left = [a for a in landed if a.k not in queued]
+        if left:
+            # The stream stopped before these sessions were settled. Each still ends first.
+            last = max(a.landed_at or 0.0 for a in left) + args.play
+            await asyncio.sleep(max(SETTLE_S, last - time.time()))
+            await queue(left)
+        if len(queued) != len(landed):
+            return "stopped after the sessions: the service's read does not show every landed lock"
+        # A settle the stream gave up on can land after it, so a read says how many landed.
+        # A node behind shows fewer, so the count never goes below what the stream saw.
+        seen = sum(a.landed_at is not None for a in in_order)
+        api_nonce = await privana.transfer_locked_nonce(p.service.address)
+        done = max(seen, api_nonce - p.service_nonce)
+        if not 0 <= done <= len(in_order):
+            return (
+                "stopped after the sessions: the service's settle nonce moved, so another "
+                "signer uses it"
+            )
+        for a in in_order[:done]:
+            if a.landed_at is None:
+                a.landed_at, a.outcome = time.time(), "landed"
+                a.note = f"landed after the stream stopped{_resent(a)}"
+        # Each of the rest goes out at its nonce: for a settle the stream already sent, that
+        # is the same signed write again, so at most one copy lands.
+        return await _rest(
+            args,
+            privana,
+            p,
+            amount,
+            meta,
+            run_dir,
+            phases,
+            targets[done:],
+            p.service_nonce + done,
+            len(p.players) - len(landed),
+        )
+    finally:
+        back = {t.nonce: t.landed_at for t in (*in_order, *phases["settles"]) if t.landed_at}
+        for i, k in enumerate(queued):
+            locks[k].ended_at = (locks[k].landed_at or 0.0) + args.play
+            locks[k].back_at = back.get(p.service_nonce + i)
 
 
 async def _check(
@@ -459,7 +741,13 @@ async def _check(
 ) -> str:
     """Whether the funder's balance moved as the landed writes say: each funding
     sent `amount` out and each settle brought `amount` back."""
-    if any(t.outcome == "unresolved" for ts in phases.values() for t in ts):
+    # A sessions run sends an unresolved ordered settle again one after another.
+    resent = {t.nonce for t in phases["settles"] if t.outcome == "landed"}
+    if any(
+        t.outcome == "unresolved" and not (name == "settles in order" and t.nonce in resent)
+        for name, ts in phases.items()
+        for t in ts
+    ):
         return "skipped: an unresolved write can still land"
 
     def landed(name: str) -> int:
@@ -498,7 +786,7 @@ def _round(value: float | None) -> float | None:
 
 def summarize(ts: Sequence[Transfer]) -> dict[str, Any]:
     landed = [t for t in ts if t.landed_at is not None]
-    sends = [t.sent_at for t in ts if t.sent_at]
+    sends = [getattr(t, "first_sent_at", 0.0) or t.sent_at for t in ts if t.sent_at]
     landings = [t.landed_at for t in landed if t.landed_at is not None]
     span = max(landings) - min(sends) if landings else None
     unresent = [t.landed_at for t in landed if t.landed_at is not None and not t.resends]
@@ -523,18 +811,40 @@ def summarize(ts: Sequence[Transfer]) -> dict[str, Any]:
     }
 
 
+def money_back(locks: Sequence[Transfer]) -> dict[str, Any] | None:
+    """How long after a session ended its settle showed as landed, for a sessions run.
+    A session whose lock never landed has no end, so it counts as not back."""
+    ended = [a for a in locks if isinstance(a, Action) and a.ended_at is not None]
+    if not ended:
+        return None
+    waits = sorted(a.back_at - a.ended_at for a in ended if a.ended_at and a.back_at)
+    lock_waits = [a.landed_at - a.due_at for a in locks if a.landed_at]
+    return {
+        "lock_wait_median_s": _round(statistics.median(lock_waits)),
+        "lock_wait_slowest_s": _round(max(lock_waits)),
+        "sessions": len(locks),
+        "back": len(waits),
+        **{f"within_{limit}_s": sum(w <= limit for w in waits) for limit in MONEY_BACK_S},
+        "median_s": _round(statistics.median(waits)) if waits else None,
+        "slowest_s": _round(waits[-1]) if waits else None,
+    }
+
+
 def to_markdown(
     meta: dict[str, Any], phases: dict[str, Sequence[Transfer]], ended: str, check: str
 ) -> str:
     def cell(value: Any, unit: str = "") -> str:
         return "n/a" if value is None else f"{value}{unit}"
 
+    sessions = meta.get("benchmark") == "sessions"
+    labels = SESSION_PHASES if sessions else PHASES
     summaries = {name: summarize(ts) for name, ts in phases.items() if ts}
     verdict = "PASS" if ended == "completed" and check == "ok" else "FAIL"
+    who = "players funded by an earlier run" if meta.get("funded") else "new players"
     lines = [
-        f"# Locks, N = {meta['n']}: {verdict}",
+        f"# {'Sessions' if sessions else 'Locks'}, N = {meta['n']}: {verdict}",
         "",
-        f"{meta['started_at']}: {meta['n']} new players each lock {meta['amount']} "
+        f"{meta['started_at']}: {meta['n']} {who} each lock {meta['amount']} "
         f"{meta['symbol']} for the service {meta['service']}, which settles them back to the "
         f"funder {meta['funder']}.",
         "",
@@ -544,7 +854,7 @@ def to_markdown(
     ]
     for name, s in summaries.items():
         lines.append(
-            f"| {PHASES[name]} | {s['sent']} | {s['landed']} | {s['refused']} | {s['unresolved']} "
+            f"| {labels[name]} | {s['sent']} | {s['landed']} | {s['refused']} | {s['unresolved']} "
             f"| {cell(s['first_send_to_last_landing_s'], ' s')} | {cell(s['landed_per_minute'])} "
             f"| {cell(s['slowest_reply_s'], ' s')} |"
         )
@@ -567,10 +877,41 @@ def to_markdown(
         + "; ".join(f"{n} {s['connections_that_never_opened']}" for n, s in summaries.items())
         + ".",
         f"Money check: {check}. Ended: {ended}.",
+    ]
+    back = money_back(phases["locks"])
+    if back:
+        within = ", ".join(
+            f"{back[f'within_{limit}_s']} within {limit // 60} min" for limit in MONEY_BACK_S
+        )
+        lines.append(
+            f"Lock landed after its session started: median {back['lock_wait_median_s']} s, "
+            f"slowest {back['lock_wait_slowest_s']} s."
+        )
+        lines.append(
+            f"Money back after a session ended: {back['back']} of {back['sessions']} sessions, "
+            f"{within}, median {cell(back['median_s'], ' s')}, slowest "
+            f"{cell(back['slowest_s'], ' s')}. It counts from {meta['play_s']:g} s after the "
+            "lock showed as landed to the read that showed the settle landed."
+        )
+    lines += [
+        f"Sent again with the settles behind it, after it did not land: {said}."
+        for said in meta.get("sent_again", [])
+    ]
+    if meta.get("stream_stopped"):
+        lines.append(
+            f"The settle stream stopped after {RESENDS} resends at {meta['stream_stopped']}. "
+            "The settles left went out one after another."
+        )
+    lines += [
         "",
         f"Landing times come from nonce reads every {meta['poll_s']} s, not block times.",
         "",
-        "Setup: " + ", ".join(f"{k} {v}" for k, v in meta.items() if k not in ("n", "started_at")),
+        "Setup: "
+        + ", ".join(
+            f"{k} {v}"
+            for k, v in meta.items()
+            if k not in ("n", "started_at", "sent_again", "stream_stopped")
+        ),
     ]
     notes = [
         f"- {name} {t.k} (nonce {t.nonce}): {t.note}"
@@ -596,6 +937,7 @@ def write_report(
         "ended": ended,
         "money_check": check,
         "summary": {name: summarize(ts) for name, ts in phases.items() if ts},
+        "money_back": money_back(phases["locks"]),
         "phases": {name: [asdict(t) for t in ts] for name, ts in phases.items()},
     }
     (run_dir / "report.json").write_text(json.dumps(data, indent=2) + "\n")
@@ -613,11 +955,15 @@ def describe(
     symbol: str,
     commit: str,
 ) -> dict[str, Any]:
+    sessions = (
+        {"per_minute": args.per_minute, "play_s": args.play} if args.command == "sessions" else {}
+    )
     return {
         "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "benchmark": "locks",
+        "benchmark": args.command,
         "n": args.n,
         "amount": args.amount,
+        "funded": args.funded,
         "symbol": symbol,
         "funder": p.funder.address,
         "service": p.service.address,
@@ -634,4 +980,5 @@ def describe(
         "max_wait_s": args.max_wait,
         "transfer_gap_s": args.transfer_gap,
         "settle_gap_s": args.settle_gap,
+        **sessions,
     }

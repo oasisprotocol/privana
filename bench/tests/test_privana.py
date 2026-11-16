@@ -78,7 +78,7 @@ def test_safe_detail_drops_inputs_and_masks_secrets() -> None:
     assert safe_detail(validation) == "['body', 'signature']: bad"
     assert safe_detail("sig 0x" + "a" * 130 + " end") == "sig 0x… end"
     assert safe_detail("token eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl") == "token <jwt>"
-    assert len(safe_detail("x" * 1000)) == 300
+    assert len(safe_detail("x" * 1000)) == 600
 
 
 def test_siwe_message() -> None:

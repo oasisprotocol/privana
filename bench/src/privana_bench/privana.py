@@ -132,7 +132,7 @@ def safe_detail(detail: Any) -> str:
         text = str(detail)
     text = re.sub(r"0x[0-9a-fA-F]{100,}", "0x…", text)
     text = re.sub(r"eyJ[\w-]+\.[\w-]+\.[\w-]+", "<jwt>", text)
-    return text[:300]
+    return text[:600]
 
 
 def siwe_message(domain: str, address: str, nonce: str, chain_id: int, now: float) -> str:

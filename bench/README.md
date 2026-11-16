@@ -13,6 +13,22 @@ Throughput benchmarks run as an integrator, through Privana's public API, the Py
 
 PASS means all N locks landed, resent or not, and were settled, and the funder's balance ended where it started.
 
+## Sessions
+
+`privana-bench sessions --n N`: the same writes as a locks run, at the pace of real traffic. Funding and the final settles one after another work as in a locks run.
+
+1. **Locks, as sessions start**: the players lock at random times, `--per-minute` session starts a minute (default 10: 100 users with 3 sessions each in a 30 minute visit). The times follow one fixed schedule, so two runs at the same rate compare.
+2. **Settles, as sessions end**: the service settles each lock `--play` seconds after it showed as landed (default 30), while later sessions still start. The settles go out at consecutive nonces without waiting for replies, at least `--settle-gap` apart, each on its own connection.
+3. **A settle that does not land** goes out again: once its reply is back or lost and the service's nonce still shows it unused 30 s later, it and every settle behind it go out again in order, the same signed writes, so at most one copy lands. After 3 resends of the same settle the stream stops, and once the last lock is done the service settles everything left one after another.
+
+The report adds how long each lock took to land after its session started, and how long after its session ended each player's money was back: how many within 1, 3 and 5 minutes, the median and the slowest. A run where any session's money is not back within 5 minutes fails. That time includes the 3 s the bench takes to open a connection and up to `--poll` seconds twice: until a read shows the session ended, and until one shows the landing. A lock whose reply was lost goes out again as in a locks run, once no lock has landed or been answered for 90 s, which is after the last session started.
+
+If a locks or sessions run stopped after its funding and before its players locked, `--funded` runs it for the last `--n` players the funder funded and funds nothing:
+
+```shell
+uv run privana-bench sessions --n 10 --funded --live
+```
+
 ## Transfers
 
 `privana-bench transfers --n N`: wallet index 0 sends N transfers of `--amount` to index 1, one after another. PASS means all N landed and both balances moved by exactly N × amount.
@@ -21,7 +37,7 @@ Privana takes 10 transfers a minute and 100 a day from one caller. Transfers, he
 
 ## How a write is judged
 
-Each write is saved to the run's journal and signed at its wallet's next nonce. A try whose connection never opens sends nothing, so the same signed write goes out again, up to 3 tries. One after another, a write whose reply was lost also goes out again while its nonce still shows unused 30 s after the last try, up to 3 times: the proxy can cut a request before it reaches Privana, and a nonce takes one write, so at most one copy lands. Locks sent all at once queue behind Privana's one signer, so a lost reply proves nothing while others still land. Each time no lock has landed or been answered for 90 s, every lock whose reply was lost and whose nonce still shows unused goes out again, until `--max-wait`: Privana waits up to 10 minutes on a write and joins a resend to that wait, so only a later resend submits again. A 4xx reply to a resend is the lock's reply. Settles sent in nonce order without waiting go out once each. No write is re-signed at another nonce. One after another means each write waits for the previous one to land, and the run stops at the first that does not.
+Each write is saved to the run's journal and signed at its wallet's next nonce. A try whose connection never opens sends nothing, so the same signed write goes out again, up to 3 tries. One after another, a write whose reply was lost also goes out again while its nonce still shows unused 30 s after the last try, up to 3 times: the proxy can cut a request before it reaches Privana, and a nonce takes one write, so at most one copy lands. Locks sent all at once queue behind Privana's one signer, so a lost reply proves nothing while others still land. Each time no lock has landed or been answered for 90 s, every lock whose reply was lost and whose nonce still shows unused goes out again, until `--max-wait`: Privana waits up to 10 minutes on a write and joins a resend to that wait, so only a later resend submits again. A 4xx reply to a resend is the lock's reply. In a locks run, settles sent in nonce order without waiting go out once each. No write is re-signed at another nonce. One after another means each write waits for the previous one to land, and the run stops at the first that does not.
 
 Each write ends as one of:
 
@@ -55,7 +71,7 @@ Use the mnemonic only for benchmarks and run one benchmark at a time, since a no
 uv run privana-bench --env-file .env.localnet locks --n 10 --transfer-gap 0 --live
 ```
 
-Its `BENCH_FUNDER_INDEX=1` moves the two wallets to indices 1 and 2, the stack's funded accounts. The stack exempts index 1 from the transfer limit, so `--transfer-gap 0` drops the wait.
+`sessions` runs the same way. The file's `BENCH_FUNDER_INDEX=1` moves the two wallets to indices 1 and 2, the stack's funded accounts. The stack exempts index 1 from the transfer limit, so `--transfer-gap 0` drops the wait.
 
 A new stack starts every nonce at 0 again. If an earlier localnet run left a write unresolved, move its run folder out of `results/` first.
 
@@ -67,6 +83,8 @@ uv run privana-bench transfers --n 10         # dry run: preflight, then stops
 uv run privana-bench transfers --n 10 --live  # logs in both wallets and sends
 uv run privana-bench locks --n 10             # dry run: preflight and the players' nonces
 uv run privana-bench locks --n 10 --live      # logs in the funder and sends
+uv run privana-bench sessions --n 10          # dry run, as for locks
+uv run privana-bench sessions --n 10 --per-minute 20 --live
 ```
 
 Preflight checks the chain, the contract's EIP-712 domain, the token and that the sender's nonce on chain matches the API's. `--live` logs in with SIWE, since balances are private. `--help` lists the options.
