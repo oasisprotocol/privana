@@ -8,7 +8,7 @@ from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import Web3
 
-from src.clients.rofl import RoflSubmissionResult, TransactionRevertedError
+from src.clients.rofl import AppdError, RoflSubmissionResult, TransactionRevertedError
 from src.services.accounting_contract import (
     AccountingContractService,
     SubmissionOutcomeUnknownError,
@@ -380,6 +380,22 @@ class TestTransferLockedFunds:
 
         with pytest.raises(SubmissionOutcomeUnknownError):
             await settle_service.transfer_locked_funds(self._make_payload())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "ending"),
+        [
+            (AppdError("appd replied 400: root not found"), ": appd replied 400: root not found"),
+            (RuntimeError("appd timed out"), ""),
+        ],
+    )
+    async def test_unknown_outcome_names_only_appd_reason(self, settle_service, error, ending):
+        settle_service._submit = AsyncMock(side_effect=error)
+
+        with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
+            await settle_service.transfer_locked_funds(self._make_payload())
+
+        assert str(exc_info.value).endswith(f": submission outcome is unknown{ending}")
 
 
 class TestGetTransferToLockNonce:

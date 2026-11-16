@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -302,6 +303,44 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
             await client.submit_tx(tx)
 
         self.assertIn("missing 'ok' key", str(ctx.exception))
+
+    async def test_submit_tx_error_status_carries_appd_reply_body(self):
+        """Test that an error status from appd raises with the reason in its reply body."""
+        from oasis_rofl_client import AsyncRoflClient
+
+        from src.clients.rofl import AppdError, RoflAppdClient
+
+        reason = b"call failed: root not found"
+
+        async def reply_400(reader, writer):
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = int(head.lower().split(b"content-length: ")[1].split(b"\r\n")[0])
+            await reader.readexactly(length)
+            writer.write(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: %d\r\n\r\n%s" % (len(reason), reason)
+            )
+            await writer.drain()
+            writer.close()
+
+        tx: TxParams = {
+            "to": "0x0987654321098765432109876543210987654321",
+            "data": "0xabcdef",
+            "gas": 100000,
+            "value": 0,
+        }
+        expected = f"appd replied 400: {reason.decode()}"
+
+        with tempfile.TemporaryDirectory() as socket_dir:
+            socket_path = f"{socket_dir}/appd.sock"
+            async with await asyncio.start_unix_server(reply_400, socket_path):
+                appd = AsyncRoflClient(url=socket_path)
+                with patch("src.clients.rofl.AsyncRoflClient", return_value=appd):
+                    with self.assertLogs("src.clients.rofl", "ERROR") as logs:
+                        with self.assertRaises(AppdError) as ctx:
+                            await RoflAppdClient().submit_tx(tx)
+
+        self.assertEqual(str(ctx.exception), expected)
+        self.assertIn(expected, logs.output[0])
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_get_keypair(self, mock_async_client_class):

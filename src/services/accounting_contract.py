@@ -22,7 +22,12 @@ from web3.middleware import SignAndSendRawMiddlewareBuilder
 
 from src.abi.accounting import ACCOUNTING_ABI
 from src.abi.accounting_siwe_auth import ACCOUNTING_SIWE_AUTH_ABI
-from src.clients.rofl import ROFL_QUERY_SIGNER_KEY, RoflAppdClient, TransactionRevertedError
+from src.clients.rofl import (
+    ROFL_QUERY_SIGNER_KEY,
+    AppdError,
+    RoflAppdClient,
+    TransactionRevertedError,
+)
 from src.clients.web3_provider import make_async_web3
 from src.config import (
     CHAIN_NAMES,
@@ -146,7 +151,7 @@ class SubmissionResult:
 
 
 class SubmissionOutcomeUnknownError(Exception):
-    """Raised when a signed write was submitted and its outcome is unknown."""
+    """Raised when the outcome of a signed write is unknown."""
 
 
 @dataclass
@@ -399,12 +404,13 @@ class AccountingContractService:
             # Shielded so cancelling a caller doesn't cancel the submission or its record.
             return await asyncio.shield(task)
         except Exception as exc:
-            # A record left after a failure means it was submitted and its outcome is unknown.
+            # A record left after a failure means the write's outcome is unknown.
             if self._accounting_store.get(key) is None:
                 raise
-            raise SubmissionOutcomeUnknownError(
-                f"{label} {key} was submitted and its outcome is unknown"
-            ) from exc
+            detail = f"{label} {key}: submission outcome is unknown"
+            if isinstance(exc, AppdError):
+                detail += f": {exc}"
+            raise SubmissionOutcomeUnknownError(detail) from exc
 
     async def _get_siwe_auth_address(self) -> ChecksumAddress:
         if self._siwe_auth_address is not None:
