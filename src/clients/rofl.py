@@ -4,7 +4,7 @@ import asyncio
 import base64
 import logging
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 import cbor2
 import httpx
@@ -27,6 +27,12 @@ _APPD_TIMEOUT_SECONDS: Final[float] = 600.0
 
 # XXX: appd may queue concurrent calls out of order. Space calls this far apart to reduce reordering.
 _APPD_SUBMIT_GAP_SECONDS: Final[float] = 0.05
+
+# appd makes its reads before it signs. When one fails, nothing was sent, so the call goes out
+# again after a wait.
+_APPD_QUERY_ABORTED: Final[str] = "module: dispatcher code: 3 message: query aborted"
+_APPD_QUERY_RETRIES: Final[int] = 2
+_APPD_QUERY_RETRY_SECONDS: Final[float] = 1.0
 
 
 @dataclass
@@ -175,6 +181,27 @@ class RoflAppdClient:
             logger.error(f"Error generating keypair: {e}")
             raise
 
+    async def _sign_submit(self, tx: TxParams, encrypt: bool) -> dict[str, Any]:
+        """Send one call to appd, and again when its read before signing failed."""
+        retries_left = _APPD_QUERY_RETRIES
+        while True:
+            # The lock is first come, first served, so calls go to appd in the order they got here.
+            async with self._submit_gate:
+                await asyncio.sleep(_APPD_SUBMIT_GAP_SECONDS)
+            try:
+                # AsyncRoflClient.sign_submit returns decoded CBOR directly
+                return await self._client.sign_submit(tx, encrypt)
+            except httpx.HTTPStatusError as e:
+                if not retries_left or _APPD_QUERY_ABORTED not in e.response.text:
+                    raise
+                retries_left -= 1
+                logger.warning(
+                    "appd replied %s: %s, sending the call again",
+                    e.response.status_code,
+                    e.response.text,
+                )
+                await asyncio.sleep(_APPD_QUERY_RETRY_SECONDS)
+
     async def submit_tx(self, tx: TxParams, encrypt: bool = True) -> RoflSubmissionResult:
         """Submit a transaction to the ROFL daemon for signing and relay.
 
@@ -210,13 +237,8 @@ class RoflAppdClient:
                 plaintext_selector,
             )
 
-        # The lock is first come, first served, so calls go to appd in the order they got here.
-        async with self._submit_gate:
-            await asyncio.sleep(_APPD_SUBMIT_GAP_SECONDS)
-
         try:
-            # AsyncRoflClient.sign_submit returns decoded CBOR directly
-            result = await self._client.sign_submit(tx, encrypt)
+            result = await self._sign_submit(tx, encrypt)
 
             if "fail" in result:
                 fail_info = result["fail"]

@@ -7,7 +7,14 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import cbor2
+import httpx
 from web3.types import TxParams
+
+
+def _appd_400(reason: str) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://localhost/rofl/v1/tx/sign-submit")
+    response = httpx.Response(400, text=reason, request=request)
+    return httpx.HTTPStatusError("400 Bad Request", request=request, response=response)
 
 
 class TestDecodeRevertReason(unittest.TestCase):
@@ -341,6 +348,46 @@ class TestRoflAppdClient(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(str(ctx.exception), expected)
         self.assertIn(expected, logs.output[0])
+
+    @patch("src.clients.rofl._APPD_QUERY_RETRY_SECONDS", 0)
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_sends_again_after_query_aborted(self, mock_async_client_class):
+        """Test that a call goes to appd again when its read before signing failed."""
+        from src.clients.rofl import AppdError, RoflAppdClient
+
+        aborted = _appd_400("call failed: module: dispatcher code: 3 message: query aborted: Any")
+        mock_client = MagicMock()
+        mock_async_client_class.return_value = mock_client
+        tx: TxParams = {"to": "0x0987654321098765432109876543210987654321", "data": "0xabcdef"}
+
+        mock_client.sign_submit = AsyncMock(side_effect=[aborted, aborted, {"ok": b""}])
+        client = RoflAppdClient()
+        with patch.object(client, "_submit_gate", MagicMock()) as gate:
+            with self.assertLogs("src.clients.rofl", "WARNING"):
+                result = await client.submit_tx(tx)
+        self.assertEqual(result.ok_payload, b"")
+        self.assertEqual(mock_client.sign_submit.await_count, 3)
+        self.assertEqual(gate.__aenter__.await_count, 3)
+
+        mock_client.sign_submit = AsyncMock(side_effect=[aborted] * 4)
+        with self.assertRaises(AppdError) as ctx:
+            await RoflAppdClient().submit_tx(tx)
+        self.assertIn("query aborted", str(ctx.exception))
+        self.assertEqual(mock_client.sign_submit.await_count, 3)
+
+    @patch("src.clients.rofl.AsyncRoflClient")
+    async def test_submit_tx_sends_once_after_another_appd_error(self, mock_async_client_class):
+        """Test that a call goes to appd once when appd fails for any other reason."""
+        from src.clients.rofl import AppdError, RoflAppdClient
+
+        mock_client = MagicMock()
+        mock_client.sign_submit = AsyncMock(side_effect=_appd_400("deadline has elapsed"))
+        mock_async_client_class.return_value = mock_client
+        tx: TxParams = {"to": "0x0987654321098765432109876543210987654321", "data": "0xabcdef"}
+
+        with self.assertRaises(AppdError):
+            await RoflAppdClient().submit_tx(tx)
+        mock_client.sign_submit.assert_awaited_once()
 
     @patch("src.clients.rofl.AsyncRoflClient")
     async def test_get_keypair(self, mock_async_client_class):
