@@ -14,12 +14,12 @@ from src.config import (
     _build_chain_rpc_urls,
     _build_gas_prices,
     _build_limit_exempt_accounts,
+    _build_min_deposits,
     _build_token_infos,
+    get_token_id,
 )
 from src.config.chain_config import (
     CHAIN_CONFIGS,
-    MIN_DEPOSIT_ERC20_WEI,
-    MIN_DEPOSIT_NATIVE_WEI,
     ChainConfig,
     _build_chain_configs,
     get_finality_depth,
@@ -31,8 +31,6 @@ def _make_config(**overrides) -> ChainConfig:
     params = dict(
         chain_id=1,
         finality_depth=2,
-        min_deposit_native_wei=1_000_000,
-        min_deposit_erc20_wei=1_000_000,
         gas_funding_amount_wei=200_000,
         min_sweep_gas_price_wei=1,  # keep gas_limit * floor * headroom under the cap
     )
@@ -65,7 +63,6 @@ def test_cap_below_floor_priced_sweep_rejected():
     # floor 1 gwei * 65_000 gas * 2 headroom = 1.3e14 > 1e13 cap
     with pytest.raises(ValueError, match="floor-priced ERC-20 sweep"):
         _make_config(
-            min_deposit_native_wei=10**15,
             gas_funding_amount_wei=10**13,
             min_sweep_gas_price_wei=10**9,
         )
@@ -73,13 +70,6 @@ def test_cap_below_floor_priced_sweep_rejected():
 
 def test_unknown_chain_uses_default():
     assert get_finality_depth(999999) == 32  # conservative default
-
-
-def test_minimum_deposits_are_positive():
-    for chain_id, amount in MIN_DEPOSIT_NATIVE_WEI.items():
-        assert amount > 0, f"chain {chain_id} native minimum must be > 0"
-    for chain_id, amount in MIN_DEPOSIT_ERC20_WEI.items():
-        assert amount > 0, f"chain {chain_id} ERC20 minimum must be > 0"
 
 
 def test_ethereum_sepolia_runtime_metadata():
@@ -119,12 +109,45 @@ def test_negative_scan_chunk_rejected():
         _make_config(discovery_scan_chunk_blocks=-1)
 
 
-def test_gas_funding_not_below_min_deposit_rejected():
-    with pytest.raises(ValueError, match="gas_funding_amount_wei"):
-        _make_config(
-            gas_funding_amount_wei=1_000_000,
-            min_deposit_native_wei=1_000_000,
-        )
+def test_get_token_id_matches_the_contract():
+    """Ids read from the mainnet Accounting contract's getTokenId."""
+    base_usdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    assert get_token_id(8453, None) == (
+        "0xe5e6c795953f93ec9c872a4a6000788aacf182163c7abf8a5e982fedcd9f1620"
+    )
+    assert get_token_id(8453, base_usdc) == (
+        "0x5e7facf6b7b5b9887e41398db2ae1990ff7e379d17fedb428b04265d748b33b2"
+    )
+
+
+def test_native_min_deposit_must_exceed_the_funding_cap(monkeypatch):
+    """Otherwise a gas-funding transfer could be claimed as a native deposit."""
+    native = [{"chain_id": 8453, "token_address": None}]
+    cap = CHAIN_CONFIGS[8453].gas_funding_amount_wei
+    monkeypatch.setenv("MIN_DEPOSITS", json.dumps({get_token_id(8453, None): str(cap)}))
+    with pytest.raises(ValueError, match="native token of chain 8453"):
+        _build_min_deposits(native)
+
+    monkeypatch.delenv("MIN_DEPOSITS")
+    with pytest.raises(ValueError, match="native token of chain 8453"):
+        _build_min_deposits(native)
+
+
+@pytest.mark.parametrize(
+    "env_file", [".env.mainnet", ".env.testnet", ".env.rubetest", ".env.localnet"]
+)
+def test_deployed_min_deposits_match_registered_tokens(monkeypatch, env_file):
+    """A stale or mistyped tokenId would silently leave its token without a minimum."""
+    values = dotenv_values(Path(__file__).parents[2] / env_file)
+    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", values["ACCOUNTING_TOKEN_INFO"])
+    monkeypatch.setenv("MIN_DEPOSITS", values["MIN_DEPOSITS"])
+    token_infos = _build_token_infos()
+
+    min_deposits = _build_min_deposits(token_infos)
+
+    registered = {get_token_id(e["chain_id"], e["token_address"]) for e in token_infos}
+    assert set(min_deposits) <= registered
+    assert all(amount > 0 for amount in min_deposits.values())
 
 
 def test_build_gas_prices_wei_defaults_to_empty(monkeypatch):
@@ -229,7 +252,6 @@ def test_sapphire_testnet_chain_config_m6_1():
     assert 23295 in CHAIN_CONFIGS
     cfg = CHAIN_CONFIGS[23295]
     assert cfg.discovery_scan_chunk_blocks <= 100
-    assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
     assert cfg.discovery_lookback_blocks == 640
     assert cfg.discovery_max_lookback_blocks == 1_000
@@ -249,7 +271,6 @@ def test_sapphire_localnet_chain_config(monkeypatch):
     assert 23293 in configs
     cfg = configs[23293]
     assert cfg.discovery_scan_chunk_blocks <= 100
-    assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
 
 
