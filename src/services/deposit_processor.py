@@ -172,7 +172,9 @@ class DepositProcessor:
             min_amount = MIN_DEPOSIT_NATIVE_WEI.get(chain_id, 0)
         else:
             min_amount = MIN_DEPOSIT_ERC20_WEI.get(chain_id, 0)
-        if min_amount > 0 and verified.amount < min_amount:
+        # Service accounts deposit swap outputs and refunds of any size.
+        is_service = Web3.to_checksum_address(auth.user_address) in load_settings().service_accounts
+        if min_amount > 0 and verified.amount < min_amount and not is_service:
             raise ValueError("Deposit does not meet minimum requirements")
 
         token_id = await self._get_token_id(chain_id, verified.token_address)

@@ -212,6 +212,40 @@ async def test_reject_below_minimum_native(
 
 
 @pytest.mark.asyncio
+async def test_service_account_skips_minimum(
+    processor, mock_verifier, mock_sweep_engine, monkeypatch
+):
+    """The swap LP's refunds can be below the minimum and must still be credited."""
+    settings = MagicMock(
+        service_accounts=(Web3.to_checksum_address(PRIVATE_READ_AUTH.user_address),)
+    )
+    monkeypatch.setattr("src.services.deposit_processor.load_settings", lambda: settings)
+    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
+        chain_id=84532,
+        tx_hash="0x" + "cc" * 32,
+        amount=1000,
+        is_native=True,
+        token_address=None,
+        deposit_index=0,
+        block_number=100,
+    )
+
+    result = await processor.process_deposit(
+        chain_type="evm",
+        chain_id=84532,
+        tx_hash="0x" + "cc" * 32,
+        amount=1000,
+        log_index=0,
+        version=0,
+        auth=PRIVATE_READ_AUTH,
+    )
+
+    assert result["status"] == "pending"
+    await asyncio.sleep(0)
+    mock_sweep_engine.sweep_native.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_process_erc20_deposit(processor, mock_verifier, mock_sweep_engine):
     """ERC20 deposit should call sweep_erc20 with token_address."""
     token_addr = "0x" + "cc" * 20
