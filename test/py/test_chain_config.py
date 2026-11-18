@@ -41,7 +41,7 @@ def _make_config(**overrides) -> ChainConfig:
 
 
 def test_known_chain_finality():
-    assert get_finality_depth(84532) == 15  # Base Sepolia
+    assert get_finality_depth(84532) == 250  # Base Sepolia
     assert get_finality_depth(11155111) == 2  # Eth Sepolia Testnet/Localnet
 
 

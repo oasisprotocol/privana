@@ -40,7 +40,7 @@ async def test_verify_native_top_level_deposit(verifier):
         "value": ONE_ETH,
         "from": "0x" + "dd" * 20,
     }
-    mock_block = {"number": 200}  # 100 confirmations
+    mock_block = {"number": 400}  # 300 confirmations
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -83,7 +83,7 @@ async def test_verify_erc20_deposit(verifier):
         "to": "0x" + "ee" * 20,  # tx.to is a router, not token
         "logs": [transfer_log],
     }
-    mock_block = {"number": 200}
+    mock_block = {"number": 400}
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -136,7 +136,7 @@ async def test_verify_erc20_multi_transfer_selects_by_log_index(verifier):
         "blockNumber": 100,
         "logs": [transfer_a, unrelated_log, transfer_b],
     }
-    mock_block = {"number": 200}
+    mock_block = {"number": 400}
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -184,7 +184,7 @@ async def test_verify_erc20_multi_transfer_invalid_log_index(verifier):
         "blockNumber": 100,
         "logs": [transfer_log, transfer_log_2],
     }
-    mock_block = {"number": 200}
+    mock_block = {"number": 400}
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -233,13 +233,13 @@ async def test_reject_insufficient_finality(verifier):
     """Tx without enough confirmations should be rejected."""
     mock_receipt = {
         "status": 1,
-        "blockNumber": 195,  # only 5 confirmations (need 15 for Base)
+        "blockNumber": 395,  # only 5 confirmations (need 250 for Base)
         "transactionHash": bytes.fromhex("cc" * 32),
         "to": DEPOSIT_ADDR,
         "logs": [],
     }
     mock_tx = {"to": DEPOSIT_ADDR, "value": ONE_ETH, "from": "0x" + "dd" * 20}
-    mock_block = {"number": 200}
+    mock_block = {"number": 400}
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -269,7 +269,7 @@ async def test_reject_no_deposit_found(verifier):
         "logs": [],
     }
     mock_tx = {"to": "0x" + "ff" * 20, "value": ONE_ETH, "from": "0x" + "dd" * 20}
-    mock_block = {"number": 200}
+    mock_block = {"number": 400}
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
@@ -302,7 +302,7 @@ async def test_verify_native_internal_call_deposit(verifier):
     }
     # Top-level tx goes to the multisig, not deposit address
     mock_tx = {"to": "0x" + "ff" * 20, "value": 0, "from": "0x" + "dd" * 20}
-    mock_block = {"number": 200}
+    mock_block = {"number": 400}
 
     with patch.object(verifier, "_get_web3") as mock_get_w3:
         w3 = AsyncMock()
