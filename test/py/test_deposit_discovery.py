@@ -16,8 +16,8 @@ from src.services.deposit_discovery import (
 )
 from src.services.deposit_processor import compute_deposit_id
 
-CHAIN_ID = 84532  # finality 15, min erc20 1_000_000, lookback 1800, chunk 5000
-FINALITY = 15
+CHAIN_ID = 84532  # finality 250, min erc20 1_000_000, lookback 1800, chunk 5000
+FINALITY = 250
 LOOKBACK = 1_800
 DEPOSIT_ADDRESS = Web3.to_checksum_address("0x" + "aa" * 20)
 BENEFICIARY = Web3.to_checksum_address("0x" + "bb" * 20)

@@ -106,7 +106,7 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
         ),
         84532: ChainConfig(
             chain_id=84532,
-            finality_depth=15,  # Base Sepolia (OP Stack)
+            finality_depth=250,  # Base Sepolia (OP Stack), ~50s at 0.2s blocks
             min_deposit_native_wei=1_000_000_000_000_000,  # 0.001 ETH
             min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
             gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 ETH
@@ -125,7 +125,7 @@ def _build_chain_configs() -> Dict[int, ChainConfig]:
         ),
         8453: ChainConfig(
             chain_id=8453,
-            finality_depth=15,  # Base (OP Stack), ~30s at 2s blocks
+            finality_depth=250,  # Base (OP Stack), ~50s at 0.2s blocks
             min_deposit_native_wei=2_000_000_000_000_000,  # 0.002 ETH
             min_deposit_erc20_wei=1_000_000,  # 1 USDC (6 decimals)
             gas_funding_amount_wei=200_000_000_000_000,  # cap: 0.0002 ETH
