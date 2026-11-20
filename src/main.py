@@ -173,7 +173,9 @@ async def lifespan(_app: FastAPI):
         logger.info("AuthToken encryption key synced to contract")
 
         await bootstrap_rofl_signer_address(get_accounting_contract_service())
-        await bootstrap_token_info(get_accounting_contract_service(), settings.token_infos)
+        await bootstrap_token_info(
+            get_accounting_contract_service(), list(settings.token_infos.values())
+        )
         await bootstrap_gas_prices(get_accounting_contract_service(), settings.gas_prices_wei)
 
     withdrawal_processor = get_withdrawal_processor()
@@ -184,14 +186,7 @@ async def lifespan(_app: FastAPI):
     processor = get_deposit_processor()
     logger.info("Deposit processor initialized")
 
-    # Resume incomplete sweeps from a previous crash — best-effort, don't block startup.
-    try:
-        await processor.resume_incomplete_sweeps()
-        logger.info("Sweep recovery complete")
-    except Exception:
-        logger.exception("Sweep recovery failed — incomplete sweeps may need manual attention")
-
-    # Periodic retry for SWEPT records whose credit failed (at startup or runtime).
+    # Drives unfinished sweeps from their saved state: at startup, then periodically.
     processor.start_recovery_loop()
 
     yield
