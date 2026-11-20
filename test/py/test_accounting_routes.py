@@ -873,7 +873,7 @@ def test_signed_write_route_maps_unknown_outcome_to_409(monkeypatch, path, metho
         ),
     )
     monkeypatch.setattr(routes, "_service", mock_service)
-    _set_rate_limit_exempt(monkeypatch, ())
+    _set_limit_exempt_accounts(monkeypatch, ())
     monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: _RecordingRateLimiter())
 
     response = _make_transfer_client().post(
@@ -912,9 +912,9 @@ def _mock_transfer_service(monkeypatch) -> MagicMock:
     return mock_service
 
 
-def _set_rate_limit_exempt(monkeypatch, exempt: tuple[str, ...]) -> None:
+def _set_limit_exempt_accounts(monkeypatch, exempt: tuple[str, ...]) -> None:
     fake_settings = MagicMock()
-    fake_settings.rate_limit_exempt = exempt
+    fake_settings.limit_exempt_accounts = exempt
     monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
 
 
@@ -929,7 +929,7 @@ def test_transfer_route_rejects_missing_auth(monkeypatch) -> None:
 
 def test_transfer_route_rate_limits_per_caller(monkeypatch) -> None:
     mock_service = _mock_transfer_service(monkeypatch)
-    _set_rate_limit_exempt(monkeypatch, ())
+    _set_limit_exempt_accounts(monkeypatch, ())
     limiter = _RecordingRateLimiter()
     monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: limiter)
 
@@ -945,7 +945,7 @@ def test_transfer_route_rate_limits_per_caller(monkeypatch) -> None:
 
 def test_transfer_route_returns_429_over_the_limit(monkeypatch) -> None:
     mock_service = _mock_transfer_service(monkeypatch)
-    _set_rate_limit_exempt(monkeypatch, ())
+    _set_limit_exempt_accounts(monkeypatch, ())
     monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: _RecordingRateLimiter(30))
 
     response = _make_transfer_client().post("/v1/accounting/funds/transfer", json=TRANSFER_BODY)
@@ -957,7 +957,7 @@ def test_transfer_route_returns_429_over_the_limit(monkeypatch) -> None:
 
 def test_transfer_route_skips_rate_limit_for_exempt_caller(monkeypatch) -> None:
     mock_service = _mock_transfer_service(monkeypatch)
-    _set_rate_limit_exempt(monkeypatch, (CHECKSUM_BENEFICIARY,))
+    _set_limit_exempt_accounts(monkeypatch, (CHECKSUM_BENEFICIARY,))
     limiter = _RecordingRateLimiter(30)
     monkeypatch.setattr(routes, "get_auth_rate_limiter", lambda: limiter)
 

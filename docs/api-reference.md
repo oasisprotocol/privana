@@ -156,6 +156,7 @@ Behavior notes:
 - Sweeps run as background tasks. The processor returns within ~2-3s. Don't block on the response — poll `GET /deposits/status/{deposit_id}`.
 - The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
 - The `min_deposit` field of the address response is a per-chain map — clients should use it to gate the UI.
+- Deposits from accounts in `LIMIT_EXEMPT_ACCOUNTS` (the swap LP) skip the minimum, so swap outputs and refunds of any size are credited.
 
 ## On-Ramp Flow (MoonPay or Transak)
 
@@ -244,7 +245,7 @@ POST /funds/transfer                  → {to_address, token_id, amount, nonce, 
 
 The signature is an EIP-712 `Transfer` from the source user. The caller must be authenticated, but need not be the signer: services relay transfers their users signed.
 
-The relayer pays the gas, so each caller is limited to 10 transfers per minute and 100 per day (`429` with `Retry-After` above that). Callers listed in `RATE_LIMIT_EXEMPT` (comma-separated addresses: the swap LP and Honoroll, which transfer for many users) are exempt.
+The relayer pays the gas, so each caller is limited to 10 transfers per minute and 100 per day (`429` with `Retry-After` above that). Callers listed in `LIMIT_EXEMPT_ACCOUNTS` (comma-separated addresses: the swap LP and Honoroll, which transfer for many users) are exempt.
 
 ## Private Read Endpoints
 
