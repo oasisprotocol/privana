@@ -212,12 +212,12 @@ async def test_reject_below_minimum_native(
 
 
 @pytest.mark.asyncio
-async def test_service_account_skips_minimum(
+async def test_limit_exempt_account_skips_minimum(
     processor, mock_verifier, mock_sweep_engine, monkeypatch
 ):
     """The swap LP's refunds can be below the minimum and must still be credited."""
     settings = MagicMock(
-        service_accounts=(Web3.to_checksum_address(PRIVATE_READ_AUTH.user_address),)
+        limit_exempt_accounts=(Web3.to_checksum_address(PRIVATE_READ_AUTH.user_address),)
     )
     monkeypatch.setattr("src.services.deposit_processor.load_settings", lambda: settings)
     mock_verifier.verify_deposit.return_value = VerifiedDeposit(

@@ -338,7 +338,7 @@ def _transfer_rate_limit_caller(caller: str = Depends(_require_caller)) -> None:
     """Rate-limit relayed transfers per caller, so one account can't drain relayer gas."""
 
     caller = Web3.to_checksum_address(caller)
-    if caller in load_settings().service_accounts:
+    if caller in load_settings().limit_exempt_accounts:
         return
     for limit, window_seconds in _TRANSFER_RATE_LIMITS:
         retry_after = get_auth_rate_limiter().hit(

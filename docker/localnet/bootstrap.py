@@ -98,7 +98,7 @@ def main():
         )
 
     (DATA / "localnet.env").write_text(
-        f"ACCOUNTING_CONTRACT_ADDRESS={address}\nSERVICE_ACCOUNTS={service.address}\n"
+        f"ACCOUNTING_CONTRACT_ADDRESS={address}\nLIMIT_EXEMPT_ACCOUNTS={service.address}\n"
     )
     deployment = {
         "app_id": app_id,
