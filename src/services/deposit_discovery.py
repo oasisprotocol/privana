@@ -16,6 +16,7 @@ from aiohttp import ClientError
 from web3 import AsyncWeb3, Web3
 from web3.exceptions import Web3Exception
 
+from src.config import load_settings
 from src.config.chain_config import (
     CHAIN_CONFIGS,
     TRANSFER_EVENT_TOPIC,
@@ -165,6 +166,7 @@ class DepositDiscoveryService:
         w3 = self._get_web3(chain_id)
 
         token_ids_by_address = await self._registered_erc20s(chain_id)
+        min_deposits = load_settings().min_deposits
         if token_lower is not None:
             if token_lower not in token_ids_by_address:
                 raise ValueError(
@@ -219,7 +221,8 @@ class DepositDiscoveryService:
                 candidate = _decode_transfer_log(entry)
                 if candidate is None:
                     continue
-                if candidate["amount"] < cfg.min_deposit_erc20_wei:
+                token_id_hex = token_ids_by_address[candidate["token_address"].lower()]
+                if candidate["amount"] < min_deposits.get(token_id_hex, 0):
                     continue  # /deposits/check would reject it as dust
                 if classified >= MAX_CLASSIFIED_CANDIDATES:
                     logger.info(

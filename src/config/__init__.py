@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+from eth_abi import encode
 from web3 import Web3
 
 from src.models.types import Settings
@@ -267,6 +268,45 @@ def _build_token_infos() -> List[Dict[str, Any]]:
     return token_infos
 
 
+def get_token_id(chain_id: int, token_address: Optional[str]) -> str:
+    """Compute the tokenId of a native (no address) or ERC20 token.
+
+    Must match Accounting.getTokenId() over the contract's encodeEVM*TokenData.
+    """
+    data = chain_id.to_bytes(32, "big")
+    if token_address is None:
+        return Web3.to_hex(Web3.keccak(encode(["uint8", "bytes"], [0, data])))
+    data += bytes.fromhex(token_address.removeprefix("0x"))
+    return Web3.to_hex(Web3.keccak(encode(["uint8", "bytes"], [1, data])))
+
+
+def _build_min_deposits(token_infos: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Parse MIN_DEPOSITS: a JSON object of tokenId -> minimum deposit in base units.
+
+    A token without an entry has no minimum, except native tokens: their minimum
+    must exceed the chain's gas-funding cap, so a funding transfer can't be
+    claimed as a deposit once its sweep record is gone.
+    """
+    from src.config.chain_config import CHAIN_CONFIGS
+
+    raw = os.getenv("MIN_DEPOSITS")
+    min_deposits = {
+        token_id.lower(): int(amount) for token_id, amount in json.loads(raw or "{}").items()
+    }
+    for entry in token_infos:
+        if entry["token_address"] is None:
+            chain_id = entry["chain_id"]
+            if chain_id not in CHAIN_CONFIGS:
+                raise ValueError(f"ACCOUNTING_TOKEN_INFO chain {chain_id} is not in CHAIN_CONFIGS")
+            cap = CHAIN_CONFIGS[chain_id].gas_funding_amount_wei
+            if min_deposits.get(get_token_id(chain_id, None), 0) <= cap:
+                raise ValueError(
+                    f"MIN_DEPOSITS needs an entry above {cap} for the native token "
+                    f"of chain {chain_id}"
+                )
+    return min_deposits
+
+
 def load_settings(refresh: bool = False) -> Settings:
     """Load settings, optionally refreshing cached values."""
 
@@ -282,6 +322,7 @@ def load_settings(refresh: bool = False) -> Settings:
         )
         auth_token_storage_dir = os.getenv("AUTH_TOKEN_STORAGE_DIR", ".auth_tokens")
         onramp_provider = os.getenv("ONRAMP_PROVIDER")
+        token_infos = _build_token_infos()
 
         _settings = Settings(
             api_host=os.getenv("API_HOST"),
@@ -296,7 +337,8 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_gas_limit=_get_int("ACCOUNTING_GAS_LIMIT"),
             chain_rpc_urls=chain_rpc_urls,
             gas_prices_wei=_build_gas_prices(),
-            token_infos=_build_token_infos(),
+            token_infos=token_infos,
+            min_deposits=_build_min_deposits(token_infos),
             limit_exempt_accounts=_build_limit_exempt_accounts(),
             withdrawal_poll_interval=_get_int("WITHDRAWAL_POLL_INTERVAL"),
             withdrawal_resolution_timeout=_get_int("WITHDRAWAL_RESOLUTION_TIMEOUT"),

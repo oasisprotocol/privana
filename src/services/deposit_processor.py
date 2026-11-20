@@ -14,11 +14,7 @@ from typing import Dict
 from web3 import Web3
 
 from src.config import load_settings
-from src.config.chain_config import (
-    CHAIN_CONFIGS,
-    MIN_DEPOSIT_ERC20_WEI,
-    MIN_DEPOSIT_NATIVE_WEI,
-)
+from src.config.chain_config import CHAIN_CONFIGS
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import get_accounting_contract_service
 from src.services.deposit_verifier import DepositVerifier
@@ -168,18 +164,19 @@ class DepositProcessor:
             log_index=log_index,
         )
 
-        if verified.is_native:
-            min_amount = MIN_DEPOSIT_NATIVE_WEI.get(chain_id, 0)
-        else:
-            min_amount = MIN_DEPOSIT_ERC20_WEI.get(chain_id, 0)
-        # Exempt accounts (the swap LP) deposit swap outputs and refunds of any size.
-        is_exempt = (
-            Web3.to_checksum_address(auth.user_address) in load_settings().limit_exempt_accounts
-        )
-        if min_amount > 0 and verified.amount < min_amount and not is_exempt:
-            raise ValueError("Deposit does not meet minimum requirements")
-
         token_id = await self._get_token_id(chain_id, verified.token_address)
+
+        settings = load_settings()
+        min_amount = settings.min_deposits.get(_to_hex(token_id), 0)
+        # Exempt accounts (the swap LP) deposit swap outputs and refunds of any size.
+        is_exempt = Web3.to_checksum_address(auth.user_address) in settings.limit_exempt_accounts
+        if not is_exempt:
+            # A native minimum not above the gas-funding cap would let privana's own
+            # funding transfer be claimed as a deposit once its sweep record is gone.
+            if verified.is_native and min_amount <= CHAIN_CONFIGS[chain_id].gas_funding_amount_wei:
+                raise ValueError("No minimum deposit configured for this native token")
+            if verified.amount < min_amount:
+                raise ValueError("Deposit does not meet minimum requirements")
 
         if not await self._accounting.is_token_registered(token_id):
             raise ValueError("Token not supported")

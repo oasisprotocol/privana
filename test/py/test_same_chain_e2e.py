@@ -58,6 +58,7 @@ SAPPHIRE_GAS_PRICE = 100_000_000_000
 SWEEP_GAS_PRICE = SAPPHIRE_GAS_PRICE * 5 // 4
 
 ONE_HONOR = 10**18
+NATIVE_MIN_DEPOSIT = 50_000_000_000_000_000
 TWO_ROSE = 2 * 10**18
 
 PRIVATE_READ_AUTH = PrivateReadAuth(token=b"\x00" * 65, user_address=BENEFICIARY)
@@ -141,8 +142,6 @@ def same_chain_config() -> ChainConfig:
     return ChainConfig(
         chain_id=SAME_CHAIN_ID,
         finality_depth=2,
-        min_deposit_native_wei=50_000_000_000_000_000,
-        min_deposit_erc20_wei=ONE_HONOR,
         gas_funding_amount_wei=20_000_000_000_000_000,
         min_sweep_gas_price_wei=SAPPHIRE_GAS_PRICE,
         l2_type=L2Type.NONE,
@@ -153,19 +152,15 @@ def same_chain_config() -> ChainConfig:
 
 
 @pytest.fixture(autouse=True)
-def injected_chain(monkeypatch, same_chain_config) -> ChainConfig:
-    """Override module-level minimums and lookups with isolated test config."""
+def injected_chain(monkeypatch, same_chain_config, token_registry) -> ChainConfig:
+    """Override minimums and lookups with isolated test config."""
     cfg = same_chain_config
-    monkeypatch.setattr(
-        deposit_processor,
-        "MIN_DEPOSIT_NATIVE_WEI",
-        {cfg.chain_id: cfg.min_deposit_native_wei},
-    )
-    monkeypatch.setattr(
-        deposit_processor,
-        "MIN_DEPOSIT_ERC20_WEI",
-        {cfg.chain_id: cfg.min_deposit_erc20_wei},
-    )
+    min_deposits = {
+        Web3.to_hex(token_registry[(SAME_CHAIN_ID, None)]): NATIVE_MIN_DEPOSIT,
+        Web3.to_hex(token_registry[(SAME_CHAIN_ID, TOKEN_ADDRESS.lower())]): ONE_HONOR,
+    }
+    settings = MagicMock(limit_exempt_accounts=(), min_deposits=min_deposits)
+    monkeypatch.setattr(deposit_processor, "load_settings", lambda: settings)
     monkeypatch.setattr(
         sweep_engine,
         "GAS_FUNDING_AMOUNT_WEI",
@@ -425,7 +420,7 @@ async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
 async def test_deposit_below_the_injected_erc20_floor_is_rejected(
     processor, verifier, engine, injected_chain
 ):
-    short = injected_chain.min_deposit_erc20_wei - 1
+    short = ONE_HONOR - 1
     node = _single_chain_node(
         receipts={
             ERC20_DEPOSIT_TX: {

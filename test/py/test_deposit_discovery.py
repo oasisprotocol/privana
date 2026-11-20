@@ -187,7 +187,9 @@ async def test_empty_token_registry_makes_no_rpc_calls():
     w3.eth.get_logs.assert_not_called()
 
 
-async def test_dust_transfer_dropped():
+async def test_dust_transfer_dropped(monkeypatch):
+    settings = MagicMock(min_deposits={USDC_TOKEN_ID: 1_000_000})
+    monkeypatch.setattr("src.services.deposit_discovery.load_settings", lambda: settings)
     service = _make_service(logs=[_log("ab", 99_000, amount=999_999)])
     result = await _discover(service)
     assert result.pending == []

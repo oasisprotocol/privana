@@ -12,6 +12,14 @@ from src.services.sweep_engine import SweepRecord, SweepState
 ONE_ETH = Web3.to_wei(1, "ether")
 FIFTY_USDC = 50 * 10**6
 PRIVATE_READ_AUTH = PrivateReadAuth(token=b"\x00" * 65, user_address="0x" + "bb" * 20)
+TOKEN_ID_HEX = "0x" + "11" * 32  # mock_accounting.get_token_id
+
+
+@pytest.fixture(autouse=True)
+def settings(monkeypatch):
+    settings = MagicMock(limit_exempt_accounts=(), min_deposits={TOKEN_ID_HEX: 10**15})
+    monkeypatch.setattr("src.services.deposit_processor.load_settings", lambda: settings)
+    return settings
 
 
 @pytest.fixture
@@ -186,7 +194,7 @@ async def test_reject_below_minimum_native(
     mock_verifier,
     mock_sweep_engine,
 ):
-    """Native deposits below MIN_DEPOSIT_NATIVE_WEI should be rejected."""
+    """Native deposits below the token's minimum should be rejected."""
     mock_verifier.verify_deposit.return_value = VerifiedDeposit(
         chain_id=84532,
         tx_hash="0x" + "cc" * 32,
@@ -213,13 +221,10 @@ async def test_reject_below_minimum_native(
 
 @pytest.mark.asyncio
 async def test_limit_exempt_account_skips_minimum(
-    processor, mock_verifier, mock_sweep_engine, monkeypatch
+    processor, mock_verifier, mock_sweep_engine, settings
 ):
     """The swap LP's refunds can be below the minimum and must still be credited."""
-    settings = MagicMock(
-        limit_exempt_accounts=(Web3.to_checksum_address(PRIVATE_READ_AUTH.user_address),)
-    )
-    monkeypatch.setattr("src.services.deposit_processor.load_settings", lambda: settings)
+    settings.limit_exempt_accounts = (Web3.to_checksum_address(PRIVATE_READ_AUTH.user_address),)
     mock_verifier.verify_deposit.return_value = VerifiedDeposit(
         chain_id=84532,
         tx_hash="0x" + "cc" * 32,
@@ -246,8 +251,39 @@ async def test_limit_exempt_account_skips_minimum(
 
 
 @pytest.mark.asyncio
-async def test_process_erc20_deposit(processor, mock_verifier, mock_sweep_engine):
+async def test_reject_native_token_without_minimum(
+    processor, mock_verifier, mock_sweep_engine, settings
+):
+    """Without a minimum above the funding cap, a gas-funding tx could be claimed."""
+    settings.min_deposits = {}
+    mock_verifier.verify_deposit.return_value = VerifiedDeposit(
+        chain_id=84532,
+        tx_hash="0x" + "cc" * 32,
+        amount=ONE_ETH,
+        is_native=True,
+        token_address=None,
+        deposit_index=0,
+        block_number=100,
+    )
+
+    with pytest.raises(ValueError, match="No minimum deposit configured"):
+        await processor.process_deposit(
+            chain_type="evm",
+            chain_id=84532,
+            tx_hash="0x" + "cc" * 32,
+            amount=ONE_ETH,
+            log_index=0,
+            version=0,
+            auth=PRIVATE_READ_AUTH,
+        )
+
+    mock_sweep_engine.sweep_native.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_erc20_deposit(processor, mock_verifier, mock_sweep_engine, settings):
     """ERC20 deposit should call sweep_erc20 with token_address."""
+    settings.min_deposits = {}
     token_addr = "0x" + "cc" * 20
     mock_verifier.verify_deposit.return_value = VerifiedDeposit(
         chain_id=84532,
