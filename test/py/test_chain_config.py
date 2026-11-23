@@ -14,7 +14,6 @@ from src.config import (
     _build_chain_rpc_urls,
     _build_gas_prices,
     _build_limit_exempt_accounts,
-    _build_min_deposits,
     _build_token_infos,
 )
 from src.config.chain_config import (
@@ -98,21 +97,6 @@ def test_valid_config_constructs():
     assert _make_config().chain_id
 
 
-@pytest.mark.parametrize(
-    "env_file", [".env.mainnet", ".env.testnet", ".env.rubetest", ".env.localnet"]
-)
-def test_deployed_min_deposits_match_registered_tokens(monkeypatch, env_file):
-    """A stale or mistyped tokenId would silently leave its token without a minimum."""
-    values = dotenv_values(Path(__file__).parents[2] / env_file)
-    monkeypatch.setenv("ACCOUNTING_TOKEN_INFO", values["ACCOUNTING_TOKEN_INFO"])
-    monkeypatch.setenv("MIN_DEPOSITS", values["MIN_DEPOSITS"])
-
-    min_deposits = _build_min_deposits()
-
-    assert set(min_deposits) <= set(_build_token_infos())
-    assert all(amount > 0 for amount in min_deposits.values())
-
-
 def test_build_gas_prices_wei_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ACCOUNTING_GAS_PRICE", raising=False)
 
@@ -151,12 +135,13 @@ def test_build_token_infos_defaults_to_empty(monkeypatch):
 def test_build_token_infos_parses_native_and_erc20(monkeypatch):
     monkeypatch.setenv(
         "ACCOUNTING_TOKEN_INFO",
-        f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}"}}]',
+        f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}", '
+        '"min_deposit": "1000000"}]',
     )
 
     assert list(_build_token_infos().values()) == [
-        {"chain_id": 84532, "token_address": None},
-        {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA},
+        {"chain_id": 84532, "token_address": None, "min_deposit": 0},
+        {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA, "min_deposit": 1_000_000},
     ]
 
 

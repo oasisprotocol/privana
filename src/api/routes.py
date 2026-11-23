@@ -469,7 +469,9 @@ async def get_deposit_address(
             chain_type=payload.chain_type,
             version=payload.version,
             min_deposit={
-                token_id: str(amount) for token_id, amount in settings.min_deposits.items()
+                token_id: str(info["min_deposit"])
+                for token_id, info in settings.token_infos.items()
+                if info["min_deposit"]
             },
             finality_depth={str(cid): get_finality_depth(cid) for cid in settings.chain_rpc_urls},
         )

@@ -410,7 +410,7 @@ class SweepEngine:
 
         settings = load_settings()
         is_exempt = Web3.to_checksum_address(beneficiary) in settings.limit_exempt_accounts
-        min_amount = settings.min_deposits.get(_to_hex(token_id), 0)
+        min_amount = settings.token_infos[_to_hex(token_id)]["min_deposit"]
         if (
             sweepable == 0
             or (not is_exempt and sweepable < min_amount)

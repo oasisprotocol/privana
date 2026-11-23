@@ -537,7 +537,7 @@ def test_deposit_status_not_found(monkeypatch) -> None:
     assert response.status_code == 404
 
 
-def _deposit_address_body(monkeypatch, chain_rpc_urls, min_deposits=None) -> dict:
+def _deposit_address_body(monkeypatch, chain_rpc_urls, token_infos=None) -> dict:
     """POST /deposits/address with the given verified chains and minimums."""
     mock_service = MagicMock()
     mock_service.get_deposit_address = AsyncMock(return_value="0x" + "aa" * 20)
@@ -545,7 +545,7 @@ def _deposit_address_body(monkeypatch, chain_rpc_urls, min_deposits=None) -> dic
 
     fake_settings = MagicMock()
     fake_settings.chain_rpc_urls = chain_rpc_urls
-    fake_settings.min_deposits = min_deposits or {}
+    fake_settings.token_infos = token_infos or {}
     monkeypatch.setattr(routes, "load_settings", lambda: fake_settings)
 
     client = _make_private_read_client(token=b"\xab" * 32)
@@ -562,7 +562,11 @@ def test_get_deposit_address_returns_minimums_per_token(monkeypatch) -> None:
     body = _deposit_address_body(
         monkeypatch,
         chain_rpc_urls={84532: "https://base-sepolia.g.alchemy.com/v2/test"},
-        min_deposits={"0x" + "11" * 32: 1_000_000, "0x" + "22" * 32: 2_000},
+        token_infos={
+            "0x" + "11" * 32: {"min_deposit": 1_000_000},
+            "0x" + "22" * 32: {"min_deposit": 2_000},
+            "0x" + "33" * 32: {"min_deposit": 0},
+        },
     )
     assert body["deposit_address"] == "0x" + "aa" * 20
     assert body["min_deposit"] == {"0x" + "11" * 32: "1000000", "0x" + "22" * 32: "2000"}

@@ -27,6 +27,15 @@ L2_FEE_PATCH = "src.services.sweep_engine.estimate_l1_data_fee"
 
 
 @pytest.fixture(autouse=True)
+def _settings(monkeypatch):
+    """Claims read the exempt accounts and the token's minimum from the settings."""
+    settings = SimpleNamespace(
+        limit_exempt_accounts=(), token_infos={"0x" + "11" * 32: {"min_deposit": 0}}
+    )
+    monkeypatch.setattr("src.services.sweep_engine.load_settings", lambda: settings)
+
+
+@pytest.fixture(autouse=True)
 def _mock_l2_fee():
     """Default: L1 chain behavior (no L1 data fee)."""
     with patch(L2_FEE_PATCH, new_callable=AsyncMock, return_value=0):

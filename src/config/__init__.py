@@ -233,7 +233,8 @@ def _build_token_infos() -> Dict[str, Dict[str, Any]]:
     Returns the descriptors keyed by their tokenId.
 
     Each entry is ``{"chain_id": <int>}`` for a native token, or
-    {"chain_id": <int>, "token_address": "0x..."}`` for an ERC20 token
+    {"chain_id": <int>, "token_address": "0x..."}`` for an ERC20 token, with an
+    optional ``"min_deposit"`` in base units; a token without one has no minimum.
 
     For example:
       ACCOUNTING_TOKEN_INFO='[
@@ -277,18 +278,10 @@ def _build_token_infos() -> Dict[str, Dict[str, Any]]:
         token_infos[get_token_id(chain_id, token_address)] = {
             "chain_id": chain_id,
             "token_address": token_address,
+            "min_deposit": int(entry.get("min_deposit", 0)),
         }
 
     return token_infos
-
-
-def _build_min_deposits() -> Dict[str, int]:
-    """Parse MIN_DEPOSITS: a JSON object of tokenId -> minimum deposit in base units.
-
-    A token without an entry has no minimum.
-    """
-    raw = os.getenv("MIN_DEPOSITS") or "{}"
-    return {token_id.lower(): int(amount) for token_id, amount in json.loads(raw).items()}
 
 
 def load_settings(refresh: bool = False) -> Settings:
@@ -321,7 +314,6 @@ def load_settings(refresh: bool = False) -> Settings:
             chain_rpc_urls=chain_rpc_urls,
             gas_prices_wei=_build_gas_prices(),
             token_infos=_build_token_infos(),
-            min_deposits=_build_min_deposits(),
             limit_exempt_accounts=_build_limit_exempt_accounts(),
             withdrawal_poll_interval=_get_int("WITHDRAWAL_POLL_INTERVAL"),
             withdrawal_resolution_timeout=_get_int("WITHDRAWAL_RESOLUTION_TIMEOUT"),

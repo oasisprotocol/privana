@@ -22,7 +22,6 @@ class Settings:
     chain_rpc_urls: Dict[int, str]
     gas_prices_wei: Dict[int, int]
     token_infos: Dict[str, Dict[str, Any]]
-    min_deposits: Dict[str, int]
     limit_exempt_accounts: Tuple[str, ...]
     withdrawal_poll_interval: int
     withdrawal_resolution_timeout: int

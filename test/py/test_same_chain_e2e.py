@@ -144,9 +144,9 @@ def injected_chain(monkeypatch, same_chain_config) -> ChainConfig:
         "load_settings",
         lambda: SimpleNamespace(
             limit_exempt_accounts=(),
-            min_deposits={
-                Web3.to_hex(NATIVE_TOKEN_ID): NATIVE_MIN_DEPOSIT,
-                Web3.to_hex(ERC20_TOKEN_ID): ONE_HONOR,
+            token_infos={
+                Web3.to_hex(NATIVE_TOKEN_ID): {"min_deposit": NATIVE_MIN_DEPOSIT},
+                Web3.to_hex(ERC20_TOKEN_ID): {"min_deposit": ONE_HONOR},
             },
         ),
     )

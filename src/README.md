@@ -195,7 +195,7 @@ Key file: `services/token_info_bootstrap.py`.
 
 ## Configuration
 
-Minimum deposits are set per tokenId in base units by the `MIN_DEPOSITS` env var; a token not listed has no minimum.
+Minimum deposits are set per token by `min_deposit` (base units) in `ACCOUNTING_TOKEN_INFO`; a token without one has no minimum.
 
 Per-chain settings live in **`src/config/chain_config.py`** as a `ChainConfig` dataclass:
 
