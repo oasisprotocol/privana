@@ -26,11 +26,7 @@ from src.auth.siwe_service import SiweAuthError, authenticate_siwe_message
 from src.auth.token_store import get_token_store
 from src.clients.rofl import TransactionRevertedError
 from src.config import load_settings
-from src.config.chain_config import (
-    MIN_DEPOSIT_ERC20_WEI,
-    MIN_DEPOSIT_NATIVE_WEI,
-    get_finality_depth,
-)
+from src.config.chain_config import get_finality_depth
 from src.models.accounting import (
     BalanceResponse,
     BatchBalancesRequest,
@@ -468,33 +464,15 @@ async def get_deposit_address(
             payload.chain_type, payload.version, auth.token
         )
         settings = load_settings()
-        native_supported = {
-            entry["chain_id"]
-            for entry in settings.token_infos.values()
-            if not entry.get("token_address")
-        }
-        erc20_supported = {
-            entry["chain_id"]
-            for entry in settings.token_infos.values()
-            if entry.get("token_address")
-        }
-        # Advertise only chains that survived RPC identity verification and have
-        # at least one registered asset type.
-        min_deposit: dict[str, dict[str, str]] = {}
-        for cid in settings.chain_rpc_urls:
-            chain_min: dict[str, str] = {}
-            if cid in native_supported:
-                chain_min["native"] = str(MIN_DEPOSIT_NATIVE_WEI.get(cid, 0))
-            if cid in erc20_supported:
-                chain_min["erc20"] = str(MIN_DEPOSIT_ERC20_WEI.get(cid, 0))
-            if chain_min:
-                min_deposit[str(cid)] = chain_min
-
         return DepositAddressResponse(
             deposit_address=address,
             chain_type=payload.chain_type,
             version=payload.version,
-            min_deposit=min_deposit,
+            min_deposit={
+                token_id: str(info["min_deposit"])
+                for token_id, info in settings.token_infos.items()
+                if info["min_deposit"]
+            },
             finality_depth={str(cid): get_finality_depth(cid) for cid in settings.chain_rpc_urls},
         )
     except ContractLogicError as exc:

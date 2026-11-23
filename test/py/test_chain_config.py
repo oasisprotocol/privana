@@ -18,8 +18,6 @@ from src.config import (
 )
 from src.config.chain_config import (
     CHAIN_CONFIGS,
-    MIN_DEPOSIT_ERC20_WEI,
-    MIN_DEPOSIT_NATIVE_WEI,
     ChainConfig,
     _build_chain_configs,
     get_block_time_seconds,
@@ -32,8 +30,6 @@ def _make_config(**overrides) -> ChainConfig:
     params = dict(
         chain_id=1,
         finality_depth=2,
-        min_deposit_native_wei=1_000_000,
-        min_deposit_erc20_wei=1_000_000,
         gas_funding_amount_wei=200_000,
         min_sweep_gas_price_wei=1,  # keep gas_limit * floor * headroom under the cap
         block_time_seconds=12.0,
@@ -80,7 +76,6 @@ def test_cap_below_floor_priced_sweep_rejected():
     # floor 1 gwei * 65_000 gas * 2 headroom = 1.3e14 > 1e13 cap
     with pytest.raises(ValueError, match="floor-priced ERC-20 sweep"):
         _make_config(
-            min_deposit_native_wei=10**15,
             gas_funding_amount_wei=10**13,
             min_sweep_gas_price_wei=10**9,
         )
@@ -88,13 +83,6 @@ def test_cap_below_floor_priced_sweep_rejected():
 
 def test_unknown_chain_uses_default():
     assert get_finality_depth(999999) == 32  # conservative default
-
-
-def test_minimum_deposits_are_positive():
-    for chain_id, amount in MIN_DEPOSIT_NATIVE_WEI.items():
-        assert amount > 0, f"chain {chain_id} native minimum must be > 0"
-    for chain_id, amount in MIN_DEPOSIT_ERC20_WEI.items():
-        assert amount > 0, f"chain {chain_id} ERC20 minimum must be > 0"
 
 
 def test_ethereum_sepolia_runtime_metadata():
@@ -107,14 +95,6 @@ def test_ethereum_sepolia_runtime_metadata():
 
 def test_valid_config_constructs():
     assert _make_config().chain_id
-
-
-def test_gas_funding_not_below_min_deposit_rejected():
-    with pytest.raises(ValueError, match="gas_funding_amount_wei"):
-        _make_config(
-            gas_funding_amount_wei=1_000_000,
-            min_deposit_native_wei=1_000_000,
-        )
 
 
 def test_build_gas_prices_wei_defaults_to_empty(monkeypatch):
@@ -155,12 +135,13 @@ def test_build_token_infos_defaults_to_empty(monkeypatch):
 def test_build_token_infos_parses_native_and_erc20(monkeypatch):
     monkeypatch.setenv(
         "ACCOUNTING_TOKEN_INFO",
-        f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}"}}]',
+        f'[{{"chain_id": 84532}}, {{"chain_id": 84532, "token_address": "{USDC_BASE_SEPOLIA}", '
+        '"min_deposit": "1000000"}]',
     )
 
     assert list(_build_token_infos().values()) == [
-        {"chain_id": 84532, "token_address": None},
-        {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA},
+        {"chain_id": 84532, "token_address": None, "min_deposit": 0},
+        {"chain_id": 84532, "token_address": USDC_BASE_SEPOLIA, "min_deposit": 1_000_000},
     ]
 
 
@@ -229,7 +210,6 @@ def test_sapphire_testnet_runtime_metadata():
 def test_sapphire_testnet_chain_config_m6_1():
     assert 23295 in CHAIN_CONFIGS
     cfg = CHAIN_CONFIGS[23295]
-    assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
 
 
@@ -246,7 +226,6 @@ def test_sapphire_localnet_chain_config(monkeypatch):
 
     assert 23293 in configs
     cfg = configs[23293]
-    assert cfg.min_deposit_erc20_wei == 10**18
     assert cfg.finality_depth == 2
 
 

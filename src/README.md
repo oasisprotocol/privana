@@ -195,6 +195,8 @@ Key file: `services/token_info_bootstrap.py`.
 
 ## Configuration
 
+Minimum deposits are set per token by `min_deposit` (in corresponding base units) in `ACCOUNTING_TOKEN_INFO`; a token without one has no minimum.
+
 Per-chain settings live in **`src/config/chain_config.py`** as a `ChainConfig` dataclass:
 
 ```python
@@ -202,8 +204,6 @@ ChainConfig(
     chain_id=84532,
     block_time_seconds=0.2,                       # expected time between blocks
     finality_depth=15,                            # block confirmations required
-    min_deposit_native_wei=1_000_000_000_000_000, # 0.001 ETH
-    min_deposit_erc20_wei=1_000_000,              # 1 USDC (6 decimals)
     gas_funding_amount_wei=200_000_000_000_000,   # cap on per-sweep gas funding
     min_sweep_gas_price_wei=100_000_000,          # gas-price floor (bad-RPC backstop)
     l2_type=L2Type.OP_STACK,                      # for L1-data-fee estimation

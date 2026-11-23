@@ -55,6 +55,7 @@ SAPPHIRE_GAS_PRICE = 100_000_000_000
 SWEEP_GAS_PRICE = SAPPHIRE_GAS_PRICE * 5 // 4
 
 ONE_HONOR = 10**18
+NATIVE_MIN_DEPOSIT = 50_000_000_000_000_000
 TWO_ROSE = 2 * 10**18
 
 PRIVATE_READ_AUTH = PrivateReadAuth(token=b"\x00" * 65, user_address=BENEFICIARY)
@@ -127,8 +128,6 @@ def same_chain_config() -> ChainConfig:
     return ChainConfig(
         chain_id=SAME_CHAIN_ID,
         finality_depth=2,
-        min_deposit_native_wei=50_000_000_000_000_000,
-        min_deposit_erc20_wei=ONE_HONOR,
         gas_funding_amount_wei=20_000_000_000_000_000,
         min_sweep_gas_price_wei=SAPPHIRE_GAS_PRICE,
         block_time_seconds=6.0,
@@ -138,17 +137,18 @@ def same_chain_config() -> ChainConfig:
 
 @pytest.fixture(autouse=True)
 def injected_chain(monkeypatch, same_chain_config) -> ChainConfig:
-    """Override module-level minimums and lookups with isolated test config."""
+    """Override minimums and module-level lookups with isolated test config."""
     cfg = same_chain_config
     monkeypatch.setattr(
         sweep_engine,
-        "MIN_DEPOSIT_NATIVE_WEI",
-        {cfg.chain_id: cfg.min_deposit_native_wei},
-    )
-    monkeypatch.setattr(
-        sweep_engine,
-        "MIN_DEPOSIT_ERC20_WEI",
-        {cfg.chain_id: cfg.min_deposit_erc20_wei},
+        "load_settings",
+        lambda: SimpleNamespace(
+            limit_exempt_accounts=(),
+            token_infos={
+                Web3.to_hex(NATIVE_TOKEN_ID): {"min_deposit": NATIVE_MIN_DEPOSIT},
+                Web3.to_hex(ERC20_TOKEN_ID): {"min_deposit": ONE_HONOR},
+            },
+        ),
     )
     monkeypatch.setattr(
         sweep_engine,
@@ -338,10 +338,8 @@ async def test_native_deposit_on_the_accounting_chain_is_swept_and_credited(
 
 
 @pytest.mark.asyncio
-async def test_deposit_below_the_injected_erc20_floor_is_not_claimed(
-    processor, engine, injected_chain
-):
-    short = injected_chain.min_deposit_erc20_wei - 1
+async def test_deposit_below_the_erc20_minimum_is_not_claimed(processor, engine):
+    short = ONE_HONOR - 1
     node = _single_chain_node(
         receipts={},
     )
