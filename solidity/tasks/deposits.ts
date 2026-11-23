@@ -59,10 +59,8 @@ task("getDepositAddress")
     console.log("Version:", data.version);
     if (isJsonObject(data.min_deposit)) {
       console.log("\nMinimum deposits:");
-      for (const [chainId, limits] of Object.entries(data.min_deposit)) {
-        if (isJsonObject(limits)) {
-          console.log(`  Chain ${chainId}: native=${limits.native}, erc20=${limits.erc20}`);
-        }
+      for (const [tokenId, amount] of Object.entries(data.min_deposit)) {
+        console.log(`  Token ${tokenId}: ${amount}`);
       }
     }
 

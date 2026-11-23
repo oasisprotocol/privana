@@ -36,8 +36,6 @@ from src.config import load_settings
 from src.config.chain_config import (
     GAS_FUNDING_AMOUNT_WEI,
     GAS_FUNDING_HEADROOM,
-    MIN_DEPOSIT_ERC20_WEI,
-    MIN_DEPOSIT_NATIVE_WEI,
     MIN_SWEEP_GAS_PRICE_WEI,
     SWEEP_GAS_LIMIT_ERC20,
     SWEEP_GAS_LIMIT_NATIVE,
@@ -410,11 +408,12 @@ class SweepEngine:
             # Failed before any sweep tx existed: nothing on-chain to orphan, clean it up and create a new one below.
             self._delete_record(existing.deposit_id_hex)
 
-        is_exempt = Web3.to_checksum_address(beneficiary) in load_settings().limit_exempt_accounts
-        minimums = MIN_DEPOSIT_NATIVE_WEI if token_address is None else MIN_DEPOSIT_ERC20_WEI
+        settings = load_settings()
+        is_exempt = Web3.to_checksum_address(beneficiary) in settings.limit_exempt_accounts
+        min_amount = settings.min_deposits.get(_to_hex(token_id), 0)
         if (
             sweepable == 0
-            or (not is_exempt and sweepable < minimums.get(chain_id, 0))
+            or (not is_exempt and sweepable < min_amount)
             or (
                 # Avoid infinite deposits of dust for undefined minimums and exempt accounts.
                 token_address is None and sweepable <= GAS_FUNDING_AMOUNT_WEI[chain_id]

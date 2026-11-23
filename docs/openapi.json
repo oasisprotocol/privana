@@ -263,12 +263,9 @@
           },
           "min_deposit": {
             "additionalProperties": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": "object"
+              "type": "string"
             },
-            "description": "Minimum deposit amounts per chain for supported asset types ('native', 'erc20')",
+            "description": "Minimum deposit in base units per tokenId; a token not listed has no minimum",
             "title": "Min Deposit",
             "type": "object"
           },
