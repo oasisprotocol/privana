@@ -533,7 +533,7 @@ async def test_claim_schedules_the_balance_without_amount_or_nonce(engine):
         version=0,
         chain_id=84532,
         token_address="0x" + "cc" * 20,
-        token_id=b"\x11" * 32,
+        token_id_hex="0x" + "11" * 32,
     )
     with (
         patch.object(engine, "_get_web3", return_value=w3),
@@ -563,14 +563,14 @@ async def test_claim_during_a_live_sweep_returns_its_deposit_id(engine):
         version=0,
         chain_id=84532,
         token_address=None,
-        token_id=b"\x11" * 32,
+        token_id_hex="0x" + "11" * 32,
     )
     with patch.object(engine, "_get_web3", return_value=w3):
         started = await engine.claim_balance(**args)
         lock = engine._get_address_lock(args["deposit_address"], args["chain_id"])
         async with lock:  # the sweep of that record is running
             retry = await engine.claim_balance(**args)
-            other = await engine.claim_balance(**{**args, "token_id": b"\x22" * 32})
+            other = await engine.claim_balance(**{**args, "token_id_hex": "0x" + "22" * 32})
 
     assert (retry.status, retry.record.deposit_id_hex) == (
         BalanceClaimStatus.IN_FLIGHT,
@@ -592,7 +592,7 @@ async def test_claim_does_not_replace_a_record_when_a_sweep_takes_the_lock_mid_c
         version=0,
         chain_id=84532,
         token_address=None,
-        token_id=b"\x11" * 32,
+        token_id_hex="0x" + "11" * 32,
     )
     lock = engine._get_address_lock(args["deposit_address"], args["chain_id"])
 
@@ -624,7 +624,7 @@ async def test_claim_reschedules_a_record_that_failed_before_broadcast(engine):
         version=0,
         chain_id=84532,
         token_address=None,
-        token_id=b"\x11" * 32,
+        token_id_hex="0x" + "11" * 32,
     )
     with patch.object(engine, "_get_web3", return_value=w3):
         failed = (await engine.claim_balance(**args)).record
@@ -691,7 +691,7 @@ async def test_claims_made_together_for_one_asset_schedule_a_single_sweep(engine
         version=0,
         chain_id=84532,
         token_address=None,
-        token_id=b"\x11" * 32,
+        token_id_hex="0x" + "11" * 32,
     )
     with patch.object(engine, "_get_web3", return_value=w3):
         claims = await asyncio.gather(engine.claim_balance(**args), engine.claim_balance(**args))

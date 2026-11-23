@@ -161,7 +161,6 @@ class DepositProcessor:
         Returns the in-flight deposit (None when there is none) and, for a newly
         scheduled sweep, its ``deposit_id``.
         """
-        token_id = bytes.fromhex(token_id_hex.removeprefix("0x"))
         info = load_settings().token_infos[token_id_hex]
         chain_id = info["chain_id"]
         asset = Web3.to_checksum_address(info["token_address"]) if info["token_address"] else None
@@ -176,7 +175,7 @@ class DepositProcessor:
             version=version,
             chain_id=chain_id,
             token_address=asset,
-            token_id=token_id,
+            token_id_hex=token_id_hex,
         )
 
         record = claim.record

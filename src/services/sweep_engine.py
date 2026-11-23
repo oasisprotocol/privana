@@ -386,10 +386,10 @@ class SweepEngine:
         version: int,
         chain_id: int,
         token_address: Optional[str],  # None for the native token
-        token_id: bytes,
+        token_id_hex: str,
     ) -> BalanceClaim:
         """Schedule a sweep of the whole balance of one asset at a deposit address."""
-        in_flight = self.get_record(_to_hex(token_id), deposit_address)
+        in_flight = self.get_record(token_id_hex, deposit_address)
         if in_flight is not None and (not in_flight.error or in_flight.sweep_tx_hash):
             return BalanceClaim(BalanceClaimStatus.IN_FLIGHT, in_flight)
 
@@ -401,7 +401,7 @@ class SweepEngine:
 
         # No sweep lock; clear any stale records. No await from here to the save, so no
         # other claim can schedule the same asset meanwhile.
-        existing = self.get_record(_to_hex(token_id), deposit_address)
+        existing = self.get_record(token_id_hex, deposit_address)
         if existing is not None:
             if not existing.error or existing.sweep_tx_hash:
                 return BalanceClaim(BalanceClaimStatus.IN_FLIGHT, existing)
@@ -410,7 +410,7 @@ class SweepEngine:
 
         settings = load_settings()
         is_exempt = Web3.to_checksum_address(beneficiary) in settings.limit_exempt_accounts
-        min_amount = settings.token_infos[_to_hex(token_id)]["min_deposit"]
+        min_amount = settings.token_infos[token_id_hex]["min_deposit"]
         if (
             sweepable == 0
             or (not is_exempt and sweepable < min_amount)
@@ -428,7 +428,7 @@ class SweepEngine:
             beneficiary=beneficiary,
             chain_type=chain_type,
             version=version,
-            token_id_hex=_to_hex(token_id),
+            token_id_hex=token_id_hex,
             token_address=token_address,
             deposit_id_hex=_to_hex(os.urandom(32)),
         )
