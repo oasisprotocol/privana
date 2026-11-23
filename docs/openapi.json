@@ -343,6 +343,17 @@
             ],
             "title": "Detail"
           },
+          "finality": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DepositFinalityProgress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pending deposits only, from GET /deposits/status. Null until the sweep tx is signed, or when the chain can't be read."
+          },
           "status": {
             "enum": [
               "credited",
@@ -369,6 +380,27 @@
           "status"
         ],
         "title": "DepositCheckResponse",
+        "type": "object"
+      },
+      "DepositFinalityProgress": {
+        "description": "How deep a pending deposit's sweep tx is buried, against the depth its credit waits for.",
+        "properties": {
+          "confirmations": {
+            "description": "Confirmations of the sweep tx so far, 0-based: the latest block minus the block it is mined in, so 0 means the head block (or not mined yet).",
+            "title": "Confirmations",
+            "type": "integer"
+          },
+          "required": {
+            "description": "Confirmations at which the sweep tx is final. The credit follows; the status stays pending until it lands.",
+            "title": "Required",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "confirmations",
+          "required"
+        ],
+        "title": "DepositFinalityProgress",
         "type": "object"
       },
       "ExpiredLocksResponse": {

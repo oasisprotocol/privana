@@ -14,6 +14,7 @@ from src.config.chain_config import get_finality_depth
 from src.models.private_read import PrivateReadAuth
 from src.services.accounting_contract import SubmissionOutcomeUnknownError, SubmissionResult
 from src.services.deposit_processor import DepositProcessor
+from src.services.sweep_engine import SweepEngine, SweepRecord, SweepState
 
 BENEFICIARY = "0x" + "bb" * 20
 CHECKSUM_BENEFICIARY = Web3.to_checksum_address(BENEFICIARY)
@@ -425,6 +426,7 @@ def test_deposit_status_route_resolves_siwe_token_user(monkeypatch) -> None:
             "token_address": "0x" + "cc" * 20,
         }
     )
+    mock_processor.get_finality_progress = AsyncMock(return_value=None)
     monkeypatch.setattr(routes, "get_deposit_processor", lambda: mock_processor)
 
     client = _make_client()
@@ -510,6 +512,7 @@ def test_deposit_status_pending_in_memory(monkeypatch) -> None:
             "token_address": "0x" + "cc" * 20,
         }
     )
+    mock_processor.get_finality_progress = AsyncMock(return_value=None)
     monkeypatch.setattr(routes, "get_deposit_processor", lambda: mock_processor)
 
     client = _make_authed_client(monkeypatch)
@@ -519,6 +522,49 @@ def test_deposit_status_pending_in_memory(monkeypatch) -> None:
     body = response.json()
     assert body["status"] == "pending"
     assert body["amount"] == "50000000"
+
+
+def test_deposit_status_reports_confirmations_while_the_sweep_awaits_finality(
+    monkeypatch, tmp_path
+) -> None:
+    """While the sweep tx waits for finality, status shows how deep it is as the chain advances."""
+    engine = SweepEngine(
+        accounting_service=MagicMock(),
+        chain_rpc_urls={84532: "http://rpc.invalid"},
+        state_dir=str(tmp_path),
+    )
+    engine._save_record(
+        SweepRecord(
+            deposit_address="0x" + "aa" * 20,
+            chain_id=84532,
+            state=SweepState.SWEEP_PREPARED,
+            beneficiary=BENEFICIARY,
+            chain_type="evm",
+            version=0,
+            token_id_hex=TOKEN_ID_HEX,
+            deposit_id_hex=DEPOSIT_ID_HEX,
+            sweep_tx_hash="0x" + "ee" * 32,
+            sweep_block_number=100,  # saved while the sweep waits for finality
+        )
+    )
+    w3 = AsyncMock()
+    monkeypatch.setattr(engine, "_get_web3", lambda chain_id: w3)
+    processor = DepositProcessor(sweep_engine=engine, accounting_service=MagicMock())
+    monkeypatch.setattr(routes, "get_deposit_processor", lambda: processor)
+    client = _make_authed_client(monkeypatch)
+
+    finality = []
+    for head in (160, 200):
+        w3.eth.get_block_number = AsyncMock(return_value=head)
+        engine._latest_block_number_cache.clear()  # the chain head is cached for a couple of seconds
+        body = client.get(f"/v1/accounting/deposits/status/{DEPOSIT_ID_HEX}").json()
+        assert body["status"] == "pending"
+        finality.append(body["finality"])
+
+    assert finality == [
+        {"confirmations": 60, "required": 250},  # Base Sepolia needs 250
+        {"confirmations": 100, "required": 250},
+    ]
 
 
 def test_deposit_status_not_found(monkeypatch) -> None:

@@ -154,6 +154,7 @@ Behavior notes:
 - `POST /deposits/check` is **idempotent**.
 - Sweeps run as background tasks. The processor returns within ~2-3s. Don't block on the response — poll `GET /deposits/status/{deposit_id}`.
 - The status endpoint first consults an in-memory record (sweep in progress / failed) and then falls through to an on-chain `isDepositProcessed` check. Records survive restarts via JSON persistence (see `src/README.md`).
+- A `pending` status response carries `finality: {confirmations, required}` once the sweep tx is signed, so clients can show progress or estimate the remaining wait. `confirmations` is 0-based: the latest block minus the block the sweep tx is mined in, so 0 means it is in the head block (or not mined yet). Reaching `required` means the sweep tx is final, not that the credit has landed: the status stays `pending` until the credit transaction lands, so keep polling until `credited`. `finality` is null while the sweep is being prepared, or when the chain can't be read.
 - The `min_deposit` field of the address response maps tokenId to the minimum deposit in base units; a token not listed has no minimum. Clients should use it to gate the UI.
 - Deposits from accounts in `LIMIT_EXEMPT_ACCOUNTS` (the swap LP) skip the minimum, so swap outputs and refunds of any size are credited.
 

@@ -26,12 +26,13 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, NamedTuple, Optional, Protocol, runtime_checkable
 
 from web3 import AsyncWeb3, Web3
 from web3.exceptions import TransactionNotFound
 
 from src.clients.rofl import TransactionRevertedError
+from src.clients.web3_provider import redact_urls
 from src.config import load_settings
 from src.config.chain_config import (
     GAS_FUNDING_AMOUNT_WEI,
@@ -42,6 +43,7 @@ from src.config.chain_config import (
     get_block_time_seconds,
     get_finality_depth,
 )
+from src.services.cache import AsyncTTLCache
 from src.services.l2_fee_estimator import estimate_l1_data_fee
 from src.services.rpc_identity import require_verified_web3
 
@@ -163,7 +165,20 @@ class BalanceClaim:
     amount: int = 0
 
 
+class FinalityProgress(NamedTuple):
+    """How deep a sweep tx is buried, against the depth the credit waits for."""
+
+    confirmations: int
+    required: int
+
+
 DEFAULT_STATE_DIR = os.getenv("SWEEP_STATE_DIR", "/data/sweep-engine")
+
+# Status polls ask for the chain head only to show confirmations, so a few seconds
+# of staleness doesn't matter and a block number is shared between all polling users.
+LATEST_BLOCK_NUMBER_CACHE_TTL_SECONDS = 2
+# A slow node must not hold up status polls: they give up and show no progress.
+LATEST_BLOCK_NUMBER_TIMEOUT_SECONDS = 5
 
 
 class SweepState(str, Enum):
@@ -192,6 +207,7 @@ class SweepRecord:
     sweep_tx: Optional[str] = None  # signed raw sweep tx, rebroadcast if the node loses it
     sweep_tx_hash: Optional[str] = None  # hash of sweep_tx; used for convenience
     sweep_nonce: int = 0  # nonce of sweep_tx; used for convenience
+    sweep_block_number: Optional[int] = None
     gas_funding_tx_hash: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     retry_count: int = 0
@@ -237,6 +253,10 @@ class SweepEngine:
         self._state_dir = Path(state_dir)
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._web3_cache: Dict[int, AsyncWeb3] = {}
+        # Chain head per chain id, for get_finality_progress.
+        self._latest_block_number_cache: AsyncTTLCache[int, int] = AsyncTTLCache(
+            maxsize=max(len(chain_rpc_urls), 1), ttl=LATEST_BLOCK_NUMBER_CACHE_TTL_SECONDS
+        )
         # Per-address lock: prevents concurrent sweeps for the same deposit address
         self._address_locks: Dict[str, asyncio.Lock] = {}
         # Global lock: serializes gas tank nonce reads across all concurrent sweeps
@@ -637,7 +657,7 @@ class SweepEngine:
             except Exception as exc:
                 logger.warning("Sweep tx %s not accepted: %s", record.sweep_tx_hash, exc)
 
-        receipt = await self._wait_for_final_receipt(w3, record.sweep_tx_hash, record.chain_id)
+        receipt = await self._wait_for_final_receipt(w3, record)
         if receipt["status"] != 1:
             # A final reverted sweep moved nothing, but it used up the signed tx and its
             # nonce, so retrying it would fail on every pass and keep the asset IN_FLIGHT.
@@ -790,29 +810,70 @@ class SweepEngine:
             self._recovery_task = None
         logger.info("Sweep recovery loop stopped")
 
-    async def _wait_for_final_receipt(self, w3: AsyncWeb3, tx_hash, chain_id: int):
-        """Poll for the receipt of ``tx_hash`` until its block is ``finality_depth`` deep.
+    async def _wait_for_final_receipt(self, w3: AsyncWeb3, record: SweepRecord):
+        """Poll for the receipt of the record's sweep tx until its block is ``finality_depth`` deep.
 
         The credit that follows a sweep cannot be undone, so it must not rest on a block
         that can still be reorged out: with the sweep final, the deposit it spends is too.
         """
+        tx_hash = record.sweep_tx_hash
+        chain_id = record.chain_id
         depth = get_finality_depth(chain_id)
         deadline = time.time() + depth * get_block_time_seconds(chain_id) + FINALITY_TIMEOUT_MARGIN
         last_error = None
         while time.time() < deadline:
+            receipt = None
             try:
                 latest = (await w3.eth.get_block("latest"))["number"]
+                self._latest_block_number_cache.set(chain_id, latest)
                 receipt = await w3.eth.get_transaction_receipt(tx_hash)
-                if receipt is not None and latest - receipt["blockNumber"] >= depth:
-                    return receipt
             except (ConnectionError, TimeoutError, OSError, ValueError, TransactionNotFound) as exc:
                 last_error = exc
                 logger.warning("RPC error polling receipt for %s: %s", tx_hash, exc)
+            if receipt is not None:
+                mined_block = receipt["blockNumber"]
+                if receipt["status"] == 1 and record.sweep_block_number != mined_block:
+                    record.sweep_block_number = mined_block
+                    self._save_record(record)
+                if latest - mined_block >= depth:
+                    return receipt
             await asyncio.sleep(2)
         msg = f"Transaction {tx_hash} not final within the timeout"
         if last_error:
             msg += f" (last RPC error: {last_error})"
         raise TimeoutError(msg)
+
+    async def get_finality_progress(self, record: SweepRecord) -> Optional[FinalityProgress]:
+        """Returns the number of confirmations of the record's sweep tx.
+
+        The number is capped with the required confirmed blocks.
+        """
+        if not record.sweep_tx_hash:
+            return None
+        required = get_finality_depth(record.chain_id)
+        if record.state is SweepState.SWEPT:
+            return FinalityProgress(required, required)
+        if record.sweep_block_number is None:
+            return FinalityProgress(0, required)
+        try:
+            latest = await self._latest_block_number_cache.get_or_set_async(
+                record.chain_id,
+                lambda: asyncio.wait_for(
+                    self._get_web3(record.chain_id).eth.get_block_number(),
+                    timeout=LATEST_BLOCK_NUMBER_TIMEOUT_SECONDS,
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Can't read finality progress of sweep tx %s on chain %d: %s",
+                record.sweep_tx_hash,
+                record.chain_id,
+                redact_urls(exc) or type(exc).__name__,  # a timeout has no message
+            )
+            return None
+        # The cached head can be older than the block the wait loop saw the tx in.
+        confirmations = max(0, min(latest - record.sweep_block_number, required))
+        return FinalityProgress(confirmations, required)
 
     async def _wait_for_receipt(self, w3: AsyncWeb3, tx_hash, timeout: int = 120):
         """Poll for transaction receipt with timeout."""

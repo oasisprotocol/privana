@@ -540,6 +540,10 @@ async def get_deposit_status(
     # Fast path: check in-memory sweep record
     local_status = processor.get_deposit_status(deposit_id_hex, beneficiary)
     if local_status is not None:
+        if local_status["status"] == "pending":
+            progress = await processor.get_finality_progress(deposit_id_hex, beneficiary)
+            if progress is not None:
+                local_status = {**local_status, "finality": progress._asdict()}
         return DepositCheckResponse(**local_status)
 
     # No in-flight record — check on-chain
