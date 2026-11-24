@@ -1,10 +1,20 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.4
+  # Runs the ruff pinned in uv.lock, so hooks, `make lint` and CI share one version.
+  # Mirrors upstream ruff-pre-commit's .pre-commit-hooks.yaml.
+  - repo: local
     hooks:
-      - id: ruff
-        args: [--fix]
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
       - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.24.3
     hooks:
