@@ -199,7 +199,7 @@ async def test_live_run_end_to_end(world: World, tmp_path: Path) -> None:
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     landed = {name: s["landed"] for name, s in report["summary"].items()}
     assert landed == {"funding": 3, "locks": 3, "settles in order": 1, "settles": 2}
     assert report["summary"]["settles in order"]["refused"] == 2
@@ -286,7 +286,7 @@ async def test_a_lock_that_did_not_land_makes_the_run_partial(
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
     assert report["ended"] == "partial: 1 of 3 locks did not land, see the notes"
-    assert report["money_check"] == "ok"  # the refused player keeps its funding
+    assert report["balance_check"] == "ok"  # the refused player keeps its funding
     assert world.calls.count("settle") == 3  # both landed locks settled
     assert (run_dir / "report.md").read_text().startswith("# Locks, N = 3: FAIL")
 
@@ -303,7 +303,7 @@ async def test_no_lock_landed_stops_before_settling(
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
     assert report["ended"] == "stopped after locking: no lock landed"
-    assert report["money_check"] == "ok"  # the funding stays with the players
+    assert report["balance_check"] == "ok"  # the funding stays with the players
 
 
 async def test_burst_outcomes(tmp_path: Path) -> None:
@@ -525,7 +525,7 @@ async def test_a_lost_lock_is_recovered_in_a_live_run(
     assert await cli.run(CFG, locks_args(live=True)) == 0
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     summary = report["summary"]["locks"]
     assert (summary["landed"], summary["landed_without_resend"], summary["resends"]) == (3, 2, 1)
     assert "Landed without a resend: funding 3 in " in (run_dir / "report.md").read_text()
@@ -590,11 +590,11 @@ async def test_sessions_settle_each_lock_while_later_ones_still_start(
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     landed = {name: s["landed"] for name, s in report["summary"].items()}
     assert landed == {"funding": 4, "locks": 4, "settles in order": 4}
-    back = report["money_back"]
-    assert (back["sessions"], back["back"], back["within_60_s"]) == (4, 4, 4)
+    waits = report["session_waits"]
+    assert (waits["sessions"], waits["settled"], waits["within_60_s"]) == (4, 4, 4)
     starts = [a["due_at"] for a in report["phases"]["locks"]]
     assert starts == sorted(starts) and len(set(starts)) == 4  # one schedule, not all at once
     # Each settle goes out a play time after its lock landed, in the order they landed.
@@ -608,9 +608,9 @@ async def test_sessions_settle_each_lock_while_later_ones_still_start(
     text = (run_dir / "report.md").read_text()
     assert text.startswith("# Sessions, N = 4: PASS")
     assert "| Locks, as sessions start | 4 | 4 |" in text
-    assert "Money back after a session ended: 4 of 4 sessions, 4 within 1 min" in text
-    assert 0 <= back["lock_wait_median_s"] <= back["lock_wait_slowest_s"] < 5
-    assert f"Lock landed after its session started: median {back['lock_wait_median_s']} s" in text
+    assert "Settle landed after its session ended: 4 of 4 sessions, 4 within 1 min" in text
+    assert 0 <= waits["lock_wait_median_s"] <= waits["lock_wait_slowest_s"] < 5
+    assert f"Lock landed after its session started: median {waits['lock_wait_median_s']} s" in text
     assert (report["meta"]["benchmark"], report["meta"]["per_minute"]) == ("sessions", 600.0)
     assert unsettled(tmp_path, SERVICE, ACCOUNTING, 0) == []
     # A later run sends a sessions run's funding again, as it does a locks run's.
@@ -630,18 +630,16 @@ async def test_sessions_that_end_together_are_settled_a_gap_apart(
     assert all(later - earlier >= 0.05 - 1e-6 for earlier, later in pairwise(dues))
 
 
-async def test_sessions_whose_money_is_back_late_fail(
+async def test_sessions_settled_late_fail(
     world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(locks, "MONEY_BACK_S", (60, 180, 0))
+    monkeypatch.setattr(locks, "SETTLE_WITHIN_S", (60, 180, 0))
     assert await cli.run(CFG, sessions_args()) == 1
     assert world.held[FUNDER] == 100_000  # every lock was settled back, only late
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert report["ended"] == (
-        "slow: 4 of 4 sessions did not have their money back within 0 minutes of ending"
-    )
+    assert report["ended"] == "slow: 4 of 4 sessions were not settled within 0 minutes of ending"
     assert (run_dir / "report.md").read_text().startswith("# Sessions, N = 4: FAIL")
 
 
@@ -677,7 +675,7 @@ async def test_a_settle_that_does_not_land_goes_out_again(
     (run_dir,) = tmp_path.iterdir()
     assert run_dir.name.endswith("-sessions")
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     ordered = report["phases"]["settles in order"]
     # The stream itself lands all four, so nothing is left to send one after another.
     assert [a["outcome"] for a in ordered] == ["landed"] * 4
@@ -685,15 +683,13 @@ async def test_a_settle_that_does_not_land_goes_out_again(
     assert ordered[0]["first_sent_at"] == ordered[0]["sent_at"]
     assert ordered[1]["first_sent_at"] < ordered[1]["sent_at"]
     assert report["phases"]["settles"] == []
-    assert report["money_back"]["back"] == 4
+    assert report["session_waits"]["settled"] == 4
     # The reply that made it go out again is kept, in the journal and in the report.
     journal = map(json.loads, (run_dir / "settles-in-order.jsonl").read_text().splitlines())
     resends = [r for r in journal if r["event"] == "resend"]
     assert (resends[0]["nonce"], resends[0]["reply"]["detail"]) == (1, reason)
     text = (run_dir / "report.md").read_text()
-    assert (
-        "Sent again with the settles behind it, after it did not land: settle 1 (nonce 1)" in text
-    )
+    assert "Resent with the settles behind it, after it did not land: settle 1 (nonce 1)" in text
     assert reason in text
 
 
@@ -763,7 +759,7 @@ async def test_a_settle_that_never_lands_in_the_stream_stops_it(
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     ordered = report["phases"]["settles in order"]
     assert [a["outcome"] for a in ordered][:2] == ["landed", "unresolved"]
     assert (ordered[1]["resends"], ordered[1]["reply"]["detail"]) == (RESENDS, reason)
@@ -773,10 +769,10 @@ async def test_a_settle_that_never_lands_in_the_stream_stops_it(
     serial = report["phases"]["settles"]
     assert [t["nonce"] for t in serial] == [1, 2, 3]
     assert all(t["outcome"] == "landed" for t in serial)
-    back = report["money_back"]
-    assert (back["back"], back["within_60_s"]) == (4, 4)
-    # No session's money is back before the session ended.
-    assert all(a["back_at"] >= a["ended_at"] for a in report["phases"]["locks"])
+    waits = report["session_waits"]
+    assert (waits["settled"], waits["within_60_s"]) == (4, 4)
+    # No settle lands before its session ended.
+    assert all(a["settle_landed_at"] >= a["ended_at"] for a in report["phases"]["locks"])
     text = (run_dir / "report.md").read_text()
     stopped = f"The settle stream stopped after {RESENDS} resends at settle 1 (nonce 1)"
     assert stopped in text
@@ -809,13 +805,13 @@ async def test_a_settle_that_lands_after_the_stream_stopped_is_not_sent_again(
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     ordered = report["phases"]["settles in order"]
     assert [a["outcome"] for a in ordered][:2] == ["landed", "landed"]
     assert ordered[1]["note"].startswith("landed after the stream stopped")
     # Only the two behind it go out one after another.
     assert [t["nonce"] for t in report["phases"]["settles"]] == [2, 3]
-    assert report["money_back"]["back"] == 4
+    assert report["session_waits"]["settled"] == 4
 
 
 async def test_sessions_that_outlast_the_watch_stop_before_anything_is_sent(world: World) -> None:
@@ -874,7 +870,7 @@ async def test_players_funded_by_an_earlier_run_are_not_funded_again(
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     first = locks.PLAYER_INDEX + 2
     assert report["meta"]["players"] == f"indices {first} to {first + 3}"
     assert set(report["summary"]) == {"locks", "settles in order"}
@@ -936,7 +932,7 @@ async def test_resends_behind_another_settle_do_not_use_up_a_settles_own(
 
     (run_dir,) = tmp_path.iterdir()
     report = json.loads((run_dir / "report.json").read_text())
-    assert (report["ended"], report["money_check"]) == ("completed", "ok")
+    assert (report["ended"], report["balance_check"]) == ("completed", "ok")
     ordered = report["phases"]["settles in order"]
     assert [a["outcome"] for a in ordered] == ["landed"] * 4
     assert ordered[2]["resends"] == RESENDS + 1

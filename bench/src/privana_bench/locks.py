@@ -67,7 +67,7 @@ SESSION_PHASES = {
 }
 # One fixed schedule of session starts, so two runs at the same rate compare.
 SCHEDULE_SEED = 1
-MONEY_BACK_S = (60, 180, 300)  # ideal, fine and the limit
+SETTLE_WITHIN_S = (60, 180, 300)  # ideal, fine and the limit
 
 ReadNonces = Callable[[list[str]], Awaitable[tuple[int, dict[str, int]]]]
 More = Callable[[float], Awaitable["list[Action] | None"]]
@@ -81,7 +81,7 @@ class Action(Transfer):
     block: int | None = None  # the block of the first read that showed it landed
     first_sent_at: float = 0.0  # `sent_at` of its first try: a resend moves `sent_at`
     ended_at: float | None = None  # a session's lock: when the session ended
-    back_at: float | None = None  # a session's lock: when its settle showed as landed
+    settle_landed_at: float | None = None  # a session's lock: when its settle showed as landed
 
 
 def _done(a: Action, last_read: float, refused_wait_s: float) -> bool:
@@ -398,13 +398,13 @@ async def _phases(
             return f"funding {ended}"
     if args.command == "sessions":
         ended = await _sessions(cfg, args, chain, privana, p, amount, meta, run_dir, phases)
-        back = money_back(phases["locks"])
-        late = back["sessions"] - back[f"within_{MONEY_BACK_S[-1]}_s"] if back else 0
+        waits = session_waits(phases["locks"])
+        late = waits["sessions"] - waits[f"within_{SETTLE_WITHIN_S[-1]}_s"] if waits else 0
         if ended == "completed" and late:
             stopped = meta.get("stream_stopped")
             return (
-                f"slow: {late} of {len(p.players)} sessions did not have their money back "
-                f"within {MONEY_BACK_S[-1] // 60} minutes of ending"
+                f"slow: {late} of {len(p.players)} sessions were not settled "
+                f"within {SETTLE_WITHIN_S[-1] // 60} minutes of ending"
                 + (f", after the settle stream stopped at {stopped}" if stopped else "")
             )
         return ended
@@ -725,10 +725,10 @@ async def _sessions(
             len(p.players) - len(landed),
         )
     finally:
-        back = {t.nonce: t.landed_at for t in (*in_order, *phases["settles"]) if t.landed_at}
+        settled = {t.nonce: t.landed_at for t in (*in_order, *phases["settles"]) if t.landed_at}
         for i, k in enumerate(queued):
             locks[k].ended_at = (locks[k].landed_at or 0.0) + args.play
-            locks[k].back_at = back.get(p.service_nonce + i)
+            locks[k].settle_landed_at = settled.get(p.service_nonce + i)
 
 
 async def _check(
@@ -811,22 +811,25 @@ def summarize(ts: Sequence[Transfer]) -> dict[str, Any]:
     }
 
 
-def money_back(locks: Sequence[Transfer]) -> dict[str, Any] | None:
-    """How long after a session ended its settle showed as landed, for a sessions run.
-    A session whose lock never landed has no end, so it counts as not back."""
+def session_waits(locks: Sequence[Transfer]) -> dict[str, Any] | None:
+    """For a sessions run: how long after a session started its lock showed as landed,
+    and how long after it ended its settle did. A session whose lock never landed has
+    no end, so it counts as not settled."""
     ended = [a for a in locks if isinstance(a, Action) and a.ended_at is not None]
     if not ended:
         return None
-    waits = sorted(a.back_at - a.ended_at for a in ended if a.ended_at and a.back_at)
+    waits = sorted(
+        a.settle_landed_at - a.ended_at for a in ended if a.ended_at and a.settle_landed_at
+    )
     lock_waits = [a.landed_at - a.due_at for a in locks if a.landed_at]
     return {
         "lock_wait_median_s": _round(statistics.median(lock_waits)),
         "lock_wait_slowest_s": _round(max(lock_waits)),
         "sessions": len(locks),
-        "back": len(waits),
-        **{f"within_{limit}_s": sum(w <= limit for w in waits) for limit in MONEY_BACK_S},
-        "median_s": _round(statistics.median(waits)) if waits else None,
-        "slowest_s": _round(waits[-1]) if waits else None,
+        "settled": len(waits),
+        **{f"within_{limit}_s": sum(w <= limit for w in waits) for limit in SETTLE_WITHIN_S},
+        "settle_wait_median_s": _round(statistics.median(waits)) if waits else None,
+        "settle_wait_slowest_s": _round(waits[-1]) if waits else None,
     }
 
 
@@ -870,31 +873,29 @@ def to_markdown(
         "Failed replies that landed: "
         + "; ".join(f"{n} {s['failed_replies_that_landed']}" for n, s in summaries.items())
         + ".",
-        "Resends after a lost reply: "
-        + "; ".join(f"{n} {s['resends']}" for n, s in summaries.items())
-        + ".",
+        "Resends: " + "; ".join(f"{n} {s['resends']}" for n, s in summaries.items()) + ".",
         "Connections that never opened, so nothing went out on that try: "
         + "; ".join(f"{n} {s['connections_that_never_opened']}" for n, s in summaries.items())
         + ".",
-        f"Money check: {check}. Ended: {ended}.",
+        f"Balance check: {check}. Ended: {ended}.",
     ]
-    back = money_back(phases["locks"])
-    if back:
+    waits = session_waits(phases["locks"])
+    if waits:
         within = ", ".join(
-            f"{back[f'within_{limit}_s']} within {limit // 60} min" for limit in MONEY_BACK_S
+            f"{waits[f'within_{limit}_s']} within {limit // 60} min" for limit in SETTLE_WITHIN_S
         )
         lines.append(
-            f"Lock landed after its session started: median {back['lock_wait_median_s']} s, "
-            f"slowest {back['lock_wait_slowest_s']} s."
+            f"Lock landed after its session started: median {waits['lock_wait_median_s']} s, "
+            f"slowest {waits['lock_wait_slowest_s']} s."
         )
         lines.append(
-            f"Money back after a session ended: {back['back']} of {back['sessions']} sessions, "
-            f"{within}, median {cell(back['median_s'], ' s')}, slowest "
-            f"{cell(back['slowest_s'], ' s')}. It counts from {meta['play_s']:g} s after the "
-            "lock showed as landed to the read that showed the settle landed."
+            f"Settle landed after its session ended: {waits['settled']} of {waits['sessions']} "
+            f"sessions, {within}, median {cell(waits['settle_wait_median_s'], ' s')}, slowest "
+            f"{cell(waits['settle_wait_slowest_s'], ' s')}. It counts from {meta['play_s']:g} s "
+            "after the lock showed as landed to the read that showed the settle landed."
         )
     lines += [
-        f"Sent again with the settles behind it, after it did not land: {said}."
+        f"Resent with the settles behind it, after it did not land: {said}."
         for said in meta.get("sent_again", [])
     ]
     if meta.get("stream_stopped"):
@@ -935,9 +936,9 @@ def write_report(
     data = {
         "meta": meta,
         "ended": ended,
-        "money_check": check,
+        "balance_check": check,
         "summary": {name: summarize(ts) for name, ts in phases.items() if ts},
-        "money_back": money_back(phases["locks"]),
+        "session_waits": session_waits(phases["locks"]),
         "phases": {name: [asdict(t) for t in ts] for name, ts in phases.items()},
     }
     (run_dir / "report.json").write_text(json.dumps(data, indent=2) + "\n")

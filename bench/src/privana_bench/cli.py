@@ -238,8 +238,8 @@ async def _locks(
     )
     if args.command == "sessions":
         last = locks.session_starts(args.n, args.per_minute)[-1]
-        # The last session's money has until the limit to be back.
-        if last + args.play + locks.MONEY_BACK_S[-1] > args.max_wait:
+        # The last session's settle has until the limit to land.
+        if last + args.play + locks.SETTLE_WITHIN_S[-1] > args.max_wait:
             raise PreflightError(
                 f"the last session starts after {last:.0f} s, so --max-wait {args.max_wait:g} "
                 "ends the watch too early"
