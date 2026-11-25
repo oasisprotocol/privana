@@ -18,11 +18,12 @@ import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv(".env.testnet") # Use Testnet environment in openapi specs usage
+
+load_dotenv(".env.testnet")  # Use Testnet environment in openapi specs usage
 # The Accounting service opens its store at import, and /data exists only in the container.
 os.environ["ACCOUNTING_STATE_DIR"] = tempfile.mkdtemp()
 
-from src.main import app
+from src.main import app  # noqa: E402
 
 SPEC_PATH = Path(__file__).resolve().parent.parent / "docs" / "openapi.json"
 
