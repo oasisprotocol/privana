@@ -625,6 +625,23 @@ class DepositCheckRequest(BaseModel):
         return _normalise_fixed_hex(value, byte_length=32, field_name="token_id")
 
 
+class DepositFinalityProgress(BaseModel):
+    """How deep a pending deposit's sweep tx is buried, against the depth its credit waits for."""
+
+    confirmations: int = Field(
+        description=(
+            "Confirmations of the sweep tx so far, 0-based: the latest block minus the block "
+            "it is mined in, so 0 means the head block (or not mined yet)."
+        )
+    )
+    required: int = Field(
+        description=(
+            "Confirmations at which the sweep tx is final. The credit follows; the status "
+            "stays pending until it lands."
+        )
+    )
+
+
 class DepositCheckResponse(BaseModel):
     """Response for deposit check status."""
 
@@ -633,6 +650,13 @@ class DepositCheckResponse(BaseModel):
     amount: str | None = None
     token_id: str | None = None
     detail: str | None = None
+    finality: DepositFinalityProgress | None = Field(
+        default=None,
+        description=(
+            "Pending deposits only, from GET /deposits/status. Null until the sweep tx is "
+            "signed, or when the chain can't be read."
+        ),
+    )
 
 
 class SignOnRampUrlRequest(BaseModel):

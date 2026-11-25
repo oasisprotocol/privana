@@ -24,6 +24,7 @@ from src.services.accounting_contract import get_accounting_contract_service
 from src.services.sweep_engine import (
     BalanceClaimStatus,
     DepositAccountingProtocol,
+    FinalityProgress,
     SweepCreditPendingError,
     SweepEngine,
     _to_hex,
@@ -239,6 +240,15 @@ class DepositProcessor:
             )
 
         return self._deposit_response("pending", deposit_id_hex, record.amount, record.token_id_hex)
+
+    async def get_finality_progress(
+        self, deposit_id_hex: str, beneficiary: str
+    ) -> FinalityProgress | None:
+        """Confirmations of a pending deposit's sweep tx, or None when there are none to show."""
+        record = self._sweep.get_record_by_deposit_id(deposit_id_hex)
+        if record is None or record.beneficiary.lower() != beneficiary.lower():
+            return None
+        return await self._sweep.get_finality_progress(record)
 
 
 _processor_instance: DepositProcessor | None = None

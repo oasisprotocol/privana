@@ -14,10 +14,15 @@ from web3 import Web3
 
 import src.services.rpc_identity as rpc_identity
 from src.clients.rofl import TransactionRevertedError
-from src.config.chain_config import MIN_SWEEP_GAS_PRICE_WEI, SWEEP_GAS_LIMIT_NATIVE
+from src.config.chain_config import (
+    MIN_SWEEP_GAS_PRICE_WEI,
+    SWEEP_GAS_LIMIT_NATIVE,
+    get_finality_depth,
+)
 from src.services.sweep_engine import (
     FINALITY_TIMEOUT_MARGIN,
     BalanceClaimStatus,
+    FinalityProgress,
     SweepEngine,
     SweepRecord,
     SweepState,
@@ -653,11 +658,22 @@ async def test_sweep_receipt_is_awaited_until_its_block_is_final(engine):
     w3.eth.get_block = AsyncMock(side_effect=[{"number": 100}, {"number": 200}, {"number": 350}])
     w3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 100})
 
-    with patch("src.services.sweep_engine.asyncio.sleep", AsyncMock()):
-        receipt = await engine._wait_for_final_receipt(w3, "0x" + "dd" * 32, 84532)
+    record = _sweep_record(engine)
+    saved_while_waiting = []
+
+    async def sleep(_):
+        stored = engine.get_record_by_deposit_id(record.deposit_id_hex)
+        saved_while_waiting.append(stored.sweep_block_number)
+
+    with patch("src.services.sweep_engine.asyncio.sleep", sleep):
+        receipt = await engine._wait_for_final_receipt(w3, record)
 
     assert receipt["blockNumber"] == 100
     assert w3.eth.get_block.await_count == 3
+    # The block is on disk as soon as the tx is mined, not only once it is final, so the
+    # status endpoint can show progress during the wait.
+    assert saved_while_waiting == [100, 100]
+    assert engine.get_record_by_deposit_id(record.deposit_id_hex).sweep_block_number == 100
 
 
 @pytest.mark.asyncio
@@ -668,15 +684,111 @@ async def test_final_receipt_deadline_scales_with_the_chains_block_time(engine):
     w3.eth.get_block = AsyncMock(return_value={"number": 100})
     w3.eth.get_transaction_receipt = AsyncMock(return_value={"status": 1, "blockNumber": 100})
 
+    record = _sweep_record(engine)
+
     with (
         patch("src.services.sweep_engine.asyncio.sleep", AsyncMock()),
         patch("src.services.sweep_engine.time", SimpleNamespace(time=lambda: next(ticks))),
         pytest.raises(TimeoutError),
     ):
-        await engine._wait_for_final_receipt(w3, "0x" + "dd" * 32, 84532)
+        await engine._wait_for_final_receipt(w3, record)
 
     expected_polls = 250 * 0.2 + FINALITY_TIMEOUT_MARGIN  # one poll per clock second
     assert expected_polls - 5 <= w3.eth.get_block.await_count <= expected_polls + 5
+
+
+FINALITY_DEPTH = get_finality_depth(84532)  # Base Sepolia: 250
+
+
+def _sweep_record(engine, **changes):
+    """The planned record, as a signed sweep in progress unless ``changes`` say otherwise."""
+    _plan(engine)
+    record = engine.get_record_by_deposit_id("0x" + "22" * 32)
+    record.sweep_tx_hash = "0x" + "ee" * 32
+    for name, value in changes.items():
+        setattr(record, name, value)
+    return record
+
+
+def _w3_at_head(head):
+    w3 = AsyncMock()
+    w3.eth.get_block_number = AsyncMock(return_value=head)
+    return w3
+
+
+@pytest.mark.asyncio
+async def test_finality_progress_is_none_without_a_sweep_tx(engine):
+    record = _sweep_record(engine, sweep_tx_hash=None)
+
+    with patch.object(engine, "_get_web3") as get_w3:
+        assert await engine.get_finality_progress(record) is None
+
+    get_w3.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_finality_progress_is_zero_until_the_tx_is_seen_mined(engine):
+    record = _sweep_record(engine, state=SweepState.SWEEP_PREPARED, sweep_block_number=None)
+
+    with patch.object(engine, "_get_web3") as get_w3:
+        progress = await engine.get_finality_progress(record)
+
+    assert progress == FinalityProgress(0, FINALITY_DEPTH)
+    get_w3.assert_not_called()  # no block to count from, so no need to ask the node
+
+
+@pytest.mark.asyncio
+async def test_finality_progress_is_complete_once_swept(engine):
+    """SWEPT means the sweep tx is final, even for a record saved without its block."""
+    record = _sweep_record(engine, state=SweepState.SWEPT, sweep_block_number=None)
+
+    with patch.object(engine, "_get_web3") as get_w3:
+        progress = await engine.get_finality_progress(record)
+
+    assert progress == FinalityProgress(FINALITY_DEPTH, FINALITY_DEPTH)
+    get_w3.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("head", "confirmations"),
+    [
+        (98, 0),  # head behind the saved block (stale cached head): never negative
+        (100, 0),  # the tx's own block is 0
+        (160, 60),
+        (100 + FINALITY_DEPTH, FINALITY_DEPTH),
+        (10_000, FINALITY_DEPTH),  # long final: capped at required
+    ],
+)
+async def test_finality_progress_counts_from_the_saved_block_within_bounds(
+    engine, head, confirmations
+):
+    record = _sweep_record(engine, state=SweepState.SWEEP_PREPARED, sweep_block_number=100)
+
+    with patch.object(engine, "_get_web3", return_value=_w3_at_head(head)):
+        progress = await engine.get_finality_progress(record)
+
+    assert progress == FinalityProgress(confirmations, FINALITY_DEPTH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ConnectionError("down"), TimeoutError(), RuntimeError("boom")])
+async def test_finality_progress_is_none_when_the_rpc_fails(engine, error):
+    """Progress is best effort: any node failure gives no progress, not an error."""
+    record = _sweep_record(engine, state=SweepState.SWEEP_PREPARED, sweep_block_number=100)
+    w3 = AsyncMock()
+    w3.eth.get_block_number = AsyncMock(side_effect=error)
+
+    with patch.object(engine, "_get_web3", return_value=w3):
+        assert await engine.get_finality_progress(record) is None
+
+
+@pytest.mark.asyncio
+async def test_finality_progress_is_none_when_the_chain_is_not_served(engine):
+    record = _sweep_record(engine, state=SweepState.SWEEP_PREPARED, sweep_block_number=100)
+
+    with patch.object(engine, "_get_web3", side_effect=ValueError("No verified RPC endpoint")):
+        assert await engine.get_finality_progress(record) is None
 
 
 @pytest.mark.asyncio
