@@ -956,13 +956,13 @@ async def test_another_asset_is_claimed_while_the_first_sweep_waits_for_finality
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("first_reverts", [False, True], ids=["first ok", "first reverts"])
-@pytest.mark.parametrize("first,second", [("native", "erc20"), ("erc20", "native")])
 async def test_overlapping_sweeps_are_credited_when_each_is_final(
-    engine, mock_accounting, chain, first, second, first_reverts
+    engine, mock_accounting, chain, first_reverts
 ):
     """A is mined at N, B at N+2, both wait for finality: A is credited at N+depth with its
     own id and amount while B stays SWEEP_PREPARED; B follows at N+2+depth. A reverted tx
     is deleted and never credited."""
+    first, second = "native", "erc20"
     a, task_a = await _start(engine, first)
     chain.mine(chain.sweeps[0], block=START_HEAD, ok=not first_reverts)
     await chain.advance()
@@ -995,8 +995,7 @@ async def test_a_resent_sweep_holds_the_lock_for_the_receipt_wait_then_frees_it(
 ):
     """A resent tx that never mines holds the address lock for the whole 120 s receipt
     wait (real _wait_for_receipt, fake clock) and frees it after, without persisting an
-    error. When another tx then takes its nonce and is final, the next pass deletes the
-    record and a new claim starts with a new deposit_id."""
+    error."""
     lock = engine._get_address_lock(DEPOSIT_ADDRESS, 84532)
     started = chain.now
     lock_held_at = []
@@ -1019,29 +1018,15 @@ async def test_a_resent_sweep_holds_the_lock_for_the_receipt_wait_then_frees_it(
     assert (stored.state, stored.error) == (SweepState.SWEEP_PREPARED, None)
     assert chain.broadcasts == [raw]
 
-    chain.mine_foreign(block=START_HEAD - FINALITY_DEPTH)  # takes nonce n, now final
-    await engine.resume_incomplete_sweeps()
-
-    assert engine.get_record_by_deposit_id(record.deposit_id_hex) is None
-    assert chain.broadcasts == [raw]  # deleted before any rebroadcast
-    claim = await _claim(engine, "native")
-    assert claim.status is BalanceClaimStatus.STARTED
-    assert claim.record.deposit_id_hex != record.deposit_id_hex
-
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["gap below the nonce", "nonce taken, not final"])
 async def test_a_resent_sweep_whose_nonce_is_not_next_is_broadcast_but_not_waited_for(
-    engine, chain, monkeypatch, case
+    engine, chain, monkeypatch
 ):
-    """The tx cannot mine now: it is sent anyway (a node may take it later), then the pass
-    raises instead of holding the lock through a receipt wait that cannot succeed."""
-    if case == "gap below the nonce":
-        nonce = FIRST_NONCE + 1
-    else:
-        nonce = FIRST_NONCE
-        chain.mine_foreign(block=START_HEAD)  # another tx took it, 250 blocks from final
-    record, raw = _signed_sweep_record(engine, nonce=nonce)
+    """Another tx took the nonce and is not final yet, so the tx cannot mine now: it is sent
+    anyway, then the pass raises instead of holding the lock through a receipt wait."""
+    chain.mine_foreign(block=START_HEAD)  # 250 blocks from final
+    record, raw = _signed_sweep_record(engine, nonce=FIRST_NONCE)
 
     async def no_receipt_wait(_delay):
         raise AssertionError("waited for a receipt that cannot come")

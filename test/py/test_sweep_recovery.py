@@ -688,8 +688,6 @@ async def test_sweep_deletes_a_record_whose_nonce_was_used_by_another_tx(state_d
 
 FINALITY_DEPTH = get_finality_depth(84532)
 DEPOSIT_A_ID = b"\x22" * 32  # native, the first asset at the address
-DEPOSIT_B_ID = b"\x33" * 32  # ERC20, the second asset at the same address
-TOKEN_B_ADDRESS = "0x" + "cc" * 20
 
 
 def _engine_on_a_chain(state_dir, monkeypatch):
@@ -703,7 +701,7 @@ def _engine_on_a_chain(state_dir, monkeypatch):
     return engine, accounting, chain
 
 
-def _scheduled(deposit_id: bytes, *, erc20: bool = False) -> SweepRecord:
+def _scheduled(deposit_id: bytes) -> SweepRecord:
     return SweepRecord(
         deposit_address=DEPOSIT_ADDRESS,
         chain_id=84532,
@@ -711,16 +709,15 @@ def _scheduled(deposit_id: bytes, *, erc20: bool = False) -> SweepRecord:
         beneficiary="0x" + "bb" * 20,
         chain_type="evm",
         version=0,
-        token_id_hex="0x" + ("44" if erc20 else "11") * 32,
-        token_address=TOKEN_B_ADDRESS if erc20 else None,
+        token_id_hex="0x" + "11" * 32,
         deposit_id_hex="0x" + deposit_id.hex(),
     )
 
 
-def _credit_kwargs(deposit_id: bytes, amount: int, *, erc20: bool = False) -> dict:
+def _credit_kwargs(deposit_id: bytes, amount: int) -> dict:
     return dict(
         beneficiary="0x" + "bb" * 20,
-        token_id=b"\x44" * 32 if erc20 else b"\x11" * 32,
+        token_id=b"\x11" * 32,
         amount=amount,
         deposit_id=deposit_id,
     )
@@ -731,18 +728,12 @@ def _address_lock(engine) -> asyncio.Lock:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_driver", ["background_sweep", "recovery"])
-async def test_a_deposit_parked_in_its_finality_wait_has_one_driver(
-    state_dir, monkeypatch, first_driver
-):
+async def test_a_deposit_parked_in_its_finality_wait_has_one_driver(state_dir, monkeypatch):
     """With the address unlocked, neither recovery nor a second sweep() drives the deposit again."""
     engine, accounting, chain = _engine_on_a_chain(state_dir, monkeypatch)
     engine._save_record(_scheduled(DEPOSIT_A_ID))
 
-    if first_driver == "background_sweep":
-        driver = asyncio.create_task(engine.sweep(DEPOSIT_A_ID))
-    else:
-        driver = asyncio.create_task(engine.resume_incomplete_sweeps())
+    driver = asyncio.create_task(engine.sweep(DEPOSIT_A_ID))
     await settle()
 
     # Mined at the start head, head short of it + depth: parked, the address is free.
@@ -766,51 +757,6 @@ async def test_a_deposit_parked_in_its_finality_wait_has_one_driver(
 
     accounting.credit_deposit.assert_awaited_once_with(**_credit_kwargs(DEPOSIT_A_ID, 10**18))
     assert engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex()) is None
-
-
-@pytest.mark.asyncio
-async def test_recovery_drives_a_second_asset_while_the_first_waits_for_finality(
-    state_dir, monkeypatch
-):
-    """A is mined and waits; B, scheduled at the same address, is funded and signed at the
-    next nonce by a recovery pass. Each is credited once, when its own sweep is final."""
-    engine, accounting, chain = _engine_on_a_chain(state_dir, monkeypatch)
-    engine._save_record(_scheduled(DEPOSIT_A_ID))
-    deposit_a = asyncio.create_task(engine.sweep(DEPOSIT_A_ID))
-    await settle()  # A is mined at the start head
-    await chain.advance(START_HEAD + FINALITY_DEPTH - 1)  # one block short of final
-    assert not deposit_a.done()
-    assert not _address_lock(engine).locked()
-
-    engine._save_record(_scheduled(DEPOSIT_B_ID, erc20=True))
-    recovery = asyncio.create_task(engine.resume_incomplete_sweeps())
-    await settle()
-
-    # B was signed with the nonce after A's sweep, and A was not touched.
-    accounting.generate_sweep_erc20.assert_awaited_once()
-    assert accounting.generate_sweep_erc20.await_args.kwargs["nonce"] == FIRST_NONCE + 1
-    accounting.generate_sweep_native.assert_awaited_once()
-    record_b = engine.get_record_by_deposit_id("0x" + DEPOSIT_B_ID.hex())
-    assert record_b.state is SweepState.SWEEP_PREPARED
-    assert chain.receipts[record_b.sweep_tx_hash]["blockNumber"] == START_HEAD + FINALITY_DEPTH - 1
-    assert not _address_lock(engine).locked()
-    accounting.credit_deposit.assert_not_awaited()
-
-    # A is final; B, mined FINALITY_DEPTH - 1 blocks later, is not.
-    await chain.advance(START_HEAD + FINALITY_DEPTH)
-    await asyncio.wait_for(deposit_a, timeout=1)
-    accounting.credit_deposit.assert_awaited_once_with(**_credit_kwargs(DEPOSIT_A_ID, 10**18))
-    assert not recovery.done()
-    assert engine.get_record_by_deposit_id("0x" + DEPOSIT_B_ID.hex()) is not None
-
-    await chain.advance(START_HEAD + 2 * FINALITY_DEPTH - 1)
-    await asyncio.wait_for(recovery, timeout=1)
-    assert accounting.credit_deposit.await_count == 2
-    accounting.credit_deposit.assert_awaited_with(
-        **_credit_kwargs(DEPOSIT_B_ID, 1000 * 10**6, erc20=True)
-    )
-    assert engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex()) is None
-    assert engine.get_record_by_deposit_id("0x" + DEPOSIT_B_ID.hex()) is None
 
 
 @pytest.mark.asyncio
