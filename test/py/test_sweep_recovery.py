@@ -7,6 +7,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from eth_account import Account
+from fake_chain import (
+    DEPOSIT_ADDRESS,
+    FIRST_NONCE,
+    START_HEAD,
+    SWEEP_FEE,
+    attach_chain,
+    settle,
+)
 from web3.exceptions import TransactionNotFound
 
 import src.services.rpc_identity as rpc_identity
@@ -295,9 +303,12 @@ async def test_resume_does_not_credit_a_receipt_read_while_the_chain_was_dropped
     )
     await rpc_identity.initialize_verified_chain_rpc_urls(settings)
 
+    receipt_reads = iter(["mined"])  # _is_mined; the drift hits the finality wait after it
+
     async def receipt(_tx_hash):
-        answers[url] = 1  # the endpoint drifts to another chain mid-call
-        await rpc_identity.reverify_chain_rpc_urls(settings)
+        if next(receipt_reads, "final") == "final":
+            answers[url] = 1  # the endpoint drifts to another chain mid-call
+            await rpc_identity.reverify_chain_rpc_urls(settings)
         return {"status": 1, "blockNumber": 100}
 
     w3 = SimpleNamespace(
@@ -673,12 +684,142 @@ async def test_sweep_deletes_a_record_whose_nonce_was_used_by_another_tx(state_d
     )
 
 
+# --- One driver per deposit, and a mined sweep needs no address lock -------------------------
+
+FINALITY_DEPTH = get_finality_depth(84532)
+DEPOSIT_A_ID = b"\x22" * 32  # native, the first asset at the address
+
+
+def _engine_on_a_chain(state_dir, monkeypatch):
+    """A SweepEngine over a FakeChain that mines each tx when broadcast."""
+    accounting = AsyncMock()
+    engine = SweepEngine(
+        accounting_service=accounting, chain_rpc_urls={84532: "https://fake"}, state_dir=state_dir
+    )
+    monkeypatch.setattr(sweep_engine_module, "estimate_l1_data_fee", AsyncMock(return_value=0))
+    chain = attach_chain(engine, accounting, monkeypatch, auto_mine=True)
+    return engine, accounting, chain
+
+
+def _scheduled(deposit_id: bytes) -> SweepRecord:
+    return SweepRecord(
+        deposit_address=DEPOSIT_ADDRESS,
+        chain_id=84532,
+        state=SweepState.SCHEDULED,
+        beneficiary="0x" + "bb" * 20,
+        chain_type="evm",
+        version=0,
+        token_id_hex="0x" + "11" * 32,
+        deposit_id_hex="0x" + deposit_id.hex(),
+    )
+
+
+def _credit_kwargs(deposit_id: bytes, amount: int) -> dict:
+    return dict(
+        beneficiary="0x" + "bb" * 20,
+        token_id=b"\x11" * 32,
+        amount=amount,
+        deposit_id=deposit_id,
+    )
+
+
+def _address_lock(engine) -> asyncio.Lock:
+    return engine._get_address_lock(DEPOSIT_ADDRESS, 84532)
+
+
 @pytest.mark.asyncio
-async def test_resume_skips_an_address_held_by_a_live_sweep(state_dir):
-    engine, record, _ = _lost_tx_engine(state_dir, 5, AsyncMock())
-    engine.sweep = AsyncMock()
+async def test_a_deposit_parked_in_its_finality_wait_has_one_driver(state_dir, monkeypatch):
+    """With the address unlocked, neither recovery nor a second sweep() drives the deposit again."""
+    engine, accounting, chain = _engine_on_a_chain(state_dir, monkeypatch)
+    engine._save_record(_scheduled(DEPOSIT_A_ID))
 
-    async with engine._get_address_lock(record.deposit_address, record.chain_id):
-        await engine.resume_incomplete_sweeps()
+    driver = asyncio.create_task(engine.sweep(DEPOSIT_A_ID))
+    await settle()
 
-    engine.sweep.assert_not_called()
+    # Mined at the start head, head short of it + depth: parked, the address is free.
+    assert not driver.done()
+    assert chain.parked == 1
+    assert not _address_lock(engine).locked()
+    assert engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex()).state is (
+        SweepState.SWEEP_PREPARED
+    )
+
+    await asyncio.wait_for(engine.resume_incomplete_sweeps(), timeout=1)
+    await asyncio.wait_for(engine.sweep(DEPOSIT_A_ID), timeout=1)
+
+    assert chain.parked == 1  # no second finality wait
+    accounting.generate_sweep_native.assert_awaited_once()
+    accounting.generate_gas_funding_tx.assert_awaited_once()
+    accounting.credit_deposit.assert_not_awaited()
+
+    await chain.advance(START_HEAD + FINALITY_DEPTH)
+    await asyncio.wait_for(driver, timeout=1)
+
+    accounting.credit_deposit.assert_awaited_once_with(**_credit_kwargs(DEPOSIT_A_ID, 10**18))
+    assert engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex()) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_finishes_a_mined_sweep_while_another_task_holds_the_address_lock(
+    state_dir, monkeypatch
+):
+    """After a restart a mined sweep is credited without the address lock: a task holding it
+    (a claim funding another asset) does not stall the credit."""
+    engine, accounting, chain = _engine_on_a_chain(state_dir, monkeypatch)
+    record = _scheduled(DEPOSIT_A_ID)
+    record.state = SweepState.SWEEP_PREPARED
+    record.amount = 10**18
+    record.sweep_tx = "0x010203"
+    record.sweep_tx_hash = "0x" + "dd" * 32
+    record.sweep_nonce = FIRST_NONCE
+    engine._save_record(record)
+    chain.receipts[record.sweep_tx_hash] = {"status": 1, "blockNumber": 100}  # final at the head
+
+    async with _address_lock(engine):
+        await asyncio.wait_for(engine.resume_incomplete_sweeps(), timeout=1)
+
+    accounting.credit_deposit.assert_awaited_once_with(**_credit_kwargs(DEPOSIT_A_ID, 10**18))
+    assert engine.get_record_by_deposit_id(record.deposit_id_hex) is None
+    assert chain.broadcasts == []
+    accounting.generate_sweep_native.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_whose_receipt_disappears_after_release_is_resent_not_resigned(
+    state_dir, monkeypatch
+):
+    """A was mined and the address released; then the receipt vanishes (reorg) and A's finality
+    wait runs out. The next pass takes the lock and broadcasts the same signed tx again."""
+    engine, accounting, chain = _engine_on_a_chain(state_dir, monkeypatch)
+    engine._save_record(_scheduled(DEPOSIT_A_ID))
+    first_pass = asyncio.create_task(engine.sweep(DEPOSIT_A_ID))
+    await settle()
+    assert not _address_lock(engine).locked()  # mined: released while waiting for finality
+    [raw] = chain.broadcasts[1:]  # chain.broadcasts[0] is the gas funding
+    signed = engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex())
+    assert signed.state is SweepState.SWEEP_PREPARED
+
+    del chain.receipts[signed.sweep_tx_hash]  # reorged out, with its transfer
+    chain.nonce_blocks.pop()
+    chain.native += signed.amount + SWEEP_FEE
+    await chain.advance(now=10_000)  # past the finality deadline
+    with pytest.raises(TimeoutError, match="not final"):
+        await first_pass
+
+    second_pass = asyncio.create_task(engine.resume_incomplete_sweeps())
+    await settle()
+
+    assert chain.broadcasts[1:] == [raw, raw]  # the same tx, sent again
+    accounting.generate_sweep_native.assert_awaited_once()  # never re-signed
+    resent = engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex())
+    assert resent.sweep_tx_hash == signed.sweep_tx_hash
+    assert resent.state is SweepState.SWEEP_PREPARED
+    assert resent.error is None
+    # Mined again, so the address is free again while the second pass waits for finality.
+    assert not _address_lock(engine).locked()
+    assert chain.parked == 1
+
+    await chain.advance(START_HEAD + FINALITY_DEPTH)
+    await asyncio.wait_for(second_pass, timeout=1)
+    accounting.credit_deposit.assert_awaited_once_with(**_credit_kwargs(DEPOSIT_A_ID, 10**18))
+    assert engine.get_record_by_deposit_id("0x" + DEPOSIT_A_ID.hex()) is None
