@@ -21,7 +21,6 @@ from fake_chain import (
     settle,
 )
 from web3 import Web3
-from web3.exceptions import TransactionNotFound
 
 import src.services.rpc_identity as rpc_identity
 from src.clients.rofl import TransactionRevertedError
@@ -198,76 +197,21 @@ async def test_idempotent_credit_reraises_other_errors(engine, mock_accounting):
         )
 
 
-def _receipts_by_hash(w3, blocks):
-    """Give ``w3`` a receipt for each tx once it is broadcast, keyed by tx hash.
-
-    ``blocks`` maps a raw tx to the block it mines in. A tx the node has not seen has no receipt.
-    """
-    receipts = {}
-
-    async def send_raw_transaction(raw):
-        tx_hash = Web3.keccak(raw)
-        receipts[bytes(tx_hash)] = {"status": 1, "blockNumber": blocks[raw]}
-        return tx_hash
-
-    async def get_transaction_receipt(tx_hash):
-        key = (
-            bytes.fromhex(tx_hash.removeprefix("0x"))
-            if isinstance(tx_hash, str)
-            else bytes(tx_hash)
-        )
-        if key not in receipts:
-            raise TransactionNotFound(f"Transaction with hash: {tx_hash!r} not found.")
-        return receipts[key]
-
-    w3.eth.send_raw_transaction = AsyncMock(side_effect=send_raw_transaction)
-    w3.eth.get_transaction_receipt = get_transaction_receipt
-
-
 @pytest.mark.asyncio
-async def test_sweep_erc20_full_cycle(engine, mock_accounting):
+async def test_sweep_erc20_full_cycle(engine, mock_accounting, monkeypatch):
     """ERC20 sweep: SCHEDULED → GAS_FUNDED → SWEEP_PREPARED → SWEPT → credit → record deleted."""
-    "0x" + "aa" * 20
-    token_addr = "0x" + "cc" * 20
+    chain = attach_chain(engine, mock_accounting, monkeypatch, auto_mine=True)
+    _plan(engine, "0x" + "cc" * 20)
 
-    with (
-        patch.object(engine, "_get_web3") as mock_get_w3,
-        patch.object(
-            engine,
-            "_get_erc20_balance",
-            new_callable=AsyncMock,
-            return_value=1000 * 10**6,
-        ),
-        patch.object(
-            engine,
-            "_get_gas_tank_address",
-            new_callable=AsyncMock,
-            return_value="0x" + "ff" * 20,
-        ),
-    ):
-        w3 = AsyncMock()
-        w3.eth.get_balance = AsyncMock(return_value=0)  # no native gas at the address yet
-        w3.eth.get_transaction_count = AsyncMock(return_value=0)
-        w3.eth.gas_price = AwaitableValue(1_000_000_000)  # 1 gwei
-        w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
-        # Receipts appear when the txs are broadcast: the gas funding, then the sweep
-        _receipts_by_hash(w3, {b"\x07\x08\x09": 100, b"\x04\x05\x06": 101})
-        mock_get_w3.return_value = w3
+    sweep = asyncio.create_task(engine.sweep(b"\x22" * 32))
+    await settle()
+    await chain.advance(START_HEAD + FINALITY_DEPTH)
+    await sweep
 
-        _plan(engine, token_addr)
-        await engine.sweep(b"\x22" * 32)
-
-    # Gas funding tx was generated
-    mock_accounting.generate_gas_funding_tx.assert_called_once()
-    # ERC20 sweep was generated
-    mock_accounting.generate_sweep_erc20.assert_called_once()
-    # Credit was called
-    mock_accounting.credit_deposit.assert_called_once()
-    # Record cleaned up (back to idle)
+    mock_accounting.credit_deposit.assert_awaited_once()
     assert engine.get_record_by_deposit_id("0x" + "22" * 32) is None
     # The gas funding went out first, then the sweep; each was broadcast once.
-    broadcasts = [call.args[0] for call in w3.eth.send_raw_transaction.await_args_list]
-    assert broadcasts == [b"\x07\x08\x09", b"\x04\x05\x06"]
+    assert [raw.split(b":")[0] for raw in chain.broadcasts] == [b"fund", b"erc20"]
 
 
 @pytest.mark.asyncio
@@ -386,40 +330,16 @@ async def test_sweep_native_includes_l1_data_fee(engine, mock_accounting):
 
 
 @pytest.mark.asyncio
-async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting):
+async def test_sweep_erc20_includes_l1_data_fee(engine, mock_accounting, monkeypatch):
     """On L2 chains, ERC20 gas funding should include the L1 data fee."""
-    "0x" + "aa" * 20
-    token_addr = "0x" + "cc" * 20
+    chain = attach_chain(engine, mock_accounting, monkeypatch, auto_mine=True)
     l1_fee = 80_000_000_000_000  # ERC20 txs have more calldata
+    _plan(engine, "0x" + "cc" * 20)
 
-    with (
-        patch.object(engine, "_get_web3") as mock_get_w3,
-        patch(L2_FEE_PATCH, new_callable=AsyncMock, return_value=l1_fee) as mock_fee,
-        patch.object(
-            engine,
-            "_get_erc20_balance",
-            new_callable=AsyncMock,
-            return_value=1000 * 10**6,
-        ),
-        patch.object(
-            engine,
-            "_get_gas_tank_address",
-            new_callable=AsyncMock,
-            return_value="0x" + "ff" * 20,
-        ),
-    ):
-        w3 = AsyncMock()
-        w3.eth.get_balance = AsyncMock(return_value=0)  # no native gas at the address yet
-        w3.eth.get_transaction_count = AsyncMock(return_value=0)
-        w3.eth.gas_price = AwaitableValue(1_000_000_000)
-        w3.eth.get_block = AsyncMock(return_value={"number": 1000, "baseFeePerGas": 1_000_000_000})
-        _receipts_by_hash(w3, {b"\x07\x08\x09": 100, b"\x04\x05\x06": 101})
-        mock_get_w3.return_value = w3
+    with patch(L2_FEE_PATCH, new_callable=AsyncMock, return_value=l1_fee) as mock_fee:
+        await engine._fund_gas_and_sign_sweep(engine.get_record_by_deposit_id("0x" + "22" * 32))
 
-        _plan(engine, token_addr)
-        await engine.sweep(b"\x22" * 32)
-
-    mock_fee.assert_called_once_with(w3, 84532, is_erc20=True)
+    mock_fee.assert_called_once_with(chain.w3, 84532, is_erc20=True)
     # Derived amount (65k gas * 1.25 gwei * 2 + l1_fee = 242.5e12) exceeds the
     # 84532 cap, so funding is clamped to GAS_FUNDING_AMOUNT_WEI.
     call_kwargs = mock_accounting.generate_gas_funding_tx.call_args
@@ -1020,13 +940,17 @@ async def test_a_resent_sweep_holds_the_lock_for_the_receipt_wait_then_frees_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["gap below the nonce", "nonce taken, not final"])
 async def test_a_resent_sweep_whose_nonce_is_not_next_is_broadcast_but_not_waited_for(
-    engine, chain, monkeypatch
+    engine, chain, monkeypatch, case
 ):
-    """Another tx took the nonce and is not final yet, so the tx cannot mine now: it is sent
-    anyway, then the pass raises instead of holding the lock through a receipt wait."""
-    chain.mine_foreign(block=START_HEAD)  # 250 blocks from final
-    record, raw = _signed_sweep_record(engine, nonce=FIRST_NONCE)
+    """The tx cannot mine now (a reorg left a gap below its nonce, or another tx took it and
+    is not final yet): it is sent anyway, then the pass raises instead of holding the lock
+    through a receipt wait."""
+    nonce = FIRST_NONCE + 1 if case == "gap below the nonce" else FIRST_NONCE
+    if case == "nonce taken, not final":
+        chain.mine_foreign(block=START_HEAD)  # 250 blocks from final
+    record, raw = _signed_sweep_record(engine, nonce=nonce)
 
     async def no_receipt_wait(_delay):
         raise AssertionError("waited for a receipt that cannot come")
