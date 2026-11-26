@@ -1057,6 +1057,31 @@ async def test_a_resent_sweep_whose_nonce_is_not_next_is_broadcast_but_not_waite
 
 
 @pytest.mark.asyncio
+async def test_a_resent_sweep_mined_during_its_nonce_check_goes_on_to_finality(
+    engine, mock_accounting, chain
+):
+    """The tx mines after the receipt lookup and before the nonce read: the nonce is past
+    it, yet the sweep is not 'not next' but done, so it waits for finality and is credited."""
+    record, raw = _signed_sweep_record(engine, nonce=FIRST_NONCE)
+    count = chain.w3.eth.get_transaction_count
+
+    async def mine_at_the_final_nonce_read(address, block="latest"):
+        if block != "latest" and not chain.nonce_blocks:
+            chain.mine(raw, block=START_HEAD)
+        return await count(address, block)
+
+    chain.w3.eth.get_transaction_count = mine_at_the_final_nonce_read
+    task = asyncio.create_task(engine.sweep(_id_bytes(record)))
+    await settle()
+    assert not task.done()  # parked in its finality wait, no "has nonce" error
+    assert not engine._get_address_lock(DEPOSIT_ADDRESS, 84532).locked()
+
+    await chain.advance(START_HEAD + FINALITY_DEPTH)
+    await task
+    assert _credits(mock_accounting) == [(_id_bytes(record), record.amount)]
+
+
+@pytest.mark.asyncio
 async def test_a_fresh_sweep_is_waited_for_even_if_the_node_reads_a_lagging_nonce(
     engine, mock_accounting, chain
 ):
