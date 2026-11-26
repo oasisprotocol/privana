@@ -1,19 +1,23 @@
 """Sweep engine: state machine for sweeping deposit addresses to the encumbered wallet.
 
 State machine per deposit (one record per token and deposit address, with a random
-32-byte deposit_id; sweeps for the same address serialize on the per-address lock):
-    (no record) → PENDING → GAS_FUNDED → SWEPT → (credit) → record deleted
+32-byte deposit_id):
+    (no record) → SCHEDULED → GAS_FUNDED → SWEEP_PREPARED → SWEPT → (credit) → record deleted
 
-    SWEPT is only set after the sweep tx is confirmed on-chain (receipt status=1).
-    On failure: record stays in current state for recovery or manual investigation.
-    On ROFL restart / periodic recovery:
+    Funding, signing and sending a sweep hold the per-address lock until the sweep tx is
+    mined, so the next sweep of the address signs with the nonce after it. The wait until
+    the tx is final and the credit run without the lock: another asset at the same address
+    can be claimed and swept meanwhile. One task at a time drives a deposit_id.
+
+    SWEPT is only set after the sweep tx is final (receipt status=1, finality_depth deep).
+    On ROFL restart / periodic recovery every record is driven again from its saved state:
+      - SCHEDULED / GAS_FUNDED → fund gas if not funded yet, then sign a fresh sweep.
+      - SWEEP_PREPARED, mined → wait until final without the lock, then credit.
+      - SWEEP_PREPARED the node does not know → under the lock: if another tx used its
+        nonce and is final, the record is deleted; otherwise the same signed tx is
+        broadcast again. The hash is never cleared and the sweep never re-signed.
       - SWEPT → retry credit (idempotent via DepositAlreadyProcessed).
-      - GAS_FUNDED with mined sweep_tx_hash → promoted to SWEPT, then credit.
-      - PENDING / GAS_FUNDED with NO sweep_tx_hash → re-run sweep from scratch
-        (no broadcast tx means no nonce-collision risk).
-      - GAS_FUNDED with a sweep_tx_hash the node does not know → the same signed tx
-        is broadcast again; the hash is never cleared and the sweep never re-signed.
-        A reverted tx → logged for manual investigation.
+    A final reverted sweep deletes the record; the next claim starts from the balance.
 
 State persisted to JSON files so sweeps survive ROFL restarts.
 """
@@ -69,6 +73,10 @@ SWEEP_RECOVERY_INTERVAL = 60
 # Slack in seconds added to the finality wait for RPC lag, networking issues and slow block
 # production.
 FINALITY_TIMEOUT_MARGIN = 30
+
+# Reads of the deposit address nonce around its balance before a sweep is signed; the
+# nonce only moves if a sweep that timed out earlier is mined meanwhile.
+SWEEP_NONCE_READ_TRIES = 3
 
 
 @runtime_checkable
@@ -142,7 +150,8 @@ class BalanceClaimStatus(str, Enum):
 
     STARTED:   a new sweep record was created; the caller drives it.
     IN_FLIGHT: an unfinished sweep of this asset already exists.
-    BUSY:      another sweep holds the address lock; try again shortly.
+    BUSY:      another sweep of the address is being funded, signed or sent (it holds
+               the address lock until the sweep tx is mined); try again shortly.
     NONE:      nothing claimable.
     """
 
@@ -235,11 +244,12 @@ class SweepRecord:
 
 
 class SweepEngine:
-    """Manages sweep lifecycle: sign on-chain, broadcast, confirm, credit.
+    """Manages sweep lifecycle: fund gas, sign, send, wait until final, credit.
 
-    Concurrency model: one asyncio.Lock per (deposit_address, chain_id).
-    Multiple /deposits/check calls for the same address queue behind this lock.
-    After the sweep confirms, subsequent callers see balance=0 and skip to credit.
+    Concurrency model: one asyncio.Lock per (deposit_address, chain_id), held from gas
+    funding until the sweep tx is mined; the finality wait and the credit run without it,
+    so sweeps of one address follow each other mined tx by mined tx. One task at a time
+    drives a deposit_id: another sweep() of the same deposit returns at once.
     """
 
     def __init__(
@@ -261,6 +271,9 @@ class SweepEngine:
         self._address_locks: Dict[str, asyncio.Lock] = {}
         # Global lock: serializes gas tank nonce reads across all concurrent sweeps
         self._gas_tank_lock = asyncio.Lock()
+        # deposit_ids being driven by a sweep() call. In-process like the address locks:
+        # one instance drives the state dir.
+        self._driving: set[str] = set()
         # Recovery loop state
         self._recovery_running = False
         self._recovery_task: Optional[asyncio.Task] = None
@@ -317,7 +330,8 @@ class SweepEngine:
     def _record_path(self, deposit_id_hex: str) -> Path:
         # deposit_id is the unique 32-byte id, so one file per deposit: two
         # deposits to the same address can never clobber each other's state.
-        # Concurrency stays with the per-address asyncio lock, not the file key.
+        # Concurrency stays with the per-address lock and one driver per
+        # deposit_id, not the file key.
         # Strict validation keeps caller-supplied ids from escaping the
         # state dir via path separators in the filename.
         key = deposit_id_hex.lower().removeprefix("0x")
@@ -461,28 +475,39 @@ class SweepEngine:
         Possible states and subsequent actions:
         - SCHEDULED -> fund gas
         - GAS_FUNDED -> prepare and sign sweep tx
-        - SWEEP_PREPARED -> broadcast sweep tx and wait until it is final
+        - SWEEP_PREPARED -> send sweep tx until mined, then wait until it is final
         - SWEPT -> credit assets to the user in Privana
+
+        Everything up to the mined sweep tx holds the address lock; a sweep already mined
+        is finished without it. Returns at once if another task drives this deposit.
         """
-
-        # Find deposit_address and chain_id for given deposit_id.
         deposit_id_hex = _to_hex(deposit_id)
-        record = self.get_record_by_deposit_id(deposit_id_hex)
-        if record is None:
+        # No await between the check and the add, so two callers can't both pass it.
+        if deposit_id_hex in self._driving:
             return
-
-        lock = self._get_address_lock(record.deposit_address, record.chain_id)
-        async with lock:
-            # Re-read under the lock: another driver may have changed it.
+        self._driving.add(deposit_id_hex)
+        try:
             record = self.get_record_by_deposit_id(deposit_id_hex)
             if record is None:
                 return
             try:
-                if record.state in (SweepState.SCHEDULED, SweepState.GAS_FUNDED):
-                    await self._fund_gas_and_sign_sweep(record)
-                if record.state == SweepState.SWEEP_PREPARED:
-                    if not await self._broadcast_sweep(record):
-                        return
+                if not await self._is_mined(record):
+                    async with self._get_address_lock(record.deposit_address, record.chain_id):
+                        # Re-read under the lock: the record may have changed while waiting.
+                        record = self.get_record_by_deposit_id(deposit_id_hex)
+                        if record is None:
+                            return
+                        signed_now = record.state in (SweepState.SCHEDULED, SweepState.GAS_FUNDED)
+                        if signed_now:
+                            await self._fund_gas_and_sign_sweep(record)
+                        if record.state is SweepState.SWEEP_PREPARED and not await self._send_sweep(
+                            record, resend=not signed_now
+                        ):
+                            return
+                if record.state is SweepState.SWEEP_PREPARED and not await self._wait_until_final(
+                    record
+                ):
+                    return
 
                 try:
                     await self._idempotent_credit(
@@ -516,6 +541,38 @@ class SweepEngine:
                     "Sweep failed for %s on chain %d", record.deposit_address, record.chain_id
                 )
                 raise
+        finally:
+            self._driving.discard(deposit_id_hex)
+
+    async def _is_mined(self, record: SweepRecord) -> bool:
+        """Whether the record's sweep tx is on-chain, so finishing it needs no address lock.
+
+        The node decides, not ``sweep_block_number``: a sweep reorged out goes through the
+        locked resend again. An RPC error reads as not mined: taking the lock is slower,
+        never unsafe.
+        """
+        if record.state is SweepState.SWEPT:
+            return True
+        if record.state is not SweepState.SWEEP_PREPARED:
+            return False
+        try:
+            w3 = self._get_web3(record.chain_id)
+            return await self._get_receipt(w3, record.sweep_tx_hash) is not None
+        except Exception as exc:
+            logger.warning(
+                "Can't tell if sweep tx %s on chain %d is mined: %s",
+                record.sweep_tx_hash,
+                record.chain_id,
+                redact_urls(exc) or type(exc).__name__,
+            )
+            return False
+
+    async def _get_receipt(self, w3: AsyncWeb3, tx_hash):
+        """The tx receipt, or None while the node knows of no mined tx with this hash."""
+        try:
+            return await w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return None
 
     async def _fund_gas_and_sign_sweep(self, record: SweepRecord) -> None:
         """Fund the gas budget once per claim, then sign the sweep and save it as SWEEP_PREPARED."""
@@ -574,7 +631,7 @@ class SweepEngine:
         # now: the whole balance, native leaving the gas budget behind to pay the fee.
         # Don't sign a sweep, if current gas price exceeds the gas_amount we paid for.
         # A later pass signs again at the then-current gas price.
-        amount = await self._get_balance(w3, record.token_address, deposit_address)
+        nonce, amount = await self._read_nonce_and_balance(w3, record)
         if is_native:
             amount -= gas_amount
         if amount <= 0:
@@ -589,8 +646,6 @@ class SweepEngine:
                 f"Sweep fee {sweep_fee} wei at gas price {gas_price} exceeds the gas budget "
                 f"{gas_amount} wei on chain {chain_id}; will retry"
             )
-
-        nonce = await w3.eth.get_transaction_count(deposit_address)
 
         if is_native:
             signed_tx = await self._accounting.generate_sweep_native(
@@ -621,42 +676,92 @@ class SweepEngine:
         record.state = SweepState.SWEEP_PREPARED
         self._save_record(record)
 
-    async def _broadcast_sweep(self, record: SweepRecord) -> bool:
-        """Broadcast the saved sweep tx if the node does not know it, wait until it is final.
+    async def _read_nonce_and_balance(self, w3: AsyncWeb3, record: SweepRecord) -> tuple[int, int]:
+        """The deposit address nonce and the balance to sweep, read between two equal nonces.
 
-        Resending the same signed tx keeps its hash, amount and nonce, so it cannot collide
-        with another sweep, and a node that already has it just says so. Re-signing could
-        credit nothing if the first tx mines after all. Returns False when another tx used
-        the nonce, or when it was mined but reverted; either way it can never move funds,
+        A sweep of this address that timed out earlier can mine between the reads; signing
+        its successor nonce with the balance from before its fee would fail and never go
+        stale. Reads at "latest", not at a pinned block a load-balanced node may lack.
+        """
+        address = record.deposit_address
+        nonce = await w3.eth.get_transaction_count(address)
+        for _ in range(SWEEP_NONCE_READ_TRIES):
+            balance = await self._get_balance(w3, record.token_address, address)
+            nonce_after = await w3.eth.get_transaction_count(address)
+            if nonce_after == nonce:
+                return nonce, balance
+            nonce = max(nonce, nonce_after)  # a lagging node can't take the nonce back
+        raise ValueError(
+            f"Nonce of {address} on chain {record.chain_id} kept moving while reading its "
+            f"balance; will retry"
+        )
+
+    async def _send_sweep(self, record: SweepRecord, *, resend: bool) -> bool:
+        """Broadcast the saved sweep tx if the node does not know it, wait until it is mined.
+
+        Runs under the address lock. Resending the same signed tx keeps its hash, amount and
+        nonce, so it cannot collide with another sweep, and a node that already has it just
+        says so. Re-signing could credit nothing if the first tx mines after all. Returns
+        False when another tx used the nonce and is final: the sweep can never move funds,
         and the record was deleted.
+
+        ``resend`` means the tx was signed by an earlier pass. If the address nonce is not
+        its nonce (a gap below it, or the nonce taken and not final yet), the tx cannot be
+        mined now: it is broadcast and this raises instead of holding the lock through the
+        receipt wait on every recovery pass. A tx signed in this pass skips the check: its
+        nonce was just read, and a lagging node would only delay a healthy sweep.
+
+        Persists nothing: whether the tx reverted is decided once it is final. Not mined
+        within the receipt wait → TimeoutError; the next pass sends it again.
         """
         w3 = self._get_web3(record.chain_id)
-        try:
-            await w3.eth.get_transaction_receipt(record.sweep_tx_hash)
-        except TransactionNotFound:
-            # Check if the sweep nonce is stale and can never be mined.
-            latest = (await w3.eth.get_block("latest"))["number"]
-            nonce = await w3.eth.get_transaction_count(
-                record.deposit_address, latest - get_finality_depth(record.chain_id)
-            )
-            if record.sweep_nonce < nonce:
-                logger.error(
-                    "Stale nonce for sweep tx %s on %s, chain %d - deleting the record",
-                    record.sweep_tx_hash,
-                    record.deposit_address,
-                    record.chain_id,
-                )
-                self._delete_record(record.deposit_id_hex)
-                return False
-            try:
-                self._recheck_served(record.chain_id)
-                await w3.eth.send_raw_transaction(bytes.fromhex(record.sweep_tx.removeprefix("0x")))
-                logger.info(
-                    "Sweep broadcast: chain=%d tx=%s", record.chain_id, record.sweep_tx_hash
-                )
-            except Exception as exc:
-                logger.warning("Sweep tx %s not accepted: %s", record.sweep_tx_hash, exc)
+        if await self._get_receipt(w3, record.sweep_tx_hash) is not None:
+            return True
 
+        # Check if the sweep nonce is stale and can never be mined.
+        latest = (await w3.eth.get_block("latest"))["number"]
+        final_nonce = await w3.eth.get_transaction_count(
+            record.deposit_address, latest - get_finality_depth(record.chain_id)
+        )
+        if record.sweep_nonce < final_nonce:
+            logger.error(
+                "Stale nonce for sweep tx %s on %s, chain %d - deleting the record",
+                record.sweep_tx_hash,
+                record.deposit_address,
+                record.chain_id,
+            )
+            self._delete_record(record.deposit_id_hex)
+            return False
+        next_nonce = (
+            await w3.eth.get_transaction_count(record.deposit_address)
+            if resend
+            else record.sweep_nonce
+        )
+
+        try:
+            self._recheck_served(record.chain_id)
+            await w3.eth.send_raw_transaction(bytes.fromhex(record.sweep_tx.removeprefix("0x")))
+            logger.info("Sweep broadcast: chain=%d tx=%s", record.chain_id, record.sweep_tx_hash)
+        except Exception as exc:
+            logger.warning("Sweep tx %s not accepted: %s", record.sweep_tx_hash, exc)
+
+        if next_nonce != record.sweep_nonce:
+            if await self._get_receipt(w3, record.sweep_tx_hash) is not None:
+                return True  # mined between the receipt and the nonce read
+            raise ValueError(
+                f"Sweep tx {record.sweep_tx_hash} has nonce {record.sweep_nonce} but "
+                f"{record.deposit_address} is at nonce {next_nonce} on chain "
+                f"{record.chain_id}; will retry"
+            )
+        await self._wait_for_receipt(w3, record.sweep_tx_hash)
+        return True
+
+    async def _wait_until_final(self, record: SweepRecord) -> bool:
+        """Wait until the mined sweep tx is final and save the record as SWEPT; no lock.
+
+        Returns False when the final tx reverted: it moved nothing, and the record was deleted.
+        """
+        w3 = self._get_web3(record.chain_id)
         receipt = await self._wait_for_final_receipt(w3, record)
         if receipt["status"] != 1:
             # A final reverted sweep moved nothing, but it used up the signed tx and its
@@ -759,14 +864,9 @@ class SweepEngine:
     async def resume_incomplete_sweeps(self) -> None:
         """One recovery pass: drive every unfinished record from its saved state.
 
-        A locked address belongs to a live sweep and is skipped.
+        sweep() returns at once for a record another task is driving.
         """
-        records = [
-            r
-            for r in self.load_incomplete_sweeps()
-            if not self._get_address_lock(r.deposit_address, r.chain_id).locked()
-        ]
-        await asyncio.gather(*(self._resume(r) for r in records))
+        await asyncio.gather(*(self._resume(r) for r in self.load_incomplete_sweeps()))
 
     async def _resume(self, record: SweepRecord) -> None:
         try:
